@@ -36,6 +36,7 @@ class ZModemMiddleware extends SessionMiddleware {
                 if ((await this.platform.showMessageBox({
                     type: 'warning',
                     message: this.translate.instant('Accept a ZMODEM session?'),
+                    detail: this.translate.instant('If you have not requested it, it could be a sign of malicious activity.'),
                     buttons: [
                         this.translate.instant('Accept'),
                         this.translate.instant('Reject'),
