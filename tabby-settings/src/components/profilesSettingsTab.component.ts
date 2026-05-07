@@ -63,14 +63,15 @@ export class ProfilesSettingsTabComponent extends BaseComponent {
         if (!base) {
             let profiles = await this.profilesService.getProfiles()
             profiles = profiles.filter(x => !this.isProfileBlacklisted(x))
-            profiles.sort((a, b) => (a.weight ?? 0) - (b.weight ?? 0))
             base = await this.selector.show(
                 this.translate.instant('Select a base profile to use as a template'),
                 profiles.map(p => ({
                     icon: p.icon ?? undefined,
                     description: this.profilesService.getDescription(p) ?? undefined,
                     name: p.group ? `${this.profilesService.resolveProfileGroupName(p.group)} / ${p.name}` : p.name,
+                    group: p.isTemplate ? this.translate.instant('Template') : this.translate.instant('Duplicate an existing profile'),
                     result: p,
+                    weight: p.isTemplate ? 0 : 1,
                 })),
             ).catch(() => undefined)
             if (!base) {
