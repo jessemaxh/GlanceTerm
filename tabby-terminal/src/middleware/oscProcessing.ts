@@ -79,6 +79,8 @@ export class OSCProcessor extends SessionMiddleware {
                     const content = Buffer.from(oscParams[1], 'base64')
                     this.copyRequested.next(content.toString())
                 }
+            } else {
+                processedData.push(data.subarray(prefixIndex, foundSuffix[1] + foundSuffix[0].length))
             }
 
             // Move past this OSC sequence
