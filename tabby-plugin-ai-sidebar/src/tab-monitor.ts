@@ -190,7 +190,14 @@ export class TabMonitor implements OnDestroy {
     ): Promise<TabState | null> {
         const sess: any = (t.inner as any).session
         if (!sess || typeof sess.getChildProcesses !== 'function') {
-            return null // not a terminal tab (settings, plugin tabs, etc.)
+            // Restored terminal tabs that haven't been focused yet have no
+            // session: BaseTerminalTab.initializeSession() only fires from
+            // onFrontendReady(), which only runs once the tab is focused.
+            // Show them as a `no_ai` placeholder row so they aren't invisible
+            // after restart — the user can click to focus and bring them up.
+            // collectTerminalTabs() has already filtered out non-terminal
+            // tabs (settings, welcome) via a duck-type check on setSession.
+            return this.placeholderState(t)
         }
 
         // 1. Cache shell PID (only needed for display).
@@ -282,7 +289,12 @@ export class TabMonitor implements OnDestroy {
     /**
      * Pure decision function. Order matters:
      *
-     *   1. Recent bytes ⇒ working. Cheapest, most reliable.
+     *   1. Recent PTY bytes ⇒ working — UNLESS those bytes arrived right after
+     *      a keystroke. Terminal echo + AI TUI input-box redraws emit a PTY
+     *      byte burst within tens of ms of every keypress, so naive byte-
+     *      recency would flap status between working/idle as the user types.
+     *      When recent input and recent bytes line up within ECHO_WINDOW_MS,
+     *      treat the bytes as input echo, not AI activity.
      *   2. Permission UI on screen ⇒ needs_permission. We check this BEFORE
      *      the spinner regex because some tools show both (e.g. claude
      *      keeps "esc to interrupt" visible while the prompt sits below it
@@ -302,7 +314,13 @@ export class TabMonitor implements OnDestroy {
         screenTail: string
         prev: TabStatus | undefined
     }): TabStatus {
-        if (input.sinceByte < QUIESCENCE_MS) return 'working'
+        if (input.sinceByte < QUIESCENCE_MS) {
+            const ECHO_WINDOW_MS = 250
+            const echoOfTyping =
+                input.sinceInput < QUIESCENCE_MS &&
+                Math.abs(input.sinceInput - input.sinceByte) <= ECHO_WINDOW_MS
+            if (!echoOfTyping) return 'working'
+        }
 
         const fp = FINGERPRINTS[input.tool] ?? GENERIC_FINGERPRINT
         const tail = input.screenTail
@@ -338,6 +356,22 @@ export class TabMonitor implements OnDestroy {
         return w
     }
 
+    private placeholderState (
+        t: { outer: BaseTabComponent; inner: BaseTabComponent },
+    ): TabState {
+        return {
+            outerTab: t.outer,
+            innerTab: t.inner,
+            title: t.outer.customTitle || t.outer.title || '(tab)',
+            shellPid: null,
+            aiTool: null,
+            aiPid: null,
+            cwd: null,
+            status: 'no_ai',
+            lastActiveMs: null,
+        }
+    }
+
     private collectTerminalTabs (): Array<{ outer: BaseTabComponent; inner: BaseTabComponent }> {
         const out: Array<{ outer: BaseTabComponent; inner: BaseTabComponent }> = []
         for (const outer of this.app.tabs) {
@@ -347,9 +381,11 @@ export class TabMonitor implements OnDestroy {
                     continue // restored placeholder, no real terminal yet
                 }
                 for (const inner of leaves) {
-                    out.push({ outer, inner })
+                    if (isTerminalTab(inner)) {
+                        out.push({ outer, inner })
+                    }
                 }
-            } else {
+            } else if (isTerminalTab(outer)) {
                 out.push({ outer, inner: outer })
             }
         }
@@ -368,6 +404,19 @@ export class TabMonitor implements OnDestroy {
  */
 function isSplit (t: any): t is { getAllTabs(): BaseTabComponent[] } {
     return t && typeof t.getAllTabs === 'function'
+}
+
+/**
+ * Duck-typed terminal-tab detection. Same module-realm issue as isSplit
+ * blocks `instanceof BaseTerminalTabComponent`. setSession() is the cleanest
+ * shibboleth — it's defined on BaseTerminalTabComponent and absent on
+ * WelcomeTab / settings tabs / other non-terminal panels. Crucially, this
+ * check passes for restored terminal tabs whose session has NOT been
+ * initialized yet (they only initialize on first focus), so those tabs
+ * still appear in the sidebar after a restart.
+ */
+function isTerminalTab (t: any): boolean {
+    return t && typeof t.setSession === 'function'
 }
 
 /**

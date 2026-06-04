@@ -65,6 +65,7 @@ import { TabMonitor, TabState } from './tab-monitor'
                      [attr.title]="s.cwd || s.title"
                      role="button"
                      (click)="onSelect(s)">
+                    <div class="num" aria-hidden="true">{{ tabIndex(s) }}</div>
                     <div class="rail">
                         <span class="dot" [attr.data-status]="s.status" aria-hidden="true"></span>
                     </div>
@@ -127,7 +128,7 @@ import { TabMonitor, TabState } from './tab-monitor'
             background: var(--ht-surface-1);
             color: var(--ht-text);
             overflow: hidden;
-            font-size: 13px;
+            font-size: 15px;
             -webkit-font-smoothing: antialiased;
         }
 
@@ -215,15 +216,27 @@ import { TabMonitor, TabState } from './tab-monitor'
         .row {
             position: relative;
             display: grid;
-            grid-template-columns: 14px minmax(0, 1fr) auto;
+            grid-template-columns: 22px 14px minmax(0, 1fr) auto;
             align-items: center;
-            gap: 10px;
-            padding: 8px 10px 8px 8px;
-            border-radius: 8px;
+            gap: 11px;
+            padding: 11px 12px 11px 10px;
+            border-radius: 9px;
             cursor: pointer;
             transition: background-color 0.13s ease;
-            margin-bottom: 1px;
+            margin-bottom: 2px;
         }
+
+        /* ---- tab index (matches the numeric prefix on Tabby's top tab bar) ---- */
+        .num {
+            font-family: var(--ht-mono);
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--ht-text-faint);
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            line-height: 1;
+        }
+        .row.active .num { color: var(--ht-st-active); font-weight: 600; }
         .row:hover { background: var(--ht-surface-2); }
 
         .row[data-status="no_ai"] { opacity: 0.52; }
@@ -258,8 +271,8 @@ import { TabMonitor, TabState } from './tab-monitor'
             align-self: stretch;
         }
         .dot {
-            width: 9px;
-            height: 9px;
+            width: 11px;
+            height: 11px;
             border-radius: 99px;
             position: relative;
             display: block;
@@ -291,7 +304,7 @@ import { TabMonitor, TabState } from './tab-monitor'
             min-width: 0;
         }
         .ttl {
-            font-size: 13px;
+            font-size: 15px;
             font-weight: 500;
             color: var(--ht-text);
             overflow: hidden;
@@ -300,8 +313,8 @@ import { TabMonitor, TabState } from './tab-monitor'
             flex: 0 1 auto;
         }
         .attn {
-            width: 5px;
-            height: 5px;
+            width: 6px;
+            height: 6px;
             border-radius: 99px;
             background: var(--ht-st-perm);
             flex: none;
@@ -312,12 +325,12 @@ import { TabMonitor, TabState } from './tab-monitor'
         .line2 {
             display: flex;
             align-items: center;
-            gap: 6px;
-            margin-top: 2px;
+            gap: 7px;
+            margin-top: 4px;
             min-width: 0;
         }
         .status {
-            font-size: 11px;
+            font-size: 13px;
             font-weight: 500;
             white-space: nowrap;
             overflow: hidden;
@@ -331,7 +344,7 @@ import { TabMonitor, TabState } from './tab-monitor'
 
         .cwd {
             font-family: var(--ht-mono);
-            font-size: 10.5px;
+            font-size: 12px;
             color: var(--ht-text-faint);
             overflow: hidden;
             text-overflow: ellipsis;
@@ -351,18 +364,18 @@ import { TabMonitor, TabState } from './tab-monitor'
         }
         .age {
             font-family: var(--ht-mono);
-            font-size: 10px;
+            font-size: 12px;
             color: var(--ht-text-faint);
         }
 
         /* ---- tool tag ---- */
         .tag {
             font-family: var(--ht-mono);
-            font-size: 9px;
+            font-size: 11px;
             font-weight: 600;
             letter-spacing: 0.04em;
-            padding: 2px 5px;
-            border-radius: 4px;
+            padding: 3px 6px;
+            border-radius: 5px;
             line-height: 1;
             white-space: nowrap;
             flex: none;
@@ -459,6 +472,18 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     }
 
     trackByTab = (_: number, s: TabState): any => s.innerTab
+
+    /**
+     * 1-based position of the row's outer tab in Tabby's top tab bar — same
+     * number Tabby renders on the tab and binds to its switch hotkeys
+     * (Cmd/Ctrl+N). Split leaves share the outer tab's number; that matches
+     * the hotkey behavior (Cmd+3 selects the split, then focus the desired
+     * pane). Empty string if the outer tab isn't found (race during close).
+     */
+    tabIndex (s: TabState): string {
+        const i = this.app.tabs.indexOf(s.outerTab)
+        return i < 0 ? '' : String(i + 1)
+    }
 
     onSelect (s: TabState): void {
         this.app.selectTab(s.outerTab)
