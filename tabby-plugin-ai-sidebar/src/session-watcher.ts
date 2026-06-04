@@ -125,6 +125,19 @@ export class SessionWatcher {
         this.lastSampleBytes = this.byteCount
     }
 
+    /**
+     * Clear the sparkline ring buffer so a follow-up tool's history starts
+     * from scratch. Called by TabMonitor when it sees the same tab switch
+     * from running tool A directly to tool B (no `no_ai` step between, so
+     * the watcher is reused). Output byte timestamps are NOT reset — they
+     * still meaningfully say "the PTY produced bytes at time X."
+     */
+    resetHistory (): void {
+        this.byteHistory = []
+        this.lastSampleAt = 0
+        this.lastSampleBytes = this.byteCount
+    }
+
     snapshot (): WatcherSnapshot {
         return {
             lastByteAt: this.lastByteAt,

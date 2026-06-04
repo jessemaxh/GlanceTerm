@@ -38,53 +38,86 @@ const SPINNER_TAIL_LINES = 5
 export type TabStatus = 'working' | 'idle' | 'needs_permission' | 'no_ai'
 
 /**
- * AI CLI tools we recognise. Add more by extending AI_PATTERNS below and,
- * if their UI has a distinctive spinner / permission prompt, by adding a
- * `Fingerprint` entry in ai-fingerprints.ts.
+ * AI CLI tools we recognise in v0.2 — the six with verified install paths
+ * and stable enough UIs to fingerprint without flapping. Other tools we'd
+ * tried (antigravity, cursor-agent, crush, plandex, sweagent, amp, droid)
+ * are temporarily offline:
+ *
+ *   - antigravity: `av` is too generic — matched ffmpeg's old binary too.
+ *   - cursor-agent: not a real published CLI as of v0.2.
+ *   - crush/plandex/sweagent/amp/droid: untested install paths; risk of
+ *     either silently missing them or false-matching unrelated processes.
+ *
+ * Bringing one back means (1) verifying the binary name AND the npm/pip
+ * wrapper path, (2) adding both patterns to AI_PATTERNS, (3) optionally
+ * giving it a fingerprint in ai-fingerprints.ts.
  */
 export type AiTool =
     | 'claude'
     | 'codex'
     | 'gemini'
-    | 'antigravity'
-    | 'cursor'
     | 'opencode'
     | 'aider'
     | 'goose'
-    | 'crush'
-    | 'plandex'
-    | 'sweagent'
-    | 'amp'
-    | 'droid'
 
 /**
- * How we identify each AI CLI by its command line. We match the *real*
- * command line (read via `ps`) because Tabby's getChildProcesses().command
- * sometimes contains the tool's version string instead of the executable
- * name (e.g. "2.1.162" instead of "claude").
+ * How we identify each AI CLI from its real command line (read via `ps`,
+ * because Tabby's own getChildProcesses().command returns weird things like
+ * the tool's version string instead of its path).
  *
- * `\b...(\s|$)` catches the bare name at the end of a path
- * (e.g. `/Users/foo/.local/bin/claude`) and at the start of an argv
- * sequence (e.g. `aider --model gpt-4`).
- *
- * For 2-letter names like Google's `av` (Antigravity CLI) we use
- * `(?:^|\/)` instead of `\b` so we don't false-positive on `avconv`,
- * `avahi-daemon`, `avenv`, etc.
+ * Two regex flavours per tool:
+ *   1. **bare binary** — the path of a single-file install ends with the
+ *      tool's name. `\b...(\s|$)` anchors it.
+ *   2. **language-runtime wrapper** — npm-global / pip-installed builds
+ *      exec node/python with a path INTO the package directory. The bare
+ *      regex misses those: `node /usr/local/lib/.../claude-code/cli.js`
+ *      has `claude-code` mid-string, not at a word boundary that matches
+ *      `(\s|$)`. The second regex catches that shape.
  */
-const AI_PATTERNS: Array<{ tool: AiTool; regex: RegExp }> = [
-    { tool: 'claude',      regex: /\bclaude(\s|$)/ },
-    { tool: 'codex',       regex: /\bcodex(\s|$)/ },
-    { tool: 'gemini',      regex: /\bgemini(\s|$)/ },
-    { tool: 'antigravity', regex: /(?:^|\/)av(\s|$)/ },
-    { tool: 'cursor',      regex: /\bcursor-agent(\s|$)/ },
-    { tool: 'opencode',    regex: /\bopencode(\s|$)/ },
-    { tool: 'aider',       regex: /\baider(\s|$)/ },
-    { tool: 'goose',       regex: /\bgoose(\s|$)/ },
-    { tool: 'crush',       regex: /\bcrush(\s|$)/ },
-    { tool: 'plandex',     regex: /\bplandex(\s|$)/ },
-    { tool: 'sweagent',    regex: /\bsweagent(\s|$)/ },
-    { tool: 'amp',         regex: /\bamp(\s|$)/ },
-    { tool: 'droid',       regex: /\bdroid(\s|$)/ },
+const AI_PATTERNS: Array<{ tool: AiTool; regexes: RegExp[] }> = [
+    {
+        tool: 'claude',
+        regexes: [
+            /\bclaude(\s|$)/,
+            // npm: `node /usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js`
+            /\/(?:@anthropic-ai\/)?claude-code\/[^\s]+\.[mc]?js/,
+        ],
+    },
+    {
+        tool: 'codex',
+        regexes: [
+            /\bcodex(\s|$)/,
+            /\/codex(?:-cli)?\/[^\s]+\.[mc]?js/,
+        ],
+    },
+    {
+        tool: 'gemini',
+        regexes: [
+            /\bgemini(\s|$)/,
+            /\/(?:@google\/)?gemini(?:-cli)?\/[^\s]+\.[mc]?js/,
+        ],
+    },
+    {
+        tool: 'opencode',
+        regexes: [
+            /\bopencode(\s|$)/,
+            /\/opencode\/[^\s]+\.[mc]?js/,
+        ],
+    },
+    {
+        tool: 'aider',
+        regexes: [
+            /\baider(\s|$)/,
+            // pip-installed aider runs as `python /…/aider/main.py` or `python -m aider`.
+            /python[\d.]*\s+(?:-m\s+aider|.+\/aider\/(?:__main__|main)\.py)/,
+        ],
+    },
+    {
+        tool: 'goose',
+        regexes: [
+            /\bgoose(\s|$)/,
+        ],
+    },
 ]
 
 export interface TabState {
@@ -137,6 +170,13 @@ export class TabMonitor implements OnDestroy {
      * on a single ambiguous frame.
      */
     private lastStatus = new WeakMap<BaseTabComponent, TabStatus>()
+    /**
+     * Last detected aiTool per tab — tracked so we can reset SessionWatcher
+     * history when the user kills one AI in a tab and starts a different
+     * one in the same shell. Without this the sparkline carries the old
+     * tool's byte history into the new tool's row.
+     */
+    private lastTool = new WeakMap<BaseTabComponent, AiTool | null>()
 
     readonly states$: Observable<TabState[]> = this.subject.asObservable()
 
@@ -229,7 +269,7 @@ export class TabMonitor implements OnDestroy {
         let aiPid: number | null = null
         for (const c of children) {
             const real = realCmds.get(c.pid) ?? c.command
-            const match = AI_PATTERNS.find(p => p.regex.test(real))
+            const match = AI_PATTERNS.find(p => p.regexes.some(r => r.test(real)))
             if (match) {
                 aiTool = match.tool
                 aiPid = c.pid
@@ -246,6 +286,9 @@ export class TabMonitor implements OnDestroy {
         }
 
         // 5. State decision.
+        const prevTool = this.lastTool.get(t.inner)
+        this.lastTool.set(t.inner, aiTool)
+
         let status: TabStatus
         let lastActiveMs: number | null = null
         if (!aiTool) {
@@ -257,6 +300,11 @@ export class TabMonitor implements OnDestroy {
         } else {
             const watcher = this.ensureWatcher(t.inner)
             watcher.tryAttach() // idempotent — picks up frontend if just attached
+            // Tool changed in-place (X → Y, no `no_ai` step between)?
+            // Wipe the sparkline so the new tool starts with its own history.
+            if (prevTool !== undefined && prevTool !== null && prevTool !== aiTool) {
+                watcher.resetHistory()
+            }
             watcher.sample()    // push a bytes/sec sample into the sparkline ring buffer
             const snap = watcher.snapshot()
             const now = Date.now()

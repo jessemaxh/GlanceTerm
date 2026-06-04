@@ -28,6 +28,17 @@ export class AttentionNotifierService implements OnDestroy {
     private sub?: Subscription
     /** Skip the very first emission — every tab "transitions" into its first state. */
     private bootstrapped = false
+    /**
+     * Per-tab cooldown. AI tools occasionally redraw their permission UI
+     * (the prompt line gets cleared and redrawn during fancy menus), and
+     * that brief glitch reads to us as needs_permission → idle → needs_
+     * permission within ~1 second. Without a cooldown each oscillation
+     * fires (or replaces) a notification — at minimum a ding, at worst
+     * three. 8s is long enough to absorb the worst flap I've seen, short
+     * enough that a genuinely new prompt 10s after the first still notifies.
+     */
+    private lastFiredAt = new WeakMap<object, number>()
+    private readonly COOLDOWN_MS = 8_000
 
     constructor (
         private app: AppService,
@@ -76,6 +87,13 @@ export class AttentionNotifierService implements OnDestroy {
             typeof document !== 'undefined' &&
             document.hasFocus()
         if (isLookingHere) return
+
+        // Cooldown — see field doc on `lastFiredAt`.
+        const key = s.innerTab as unknown as object
+        const last = this.lastFiredAt.get(key) ?? 0
+        const now = Date.now()
+        if (now - last < this.COOLDOWN_MS) return
+        this.lastFiredAt.set(key, now)
 
         try {
             const n = new Notification('HiveTerm — agent needs you', {

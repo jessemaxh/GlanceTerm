@@ -84,10 +84,6 @@ export const FINGERPRINTS: Partial<Record<AiTool, Fingerprint>> = {
         spinner: [/esc to interrupt/i, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/],
         permission: [/\?\s*[\[\(]y(es)?[\/\\]n/i],
     },
-    crush: {
-        spinner: [/esc to interrupt/i, /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/],
-        permission: [/\?\s*[\[\(]y(es)?[\/\\]n/i],
-    },
     goose: {
         // /\b(thinking|working)\b/i matches model prose ("I'm working on
         // it") → permanent working pin. Same bug class as Claude's old

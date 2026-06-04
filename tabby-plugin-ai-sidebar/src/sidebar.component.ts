@@ -481,16 +481,9 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
         .tag[data-tool="claude"]      { color: #E879A6; background: rgba(232, 121, 166, 0.16); }
         .tag[data-tool="codex"]       { color: #5BC8E5; background: rgba(91, 200, 229, 0.16); }
         .tag[data-tool="gemini"]      { color: #6FA0F2; background: rgba(111, 160, 242, 0.16); }
-        .tag[data-tool="antigravity"] { color: #6B8AE8; background: rgba(107, 138, 232, 0.16); }
-        .tag[data-tool="cursor"]      { color: #C0C8D0; background: rgba(192, 200, 208, 0.16); }
         .tag[data-tool="opencode"]    { color: #B794F4; background: rgba(183, 148, 244, 0.16); }
         .tag[data-tool="aider"]       { color: #3FC9B0; background: rgba(63, 201, 176, 0.16); }
         .tag[data-tool="goose"]       { color: #8ED1A4; background: rgba(142, 209, 164, 0.16); }
-        .tag[data-tool="crush"]       { color: #FF79C6; background: rgba(255, 121, 198, 0.16); }
-        .tag[data-tool="plandex"]     { color: #D9A066; background: rgba(217, 160, 102, 0.16); }
-        .tag[data-tool="sweagent"]    { color: #9F7AEA; background: rgba(159, 122, 234, 0.16); }
-        .tag[data-tool="amp"]         { color: #F2D070; background: rgba(242, 208, 112, 0.16); }
-        .tag[data-tool="droid"]       { color: #4FD1C5; background: rgba(79, 209, 197, 0.16); }
 
         /* ---- footer (aggregate stats) ---- */
         .sb-footer {
@@ -687,19 +680,12 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     toolTag (tool: string | null): string {
         if (!tool) return ''
         const tags: Record<string, string> = {
-            claude: 'CLA',
-            codex: 'CDX',
-            gemini: 'GEM',
-            antigravity: 'ANT',
-            cursor: 'CUR',
+            claude:   'CLA',
+            codex:    'CDX',
+            gemini:   'GEM',
             opencode: 'OPC',
-            aider: 'AID',
-            goose: 'GSE',
-            crush: 'CRU',
-            plandex: 'PLD',
-            sweagent: 'SWA',
-            amp: 'AMP',
-            droid: 'DRD',
+            aider:    'AID',
+            goose:    'GSE',
         }
         return tags[tool] || tool.slice(0, 3).toUpperCase()
     }
