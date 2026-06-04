@@ -1,12 +1,12 @@
 ---
-appId: org.tabby
-productName: Tabby
+appId: dev.hiveterm.app
+productName: HiveTerm
 compression: normal
 npmRebuild: false
 protocols:
-  - name: Tabby URL
+  - name: HiveTerm URL
     schemes:
-      - tabby
+      - hiveterm
 files:
 - '**/*'
 - dist

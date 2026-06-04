@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/explicit-module-boundary-types */
-import { Component, Input, HostListener, HostBinding, ViewChildren, ViewChild } from '@angular/core'
+import { Component, Input, HostListener, HostBinding, ViewChildren, ViewChild, Inject, Optional } from '@angular/core'
 import { trigger, style, animate, transition, state } from '@angular/animations'
 import { NgbDropdown, NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import { CdkDragDrop, moveItemInArray } from '@angular/cdk/drag-drop'
@@ -17,6 +17,8 @@ import { SafeModeModalComponent } from './safeModeModal.component'
 import { TabBodyComponent } from './tabBody.component'
 import { SplitTabComponent } from './splitTab.component'
 import { AppService, Command, CommandLocation, FileTransfer, HostWindowService, PlatformService } from '../api'
+import { SidebarProvider, SidebarContribution } from '../api/sidebarProvider'
+import { SidebarService } from '../services/sidebar.service'
 
 function makeTabAnimation (dimension: string, size: number) {
     return [
@@ -76,6 +78,15 @@ export class AppRootComponent {
     updatesAvailable = false
     activeTransfers: FileTransfer[] = []
     private logger: Logger
+    /** All sidebar contributions discovered from SidebarProvider multi-providers. */
+    sidebars: SidebarContribution[] = []
+    /** Bumped whenever the sidebar service emits a change — triggers re-render. */
+    sidebarRevision = 0
+    /** Currently-dragged sidebar id (during resize), or null. */
+    private draggingSidebarId: string | null = null
+    private dragStartX = 0
+    private dragStartWidth = 0
+    private dragSide: 'left' | 'right' = 'left'
 
     constructor (
         private hotkeys: HotkeysService,
@@ -85,11 +96,24 @@ export class AppRootComponent {
         public hostApp: HostAppService,
         public config: ConfigService,
         public app: AppService,
+        public sidebarService: SidebarService,
         platform: PlatformService,
         log: LogService,
         ngbModal: NgbModal,
         _themes: ThemesService,
+        @Optional() @Inject(SidebarProvider) sidebarProviders: SidebarProvider[] | null,
     ) {
+        // Collect every sidebar contribution from every registered SidebarProvider.
+        this.sidebars = (sidebarProviders ?? [])
+            .flatMap(p => {
+                try { return p.provide() } catch { return [] }
+            })
+        // Seed the service with each contribution's defaults.
+        for (const s of this.sidebars) {
+            this.sidebarService.setVisible(s.id, s.defaultVisible !== false)
+            if (s.defaultWidth) this.sidebarService.setWidth(s.id, s.defaultWidth)
+        }
+        this.sidebarService.changes$.subscribe(n => { this.sidebarRevision = n })
         // document.querySelector('app-root')?.remove()
         this.logger = log.create('main')
         this.logger.info('v', platform.getAppVersion())
@@ -234,6 +258,57 @@ export class AppRootComponent {
 
     @HostBinding('class.vibrant') get isVibrant () {
         return this.config.store?.appearance.vibrancy
+    }
+
+    // ── Sidebar helpers (used by template) ──────────────────────────────────
+
+    get leftSidebars (): SidebarContribution[] {
+        // sidebarRevision is read so Angular recomputes when service emits.
+        void this.sidebarRevision
+        return this.sidebars.filter(s => (s.side ?? 'left') === 'left' && this.sidebarService.isVisible(s.id))
+    }
+
+    get rightSidebars (): SidebarContribution[] {
+        void this.sidebarRevision
+        return this.sidebars.filter(s => s.side === 'right' && this.sidebarService.isVisible(s.id))
+    }
+
+    sidebarWidth (s: SidebarContribution): number {
+        return this.sidebarService.getWidth(s.id, s.defaultWidth ?? 280)
+    }
+
+    /** trackBy for *ngFor — keeps the dynamic component from re-instantiating. */
+    sidebarTrackById = (_: number, s: SidebarContribution): string => s.id
+
+    onSidebarResizeStart (event: MouseEvent, s: SidebarContribution, side: 'left' | 'right'): void {
+        event.preventDefault()
+        this.draggingSidebarId = s.id
+        this.dragStartX = event.clientX
+        this.dragStartWidth = this.sidebarWidth(s)
+        this.dragSide = side
+        document.body.style.cursor = 'col-resize'
+    }
+
+    @HostListener('document:mousemove', ['$event'])
+    onMouseMove (event: MouseEvent): void {
+        if (!this.draggingSidebarId) return
+        const contrib = this.sidebars.find(s => s.id === this.draggingSidebarId)
+        if (!contrib) return
+        const dx = event.clientX - this.dragStartX
+        const signedDx = this.dragSide === 'left' ? dx : -dx
+        const next = Math.min(
+            contrib.maxWidth ?? 600,
+            Math.max(contrib.minWidth ?? 180, this.dragStartWidth + signedDx),
+        )
+        this.sidebarService.setWidth(this.draggingSidebarId, next)
+    }
+
+    @HostListener('document:mouseup')
+    onMouseUp (): void {
+        if (this.draggingSidebarId) {
+            this.draggingSidebarId = null
+            document.body.style.cursor = ''
+        }
     }
 
     private async getToolbarButtons (aboveZero: boolean): Promise<Command[]> {

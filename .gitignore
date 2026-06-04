@@ -37,3 +37,10 @@ sentry-symbols.js
 
 crowdin.yml
 .crowdin.env
+
+# HiveTerm additions
+tabby-plugin-ai-sidebar/node_modules/
+tabby-plugin-ai-sidebar/dist/
+tabby-plugin-ai-sidebar/package-lock.json
+*.log
+.DS_Store

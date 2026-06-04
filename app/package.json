@@ -1,11 +1,11 @@
 {
-  "name": "tabby",
-  "description": "A terminal for a modern age",
+  "name": "hiveterm-app",
+  "description": "HiveTerm — terminal with a sidebar for managing many AI coding agents at once. Built on Tabby.",
   "private": true,
-  "repository": "https://github.com/Eugeny/tabby",
+  "repository": "https://github.com/you/hiveterm",
   "author": {
-    "name": "Tabby Developers",
-    "email": "e@ajenti.org"
+    "name": "HiveTerm",
+    "email": "noreply@hiveterm.dev"
   },
   "main": "dist/main.js",
   "version": "1.0.0-alpha.1",

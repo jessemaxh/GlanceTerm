@@ -191,6 +191,57 @@ $tab-border-radius: 4px;
     }
 }
 
+// ── Sidebar slots ───────────────────────────────────────────────────────────
+// `.main-area` wraps the tab body and any contributed sidebars in a single
+// horizontal flex row, so sidebars stay visible across tab switches.
+.main-area {
+    flex: 1 1 0;
+    min-height: 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: row;
+
+    > .content {
+        flex: 1 1 0;
+        min-width: 0;
+    }
+}
+
+.sidebar-slot {
+    flex: 0 0 auto;
+    height: 100%;
+    overflow: hidden;
+    background: var(--theme-bg-more-2, #1c1f23);
+    position: relative;
+    display: flex;
+    flex-direction: column;
+
+    &.sidebar-left {
+        border-right: 1px solid var(--theme-bg-more, rgba(255,255,255,0.06));
+    }
+    &.sidebar-right {
+        border-left: 1px solid var(--theme-bg-more, rgba(255,255,255,0.06));
+    }
+}
+
+.sidebar-resize-handle {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    cursor: col-resize;
+    z-index: 10;
+    background: transparent;
+    transition: background 0.15s;
+
+    &.right { right: -2px; }
+    &.left  { left:  -2px; }
+
+    &:hover {
+        background: rgba(90, 160, 255, 0.4);
+    }
+}
+
 hotkey-hint {
     position: absolute;
     bottom: 0;
