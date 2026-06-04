@@ -1,20 +1,61 @@
 import { Injectable, OnDestroy } from '@angular/core'
 import { BehaviorSubject, Observable } from 'rxjs'
 import { execSync } from 'child_process'
-import * as fs from 'fs'
-import * as os from 'os'
-import * as path from 'path'
 
 import { AppService, BaseTabComponent } from 'tabby-core'
 
+import { SessionWatcher } from './session-watcher'
+import { FINGERPRINTS, GENERIC_FINGERPRINT } from './ai-fingerprints'
+
 const POLL_MS = 1000
-/** A claude is "working" if its transcript file was touched within this window. */
-const ACTIVE_WINDOW_MS = 2_000
+/**
+ * Bytes from the PTY within this window keep a tab marked "working".
+ * Tuned for claude/codex spinners, which tick at least every ~300ms while
+ * active (counter increments, frame rotation). 1.5s is comfortably above
+ * that, low enough that "stopped" feels instantaneous.
+ */
+const QUIESCENCE_MS = 1500
+/**
+ * A bell within this many ms biases ambiguous quiet periods toward
+ * "needs_permission" — most AI tools ring on permission prompts.
+ */
+const BELL_RECENT_MS = 30_000
+/**
+ * Hide a row briefly after focus to avoid the obvious "you're already
+ * looking at it" rotation. Currently unused but reserved for the UI layer.
+ */
+export const STATE_RETENTION_TICKS = 1
+/**
+ * How many rendered terminal rows from the bottom of the visible screen
+ * to scan for each kind of signal. Live UI lives at the bottom — these
+ * windows must be wide enough to cover the tallest legitimate widget
+ * (Claude's permission menu is ~6 lines) but narrow enough to exclude
+ * already-answered prompts and stale spinner frames sitting in scrollback.
+ */
+const PERMISSION_TAIL_LINES = 10
+const SPINNER_TAIL_LINES = 5
 
-export type TabStatus = 'working' | 'idle' | 'no_ai'
+export type TabStatus = 'working' | 'idle' | 'needs_permission' | 'no_ai'
 
-/** AI CLI tools we recognize. Add more by extending AI_PATTERNS below. */
-export type AiTool = 'claude' | 'codex' | 'opencode' | 'aider'
+/**
+ * AI CLI tools we recognise. Add more by extending AI_PATTERNS below and,
+ * if their UI has a distinctive spinner / permission prompt, by adding a
+ * `Fingerprint` entry in ai-fingerprints.ts.
+ */
+export type AiTool =
+    | 'claude'
+    | 'codex'
+    | 'gemini'
+    | 'antigravity'
+    | 'cursor'
+    | 'opencode'
+    | 'aider'
+    | 'goose'
+    | 'crush'
+    | 'plandex'
+    | 'sweagent'
+    | 'amp'
+    | 'droid'
 
 /**
  * How we identify each AI CLI by its command line. We match the *real*
@@ -22,15 +63,28 @@ export type AiTool = 'claude' | 'codex' | 'opencode' | 'aider'
  * sometimes contains the tool's version string instead of the executable
  * name (e.g. "2.1.162" instead of "claude").
  *
- * `\b...(\s|$)` lets us catch the bare name at the end of a path
+ * `\b...(\s|$)` catches the bare name at the end of a path
  * (e.g. `/Users/foo/.local/bin/claude`) and at the start of an argv
  * sequence (e.g. `aider --model gpt-4`).
+ *
+ * For 2-letter names like Google's `av` (Antigravity CLI) we use
+ * `(?:^|\/)` instead of `\b` so we don't false-positive on `avconv`,
+ * `avahi-daemon`, `avenv`, etc.
  */
 const AI_PATTERNS: Array<{ tool: AiTool; regex: RegExp }> = [
-    { tool: 'claude',   regex: /\bclaude(\s|$)/ },
-    { tool: 'codex',    regex: /\bcodex(\s|$)/ },
-    { tool: 'opencode', regex: /\bopencode(\s|$)/ },
-    { tool: 'aider',    regex: /\baider(\s|$)/ },
+    { tool: 'claude',      regex: /\bclaude(\s|$)/ },
+    { tool: 'codex',       regex: /\bcodex(\s|$)/ },
+    { tool: 'gemini',      regex: /\bgemini(\s|$)/ },
+    { tool: 'antigravity', regex: /(?:^|\/)av(\s|$)/ },
+    { tool: 'cursor',      regex: /\bcursor-agent(\s|$)/ },
+    { tool: 'opencode',    regex: /\bopencode(\s|$)/ },
+    { tool: 'aider',       regex: /\baider(\s|$)/ },
+    { tool: 'goose',       regex: /\bgoose(\s|$)/ },
+    { tool: 'crush',       regex: /\bcrush(\s|$)/ },
+    { tool: 'plandex',     regex: /\bplandex(\s|$)/ },
+    { tool: 'sweagent',    regex: /\bsweagent(\s|$)/ },
+    { tool: 'amp',         regex: /\bamp(\s|$)/ },
+    { tool: 'droid',       regex: /\bdroid(\s|$)/ },
 ]
 
 export interface TabState {
@@ -46,23 +100,24 @@ export interface TabState {
     aiTool: AiTool | null
     /** The descendant AI process pid, if there is one. */
     aiPid: number | null
-    /** Whichever heuristic determined activity, copied for debugging. */
+    /** Final state for the UI to render. */
     status: TabStatus
-    /** Best-effort cwd of the shell session (used to locate transcript dir). */
+    /** Best-effort cwd of the shell session. Display only. */
     cwd: string | null
-    /** Claude session UUID (= jsonl basename) if we found one. */
-    sessionId: string | null
-    /** ms since we last saw transcript activity, for "Xs ago" labels. */
+    /** ms since the AI last wrote to the PTY (null if never). */
     lastActiveMs: number | null
 }
 
 interface ChildProcessInfo { pid: number; ppid: number; command: string }
 
 /**
- * Polls Tabby tab state once per second to produce a TabState for every
- * terminal tab. Uses Tabby's own `session.getChildProcesses()` instead of
- * shelling out to `ps` — that's the same data path Tabby uses internally
- * and is consistent with what node-pty knows.
+ * Polls Tabby's tab list once per second and produces a TabState for every
+ * terminal tab. Activity detection is now entirely terminal-internal:
+ * a per-tab `SessionWatcher` listens to the PTY byte stream and the
+ * frontend's bell/input events. CPU sampling and Claude jsonl mtime probing
+ * (the previous heuristics) are gone — they were noisy across multiple
+ * tabs sharing a cwd and couldn't distinguish "waiting on permission"
+ * from "idle".
  */
 @Injectable({ providedIn: 'root' })
 export class TabMonitor implements OnDestroy {
@@ -71,8 +126,15 @@ export class TabMonitor implements OnDestroy {
     private busy = false
     /** Shell PID cache (getTruePID is async; resolve once per tab). */
     private shellPidCache = new WeakMap<BaseTabComponent, number>()
-    /** CPU-time samples for AI processes, used to detect "working" via delta. */
-    private cpuTimeCache = new Map<number, { cpuSec: number; sampledAt: number }>()
+    /** Per-tab terminal-internal listeners (output / bell / input). */
+    private watchers = new WeakMap<BaseTabComponent, SessionWatcher>()
+    /**
+     * Last status we returned for a tab — used purely as a fallback when
+     * the screen-tail parse is inconclusive (e.g. unknown AI tool, or a
+     * UI we don't yet have a fingerprint for). Keeps the row from flapping
+     * on a single ambiguous frame.
+     */
+    private lastStatus = new WeakMap<BaseTabComponent, TabStatus>()
 
     readonly states$: Observable<TabState[]> = this.subject.asObservable()
 
@@ -101,7 +163,6 @@ export class TabMonitor implements OnDestroy {
                 const results = await Promise.all(chunk.map(t => this.safeMakeState(t)))
                 for (const r of results) if (r) out.push(r)
             }
-            this.gcCpuCache(out)
             this.subject.next(out)
         } catch (e) {
             // eslint-disable-next-line no-console
@@ -175,22 +236,34 @@ export class TabMonitor implements OnDestroy {
             try { cwd = await sess.getWorkingDirectory() } catch { /* swallow */ }
         }
 
-        // 5. Activity probe — tool-specific.
-        let status: TabStatus = 'no_ai'
-        let sessionId: string | null = null
+        // 5. State decision.
+        let status: TabStatus
         let lastActiveMs: number | null = null
-        if (aiTool === 'claude') {
-            const probe = probeTranscriptActivity(cwd)
-            sessionId = probe.sessionId
-            lastActiveMs = probe.ageMs
-            status = probe.ageMs !== null && probe.ageMs < ACTIVE_WINDOW_MS
-                ? 'working'
-                : 'idle'
-        } else if (aiTool && aiPid !== null) {
-            // For non-claude tools, use CPU-time delta to distinguish working
-            // from idle. We sample `ps -o time=` once per poll and compare
-            // against the previous sample.
-            status = this.probeCpuActivity(aiPid)
+        if (!aiTool) {
+            status = 'no_ai'
+            // Clean up watcher if we previously had one for this tab.
+            const stale = this.watchers.get(t.inner)
+            if (stale) { stale.dispose(); this.watchers.delete(t.inner) }
+            this.lastStatus.delete(t.inner)
+        } else {
+            const watcher = this.ensureWatcher(t.inner)
+            watcher.tryAttach() // idempotent — picks up frontend if just attached
+            const snap = watcher.snapshot()
+            const now = Date.now()
+            const sinceByte = snap.lastByteAt ? now - snap.lastByteAt : Infinity
+            const sinceBell = snap.lastBellAt ? now - snap.lastBellAt : Infinity
+            const sinceInput = snap.lastInputAt ? now - snap.lastInputAt : Infinity
+            lastActiveMs = snap.lastByteAt ? sinceByte : null
+
+            status = this.classify({
+                tool: aiTool,
+                sinceByte,
+                sinceBell,
+                sinceInput,
+                screenTail: watcher.readScreenTail(),
+                prev: this.lastStatus.get(t.inner),
+            })
+            this.lastStatus.set(t.inner, status)
         }
 
         return {
@@ -202,36 +275,67 @@ export class TabMonitor implements OnDestroy {
             aiPid,
             cwd,
             status,
-            sessionId,
             lastActiveMs,
         }
     }
 
-    private probeCpuActivity (pid: number): TabStatus {
-        const now = Date.now()
-        const cur = cpuSecondsOf(pid)
-        const prev = this.cpuTimeCache.get(pid)
-        this.cpuTimeCache.set(pid, { cpuSec: cur, sampledAt: now })
-        if (cur < 0 || !prev) {
-            return 'idle'
+    /**
+     * Pure decision function. Order matters:
+     *
+     *   1. Recent bytes ⇒ working. Cheapest, most reliable.
+     *   2. Permission UI on screen ⇒ needs_permission. We check this BEFORE
+     *      the spinner regex because some tools show both (e.g. claude
+     *      keeps "esc to interrupt" visible while the prompt sits below it
+     *      — but during permission the byte stream has been quiet for >1.5s,
+     *      so we're in this branch).
+     *   3. Spinner glyph on screen ⇒ working. Backstop for tools whose
+     *      spinner pauses between bytes longer than QUIESCENCE_MS.
+     *   4. Recent bell + no user input since ⇒ needs_permission. Covers
+     *      tools whose permission UI we don't have a regex for yet.
+     *   5. Default ⇒ idle.
+     */
+    private classify (input: {
+        tool: AiTool
+        sinceByte: number
+        sinceBell: number
+        sinceInput: number
+        screenTail: string
+        prev: TabStatus | undefined
+    }): TabStatus {
+        if (input.sinceByte < QUIESCENCE_MS) return 'working'
+
+        const fp = FINGERPRINTS[input.tool] ?? GENERIC_FINGERPRINT
+        const tail = input.screenTail
+        if (tail) {
+            // Live spinner/permission UI is ALWAYS at the bottom of the
+            // visible screen. Restricting these checks to the last few
+            // rendered lines prevents stale spinner glyphs and already-
+            // answered "[y/n]" prompts in scrollback from re-pinning the
+            // tab to the wrong status.
+            const lines = tail.split('\n')
+            const permissionWindow = lines.slice(-PERMISSION_TAIL_LINES).join('\n')
+            const spinnerWindow = lines.slice(-SPINNER_TAIL_LINES).join('\n')
+            if (fp.permission.some(r => r.test(permissionWindow))) return 'needs_permission'
+            if (fp.spinner.some(r => r.test(spinnerWindow))) return 'working'
         }
-        const wallElapsedMs = now - prev.sampledAt
-        const cpuDelta = cur - prev.cpuSec
-        // If the process burned >2% of wall time in CPU during this window,
-        // treat as working. Threshold tuned by hand for `aider` / `codex`.
-        return cpuDelta * 1000 / Math.max(wallElapsedMs, 1) > 0.02
-            ? 'working'
-            : 'idle'
+
+        // Bell biases ambiguous quiet → user attention. Only honour the bell
+        // if the user hasn't typed since it rang (otherwise they've already
+        // responded to whatever wanted their attention).
+        if (input.sinceBell < BELL_RECENT_MS && input.sinceInput > input.sinceBell) {
+            return 'needs_permission'
+        }
+
+        return 'idle'
     }
 
-    private gcCpuCache (states: TabState[]): void {
-        const alive = new Set<number>()
-        for (const s of states) {
-            if (s.aiPid !== null) alive.add(s.aiPid)
+    private ensureWatcher (inner: BaseTabComponent): SessionWatcher {
+        let w = this.watchers.get(inner)
+        if (!w) {
+            w = new SessionWatcher(inner)
+            this.watchers.set(inner, w)
         }
-        for (const pid of this.cpuTimeCache.keys()) {
-            if (!alive.has(pid)) this.cpuTimeCache.delete(pid)
-        }
+        return w
     }
 
     private collectTerminalTabs (): Array<{ outer: BaseTabComponent; inner: BaseTabComponent }> {
@@ -285,71 +389,4 @@ function realCommandsFor (pids: number[]): Map<number, string> {
         }
     } catch { /* swallow */ }
     return out
-}
-
-/**
- * Cumulative CPU seconds consumed by the given pid. Format from `ps -o time=`:
- * `MM:SS.HH` (or `HH:MM:SS` for processes that have used > 60min CPU).
- * Returns -1 on lookup failure.
- */
-function cpuSecondsOf (pid: number): number {
-    try {
-        const out = execSync(`ps -p ${pid} -o time=`, {
-            encoding: 'utf8',
-            timeout: 300,
-        }).trim()
-        return parsePsTime(out)
-    } catch {
-        return -1
-    }
-}
-
-function parsePsTime (s: string): number {
-    // Accept formats:  "MM:SS.HH" | "HH:MM:SS.HH" | "D-HH:MM:SS"
-    let days = 0
-    if (s.includes('-')) {
-        const [d, rest] = s.split('-', 2)
-        days = parseInt(d, 10) || 0
-        s = rest
-    }
-    const parts = s.split(':')
-    if (parts.length === 2) {
-        // MM:SS(.HH)
-        return parseInt(parts[0], 10) * 60 + parseFloat(parts[1])
-    }
-    if (parts.length === 3) {
-        return days * 86400 + parseInt(parts[0], 10) * 3600
-            + parseInt(parts[1], 10) * 60 + parseFloat(parts[2])
-    }
-    return -1
-}
-
-/**
- * Find the most recently modified `.jsonl` under the Claude projects dir
- * matching this cwd. Returns its age (ms) and the session id.
- *
- * Claude encodes cwd as `/Users/foo/bar` → `-Users-foo-bar`.
- */
-function probeTranscriptActivity (
-    cwd: string | null,
-): { ageMs: number | null; sessionId: string | null } {
-    if (!cwd) return { ageMs: null, sessionId: null }
-    const encoded = cwd.replace(/\//g, '-')
-    const dir = path.join(os.homedir(), '.claude', 'projects', encoded)
-    let bestAgeMs: number | null = null
-    let bestSession: string | null = null
-    try {
-        for (const f of fs.readdirSync(dir)) {
-            if (!f.endsWith('.jsonl')) continue
-            try {
-                const stat = fs.statSync(path.join(dir, f))
-                const age = Date.now() - stat.mtimeMs
-                if (bestAgeMs === null || age < bestAgeMs) {
-                    bestAgeMs = age
-                    bestSession = f.replace(/\.jsonl$/, '')
-                }
-            } catch { /* skip */ }
-        }
-    } catch { /* dir missing — no transcripts for this cwd */ }
-    return { ageMs: bestAgeMs, sessionId: bestSession }
 }
