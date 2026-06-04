@@ -1,25 +1,36 @@
 #!/usr/bin/env bash
-# Launch the forked Tabby with our plugin preloaded.
-# Quits any running Tabby first — they share a single-instance lock.
-# Adds --remote-debugging-port so we can self-verify via CDP as before.
+# Launch HiveTerm in dev mode with the bundled AI sidebar plugin preloaded.
+#
+# Uses a dedicated user-data dir under /tmp so the dev session does NOT
+# share preferences / plugins / single-instance lock with a brew-installed
+# Tabby. You can run both side by side.
+#
+# Remote-debugging port stays on 9222 for CDP-driven self-testing.
 
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FORK="$ROOT/tabby-fork"
+FORK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN="$FORK/tabby-plugin-ai-sidebar"
+USER_DATA="$HOME/Library/Application Support/HiveTerm-dev"
 
-# Build the plugin (cheap, fast).
+# Rebuild the plugin (fast, idempotent).
 echo "→ building plugin…"
 (cd "$PLUGIN" && npm run build) >/dev/null
 
-# Ensure no other Tabby is hogging the single-instance lock or the debug port.
-# We're cautious here: only the GUI Tabby (the brewed Tabby.app) and our fork
-# Electron. We do NOT pkill -f claude (see memory).
-osascript -e 'quit app "Tabby"' 2>/dev/null || true
-sleep 1
+# We do NOT touch brewed Tabby — separate user-data-dir means independent locks.
+# But if a previous HiveTerm-dev Electron is still alive, quit it.
+if pgrep -f "user-data-dir=$USER_DATA" >/dev/null 2>&1; then
+    echo "→ stopping previous HiveTerm-dev instance…"
+    pkill -f "user-data-dir=$USER_DATA" || true
+    sleep 1
+fi
 
-echo "→ launching fork Tabby with our plugin…"
+mkdir -p "$USER_DATA"
+
+echo "→ launching HiveTerm (dev) — user-data-dir=$USER_DATA"
 cd "$FORK"
 TABBY_PLUGINS="$PLUGIN" \
 TABBY_DEV=1 \
-exec ./node_modules/.bin/electron app -d --remote-debugging-port=9222
+exec ./node_modules/.bin/electron app \
+    -d \
+    --remote-debugging-port=9222 \
+    --user-data-dir="$USER_DATA"
