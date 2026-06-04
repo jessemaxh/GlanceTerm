@@ -2,6 +2,8 @@
 import { NgModule, Injectable } from '@angular/core'
 import { CommonModule } from '@angular/common'
 import {
+    ConfigProvider,
+    HotkeyProvider,
     SidebarProvider,
     SidebarContribution,
     SidebarService,
@@ -10,6 +12,10 @@ import {
 } from 'tabby-core'
 
 import { AiSidebarComponent } from './sidebar.component'
+import { AiSidebarConfigProvider } from './ai-config-provider'
+import { AiSidebarHotkeyProvider } from './ai-hotkey-provider'
+import { AttentionJumperService } from './attention-jumper.service'
+import { AttentionNotifierService } from './attention-notifier.service'
 import { TabMonitor } from './tab-monitor'
 
 const ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
@@ -55,12 +61,17 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
     declarations: [AiSidebarComponent],
     providers: [
         TabMonitor,
-        { provide: SidebarProvider, useClass: AiSidebarContribProvider, multi: true },
+        AttentionJumperService,
+        AttentionNotifierService,
+        { provide: SidebarProvider,       useClass: AiSidebarContribProvider,      multi: true },
         { provide: ToolbarButtonProvider, useClass: ToggleAiSidebarButtonProvider, multi: true },
+        { provide: HotkeyProvider,        useClass: AiSidebarHotkeyProvider,       multi: true },
+        { provide: ConfigProvider,        useClass: AiSidebarConfigProvider,       multi: true },
     ],
 })
 export default class AiSidebarModule {
-    constructor () {
+    /** Eagerly inject the jumper + notifier services so they subscribe at startup. */
+    constructor (_j: AttentionJumperService, _n: AttentionNotifierService) {
         // eslint-disable-next-line no-console
         console.log('[ai-sidebar] plugin loaded')
     }

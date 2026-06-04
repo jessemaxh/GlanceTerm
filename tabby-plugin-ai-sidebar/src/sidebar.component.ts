@@ -6,6 +6,8 @@ import { AppService } from 'tabby-core'
 
 import { TabMonitor, TabState } from './tab-monitor'
 
+type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
+
 /**
  * The actual sidebar content. NOT a BaseTabComponent — this is a plain
  * Angular component that the host (Tabby's appRoot) instantiates inside a
@@ -25,10 +27,23 @@ import { TabMonitor, TabState } from './tab-monitor'
         <div class="sb">
             <div class="sb-header">
                 <span class="h-title">AI Tabs</span>
-                <span class="h-badge" *ngIf="visibleStates.length > 0">{{ visibleStates.length }}</span>
+                <span class="h-badge" *ngIf="states.length > 0">{{ states.length }}</span>
             </div>
 
-            <div *ngIf="visibleStates.length === 0" class="sb-empty">
+            <div class="sb-filters" *ngIf="states.length > 0">
+                <button type="button"
+                        *ngFor="let f of FILTERS"
+                        class="pill"
+                        [class.active]="filterMode === f.id"
+                        [attr.data-id]="f.id"
+                        [attr.aria-pressed]="filterMode === f.id"
+                        (click)="setFilter(f.id)">
+                    <span class="lbl">{{ f.label }}</span>
+                    <span class="c">{{ countFor(f.id) }}</span>
+                </button>
+            </div>
+
+            <div *ngIf="states.length === 0" class="sb-empty">
                 <svg class="comb" width="78" height="74" viewBox="0 0 60 64" fill="none" aria-hidden="true">
                     <polygon points="39.5,3.5 39.5,14.5 30,20 20.5,14.5 20.5,3.5 30,-2"
                              stroke="var(--ht-text-faint)" stroke-width="1.3" fill="none"
@@ -54,6 +69,11 @@ import { TabMonitor, TabState } from './tab-monitor'
                 </svg>
                 <div class="et">The hive is empty</div>
                 <div class="es">No AI agents running yet. Open a shell and start one to see it light up here.</div>
+            </div>
+
+            <div *ngIf="states.length > 0 && visibleStates.length === 0" class="sb-empty filtered">
+                <div class="et">No {{ filterLabel() }}</div>
+                <div class="es">Tap "All" to see every tab.</div>
             </div>
 
             <div *ngIf="visibleStates.length > 0" class="sb-list">
@@ -85,6 +105,14 @@ import { TabMonitor, TabState } from './tab-monitor'
                     </div>
                     <div class="meta">
                         <span class="age" *ngIf="s.status !== 'no_ai' && s.lastActiveMs !== null">{{ ageStr(s.lastActiveMs) }}</span>
+                        <svg *ngIf="hasSpark(s)"
+                             class="spark"
+                             [attr.data-status]="s.status"
+                             viewBox="0 0 52 14"
+                             preserveAspectRatio="none"
+                             aria-hidden="true">
+                            <polyline [attr.points]="sparkPoints(s)" />
+                        </svg>
                     </div>
                 </div>
             </div>
@@ -180,6 +208,11 @@ import { TabMonitor, TabState } from './tab-monitor'
             padding: 30px 24px;
             text-align: center;
         }
+        .sb-empty.filtered {
+            flex: 0 0 auto;
+            padding: 28px 18px;
+            gap: 6px;
+        }
         .sb-empty .comb { opacity: 0.8; }
         .sb-empty .et {
             font-size: 13px;
@@ -192,6 +225,53 @@ import { TabMonitor, TabState } from './tab-monitor'
             line-height: 1.5;
             max-width: 190px;
         }
+
+        /* ---- filter pills (v0.2-2) ---- */
+        .sb-filters {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            padding: 0 12px 10px;
+        }
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border-radius: 99px;
+            border: 1px solid var(--ht-border);
+            background: transparent;
+            color: var(--ht-text-dim);
+            font: inherit;
+            font-size: 11.5px;
+            font-weight: 500;
+            line-height: 1.2;
+            cursor: pointer;
+            transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+        }
+        .pill:hover {
+            background: var(--ht-surface-2);
+            color: var(--ht-text);
+            border-color: rgba(255,255,255,0.14);
+        }
+        .pill.active {
+            background: var(--ht-honey-soft);
+            border-color: rgba(255, 170, 85, 0.55);
+            color: var(--ht-honey);
+        }
+        .pill[data-id="needs_permission"].active {
+            background: rgba(255, 159, 69, 0.18);
+            border-color: rgba(255, 159, 69, 0.6);
+            color: var(--ht-st-perm);
+        }
+        .pill .c {
+            font-family: var(--ht-mono);
+            font-size: 10px;
+            font-weight: 600;
+            opacity: 0.85;
+            font-variant-numeric: tabular-nums;
+        }
+        .pill.active .c { opacity: 1; }
 
         /* ---- list / row ---- */
         .sb-list {
@@ -368,6 +448,23 @@ import { TabMonitor, TabState } from './tab-monitor'
             color: var(--ht-text-faint);
         }
 
+        /* ---- sparkline (v0.2-4) ---- */
+        .spark {
+            width: 52px;
+            height: 14px;
+            display: block;
+            opacity: 0.85;
+        }
+        .spark polyline {
+            fill: none;
+            stroke-width: 1.2;
+            stroke-linejoin: round;
+            stroke-linecap: round;
+        }
+        .spark[data-status="working"] polyline          { stroke: var(--ht-st-working); }
+        .spark[data-status="idle"] polyline             { stroke: var(--ht-st-idle); }
+        .spark[data-status="needs_permission"] polyline { stroke: var(--ht-st-perm); }
+
         /* ---- tool tag ---- */
         .tag {
             font-family: var(--ht-mono);
@@ -432,6 +529,14 @@ import { TabMonitor, TabState } from './tab-monitor'
 })
 export class AiSidebarComponent implements OnInit, OnDestroy {
     states: TabState[] = []
+    filterMode: FilterId = 'all'
+    /** Pill definitions — order is render order, left → right. */
+    readonly FILTERS: ReadonlyArray<{ id: FilterId; label: string }> = [
+        { id: 'all',              label: 'All' },
+        { id: 'needs_permission', label: 'Needs You' },
+        { id: 'working',          label: 'Working' },
+        { id: 'idle',             label: 'Idle' },
+    ]
     private sub?: Subscription
     private home = os.homedir()
 
@@ -451,12 +556,56 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     }
 
     /**
-     * Tabs we actually render. Filters out:
-     *   - SplitTabComponents Tabby restored from disk with no leaf yet
-     *     (these have no session, no claude — pure UI noise).
+     * Tabs we render, sorted by attention priority so the rows the user is
+     * most likely to act on bubble to the top.
+     *
+     *   1. needs_permission — block-on-user, must act now
+     *   2. working          — actively producing output
+     *   3. idle             — AI running but waiting on you
+     *   4. no_ai            — plain shell, low signal
+     *
+     * Within a priority bucket we fall back to Tabby's own top-bar tab order.
+     * That's STABLE — using `lastActiveMs` as a tiebreaker would shuffle the
+     * list on every poll as the "working" rows tick, which reads as flicker.
      */
     get visibleStates (): TabState[] {
-        return this.states
+        const rank: Record<TabState['status'], number> = {
+            needs_permission: 0,
+            working:          1,
+            idle:             2,
+            no_ai:            3,
+        }
+        const tabIdx = (s: TabState): number => {
+            const i = this.app.tabs.indexOf(s.outerTab)
+            return i < 0 ? Number.MAX_SAFE_INTEGER : i
+        }
+        const filtered = this.filterMode === 'all'
+            ? this.states
+            : this.states.filter(s => s.status === this.filterMode)
+        return [...filtered].sort((a, b) => {
+            const dr = (rank[a.status] ?? 99) - (rank[b.status] ?? 99)
+            return dr !== 0 ? dr : tabIdx(a) - tabIdx(b)
+        })
+    }
+
+    /** Set or toggle the filter. Clicking the active pill resets to 'all'. */
+    setFilter (id: FilterId): void {
+        this.filterMode = this.filterMode === id && id !== 'all' ? 'all' : id
+    }
+
+    /** Pill counter — `All` counts every tab; the others count their bucket. */
+    countFor (id: FilterId): number {
+        if (id === 'all') return this.states.length
+        return this.states.filter(s => s.status === id).length
+    }
+
+    filterLabel (): string {
+        switch (this.filterMode) {
+            case 'needs_permission': return 'tabs need you right now'
+            case 'working':          return 'working tabs'
+            case 'idle':             return 'idle tabs'
+            default:                 return 'tabs'
+        }
     }
 
     get countWorking (): number {
@@ -553,6 +702,32 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
             droid: 'DRD',
         }
         return tags[tool] || tool.slice(0, 3).toUpperCase()
+    }
+
+    /** True when the row has a meaningful byte-rate history to plot. */
+    hasSpark (s: TabState): boolean {
+        return !!s.byteHistory && s.byteHistory.length >= 2
+    }
+
+    /**
+     * Build SVG polyline "x,y x,y …" points for the row's bytes/sec history.
+     * Viewbox is 52×14 (matches CSS). We rescale to the run's own max — every
+     * sparkline ends up readable regardless of whether the tab fires 50 B/s
+     * or 50 KB/s, at the cost of cross-row magnitude comparison (which the
+     * status colour + dot already covers).
+     */
+    sparkPoints (s: TabState): string {
+        const h = s.byteHistory!
+        const max = Math.max(...h, 1)
+        const W = 52
+        const H = 14
+        const pad = 1
+        const n = h.length
+        return h.map((v, i) => {
+            const x = n === 1 ? W / 2 : (i / (n - 1)) * W
+            const y = H - pad - (v / max) * (H - pad * 2)
+            return `${x.toFixed(1)},${y.toFixed(1)}`
+        }).join(' ')
     }
 
     ageStr (ms: number | null): string {

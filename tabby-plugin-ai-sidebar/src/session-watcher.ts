@@ -21,6 +21,9 @@ import { BaseTabComponent } from 'tabby-core'
  * `frontend` attached yet (Tabby builds it asynchronously). We retry on the
  * next snapshot() call until everything is wired, then stop checking.
  */
+/** Sparkline window — 60 samples at 1 Hz = trailing 1 minute. */
+const HISTORY_SIZE = 60
+
 export class SessionWatcher {
     /** Wall-clock ms of the last byte chunk from the PTY. 0 = never. */
     private lastByteAt = 0
@@ -30,6 +33,11 @@ export class SessionWatcher {
     private lastInputAt = 0
     /** Total bytes received over this session (used as a freshness counter). */
     private byteCount = 0
+
+    /** Ring buffer of bytes-per-second samples for the v0.2 sparkline. */
+    private byteHistory: number[] = []
+    private lastSampleAt = 0
+    private lastSampleBytes = 0
 
     private subs: Subscription[] = []
     private outputAttached = false
@@ -94,12 +102,36 @@ export class SessionWatcher {
         return out.join('\n')
     }
 
+    /**
+     * Push one bytes-per-second sample into the ring buffer. Call once per
+     * TabMonitor tick (~1Hz). On the first call we just seed the baseline
+     * — no sample yet, since we don't know the previous delta.
+     */
+    sample (now: number = Date.now()): void {
+        if (this.lastSampleAt === 0) {
+            this.lastSampleAt = now
+            this.lastSampleBytes = this.byteCount
+            return
+        }
+        const dtMs = now - this.lastSampleAt
+        if (dtMs <= 0) return
+        const dBytes = Math.max(0, this.byteCount - this.lastSampleBytes)
+        const ratePerSec = dBytes * 1000 / dtMs
+        this.byteHistory.push(ratePerSec)
+        if (this.byteHistory.length > HISTORY_SIZE) {
+            this.byteHistory.shift()
+        }
+        this.lastSampleAt = now
+        this.lastSampleBytes = this.byteCount
+    }
+
     snapshot (): WatcherSnapshot {
         return {
             lastByteAt: this.lastByteAt,
             lastBellAt: this.lastBellAt,
             lastInputAt: this.lastInputAt,
             byteCount: this.byteCount,
+            byteHistory: this.byteHistory.slice(),
         }
     }
 
@@ -116,4 +148,6 @@ export interface WatcherSnapshot {
     lastBellAt: number
     lastInputAt: number
     byteCount: number
+    /** Trailing bytes-per-second samples, oldest first. Up to 60 entries. */
+    byteHistory: number[]
 }

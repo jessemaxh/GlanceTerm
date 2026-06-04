@@ -106,6 +106,8 @@ export interface TabState {
     cwd: string | null
     /** ms since the AI last wrote to the PTY (null if never). */
     lastActiveMs: number | null
+    /** Trailing bytes-per-second samples for the sparkline. Undefined when no AI. */
+    byteHistory?: number[]
 }
 
 interface ChildProcessInfo { pid: number; ppid: number; command: string }
@@ -255,6 +257,7 @@ export class TabMonitor implements OnDestroy {
         } else {
             const watcher = this.ensureWatcher(t.inner)
             watcher.tryAttach() // idempotent — picks up frontend if just attached
+            watcher.sample()    // push a bytes/sec sample into the sparkline ring buffer
             const snap = watcher.snapshot()
             const now = Date.now()
             const sinceByte = snap.lastByteAt ? now - snap.lastByteAt : Infinity
@@ -271,6 +274,19 @@ export class TabMonitor implements OnDestroy {
                 prev: this.lastStatus.get(t.inner),
             })
             this.lastStatus.set(t.inner, status)
+
+            return {
+                outerTab: t.outer,
+                innerTab: t.inner,
+                title: t.outer.customTitle || t.outer.title || `(tab ${shellPid ?? '?'})`,
+                shellPid,
+                aiTool,
+                aiPid,
+                cwd,
+                status,
+                lastActiveMs,
+                byteHistory: snap.byteHistory,
+            }
         }
 
         return {
