@@ -148,9 +148,27 @@ export class AttentionNotifierService implements OnDestroy {
         }
     }
 
+    /**
+     * True if a TabState still corresponds to a tab in app.tabs — either as
+     * a direct entry or as a leaf inside a SplitTabComponent. Used to drop
+     * deferred notifications for tabs the user has closed in the meantime.
+     */
+    private isStillLive (s: TabState): boolean {
+        return this.app.tabs.some(t =>
+            t === s.outerTab ||
+            (typeof (t as any).getAllTabs === 'function' &&
+             (t as any).getAllTabs().includes(s.innerTab)),
+        )
+    }
+
     private fire (s: TabState, kind: NotifyKind): void {
         if (typeof Notification === 'undefined') return
         if ((Notification as any).permission === 'denied') return
+
+        // Tab might have been closed between schedule() and fire() — the
+        // 3-second ready debounce is the longest window. Notifying about a
+        // dead tab is just misleading (click → selectTab no-op) so drop it.
+        if (!this.isStillLive(s)) return
 
         // Already looking at this tab — sidebar dot is enough, don't bother.
         const isLookingHere =

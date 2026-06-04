@@ -741,15 +741,21 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     }
 
     /**
-     * Compress `$HOME` to `~`. Used by displayCwd and copy-to-clipboard
-     * fallback. We don't currently use it elsewhere.
+     * Compress `$HOME` to `~`. Critically: only replace when the home path
+     * is followed by a path separator (or is the entire string), so that a
+     * sibling user's home — e.g. `/Users/foo-archive` when HOME is
+     * `/Users/foo` — does NOT get mangled to `~-archive`. Checks both `/`
+     * and `\` so this also stays correct if Tabby ever feeds us a
+     * backslash-separated cwd on Windows.
      */
     compressHome (p: string | null): string {
         if (!p) return ''
-        if (this.home && p.startsWith(this.home)) {
-            return '~' + p.slice(this.home.length)
-        }
-        return p
+        if (!this.home) return p
+        if (p === this.home) return '~'
+        if (!p.startsWith(this.home)) return p
+        const next = p[this.home.length]
+        if (next !== '/' && next !== '\\') return p
+        return '~' + p.slice(this.home.length)
     }
 
     /**
