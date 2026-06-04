@@ -2,7 +2,7 @@ import { Component, OnDestroy, OnInit } from '@angular/core'
 import { Subscription } from 'rxjs'
 import * as os from 'os'
 
-import { AppService } from 'tabby-core'
+import { AppService, MenuItemOptions, PlatformService } from 'tabby-core'
 
 import { TabMonitor, TabState } from './tab-monitor'
 
@@ -84,7 +84,8 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
                      [attr.aria-label]="ariaLabel(s)"
                      [attr.title]="s.cwd || s.title"
                      role="button"
-                     (click)="onSelect(s)">
+                     (click)="onSelect(s)"
+                     (contextmenu)="onContextMenu(s, $event)">
                     <div class="num" aria-hidden="true">{{ tabIndex(s) }}</div>
                     <div class="rail">
                         <span class="dot" [attr.data-status]="s.status" aria-hidden="true"></span>
@@ -97,10 +98,9 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
                         <div class="line2">
                             <span *ngIf="s.aiTool" class="tag" [attr.data-tool]="s.aiTool">{{ toolTag(s.aiTool) }}</span>
                             <span class="status" [attr.data-status]="s.status">{{ statusLabel(s) }}</span>
-                            <ng-container *ngIf="s.cwd && s.status !== 'needs_permission'">
-                                <span class="dotsep" aria-hidden="true">·</span>
-                                <span class="cwd">{{ compressHome(s.cwd) }}</span>
-                            </ng-container>
+                        </div>
+                        <div *ngIf="s.cwd && s.status !== 'needs_permission'" class="line3">
+                            <span class="cwd" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
                         </div>
                     </div>
                     <div class="meta">
@@ -413,25 +413,37 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             font-size: 13px;
             font-weight: 500;
             white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            flex: 0 1 auto;
+            flex: none;
         }
         .status[data-status="working"]          { color: var(--ht-st-working); }
         .status[data-status="idle"]             { color: var(--ht-st-ready); }
         .status[data-status="no_ai"]            { color: var(--ht-text-faint); }
         .status[data-status="needs_permission"] { color: var(--ht-st-perm); font-weight: 600; }
 
+        .line3 {
+            display: flex;
+            align-items: flex-start;
+            margin-top: 3px;
+            min-width: 0;
+        }
+        /* Up to 3 lines; long paths are pre-truncated with a middle '…' in JS
+           (displayCwd) so the END of the path — usually the most specific
+           directory — always stays visible. Hover the row to see the full
+           path via the [title] attribute. */
         .cwd {
             font-family: var(--ht-mono);
             font-size: 12px;
+            line-height: 1.35;
             color: var(--ht-text-faint);
+            display: -webkit-box;
+            -webkit-box-orient: vertical;
+            -webkit-line-clamp: 3;
             overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
+            overflow-wrap: anywhere;
+            word-break: break-all;
             min-width: 0;
+            flex: 1 1 auto;
         }
-        .dotsep { color: var(--ht-text-faint); opacity: 0.6; flex: none; }
 
         /* ---- meta column ---- */
         .meta {
@@ -536,6 +548,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     constructor (
         public app: AppService,
         public monitor: TabMonitor,
+        private platform: PlatformService,
     ) {}
 
     ngOnInit (): void {
@@ -727,11 +740,82 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         return `${Math.floor(h / 24)}d`
     }
 
+    /**
+     * Compress `$HOME` to `~`. Used by displayCwd and copy-to-clipboard
+     * fallback. We don't currently use it elsewhere.
+     */
     compressHome (p: string | null): string {
         if (!p) return ''
         if (this.home && p.startsWith(this.home)) {
             return '~' + p.slice(this.home.length)
         }
         return p
+    }
+
+    /**
+     * Render-ready cwd: `~`-compressed, and for very long paths, middle-
+     * truncated with a single `…` so the END (the most specific directory)
+     * always stays visible. CSS line-clamps to 3 lines; this threshold is
+     * a conservative upper bound for what fits — picked for the typical
+     * sidebar width (~300px) at 12px JetBrains-Mono-ish glyph width. The
+     * full path is always available via the row's [title] tooltip.
+     */
+    displayCwd (p: string | null): string {
+        const s = this.compressHome(p)
+        const MAX = 90
+        if (s.length <= MAX) return s
+        const ELLIPSIS = '…'
+        const keep = MAX - ELLIPSIS.length
+        // Bias toward keeping the END — the trailing directory is what tells
+        // the user where this shell actually IS.
+        const tail = Math.ceil(keep * 0.7)
+        const head = keep - tail
+        return s.slice(0, head) + ELLIPSIS + s.slice(s.length - tail)
+    }
+
+    /**
+     * Tab-row right-click menu. Mirrors the most useful subset of Tabby's
+     * own top-bar tab menu, scoped to what an AI-sidebar user typically
+     * wants on a row: rename, copy the path, jump to it in Finder, or
+     * spawn another shell at the same cwd.
+     */
+    async onContextMenu (s: TabState, ev: MouseEvent): Promise<void> {
+        ev.preventDefault()
+        ev.stopPropagation()
+        const cwd = s.cwd ?? null
+        const items: MenuItemOptions[] = [
+            {
+                label: 'Rename tab title…',
+                click: () => this.app.renameTab(s.outerTab),
+            },
+            {
+                label: 'Copy working directory',
+                enabled: !!cwd,
+                click: () => {
+                    if (cwd) {
+                        this.platform.setClipboard({ text: cwd })
+                    }
+                },
+            },
+            { type: 'separator' },
+            {
+                label: 'Reveal in Finder',
+                enabled: !!cwd,
+                click: () => {
+                    if (cwd) {
+                        try {
+                            this.platform.openPath(cwd)
+                        } catch { /* base PlatformService throws; safe to ignore */ }
+                    }
+                },
+            },
+            {
+                label: 'New tab in this directory',
+                click: () => {
+                    void this.app.duplicateTab(s.outerTab)
+                },
+            },
+        ]
+        this.platform.popupContextMenu(items, ev)
     }
 }
