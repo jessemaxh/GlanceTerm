@@ -1,5 +1,5 @@
 ---
-appId: dev.hiveterm.app
+appId: com.souplin.hiveterm
 productName: HiveTerm
 compression: normal
 npmRebuild: false
