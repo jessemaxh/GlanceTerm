@@ -35,7 +35,7 @@ extension point added to the core. The sidebar lives in a plugin.
 
 ```
 ai-terminal/
-├── tabby-fork/                 forked Tabby with the SidebarProvider extension
+├── glanceterm/                 forked Tabby with the SidebarProvider extension
 │   └── tabby-core/src/
 │       ├── api/sidebarProvider.ts        ← new extension point
 │       ├── services/sidebar.service.ts   ← visibility + width state
@@ -89,7 +89,7 @@ Prereqs: macOS, Node 22, [yarn](https://yarnpkg.com), [Homebrew](https://brew.sh
 
 ```bash
 # 1. fork — install + build (heavy first time)
-cd tabby-fork
+cd glanceterm
 yarn
 npm run build
 
