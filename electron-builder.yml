@@ -107,7 +107,8 @@ rpm:
   - '_build_id_links none'
   - '--replaces'
   - 'terminus-terminal'
-electronFuses:
-  runAsNode: false
-  enableNodeOptionsEnvironmentVariable: false
-  enableNodeCliInspectArguments: false
+# NOTE: electronFuses moved into scripts/build-macos.mjs `afterPack`. When
+# left here, electron-builder applies them AFTER our ad-hoc sign which
+# rewrites Electron Framework bytes and invalidates the outer signature.
+# Applying fuses first (then signing bottom-up) is the only ordering that
+# leaves a valid bundle.

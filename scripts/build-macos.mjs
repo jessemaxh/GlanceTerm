@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 /* eslint-disable @typescript-eslint/prefer-nullish-coalescing */
+import { flipFuses, FuseV1Options, FuseVersion } from '@electron/fuses'
 import { build as builder } from 'electron-builder'
 import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
@@ -39,12 +40,26 @@ builder({
         },
         forceCodeSigning: !!process.env.CSC_LINK,
         afterPack: async context => {
-            if (!adHocSign) return
             if (context.electronPlatformName !== 'darwin') return
             const appPath = path.join(
                 context.appOutDir,
                 `${context.packager.appInfo.productFilename}.app`,
             )
+            // 1. Flip Electron fuses FIRST (this rewrites bytes inside the
+            //    Electron Framework binary and would invalidate any prior
+            //    signature). electron-builder's own fuses step runs AFTER
+            //    afterPack, so we do it here ourselves and disable theirs.
+            //    flipFuses expects the .app path; it resolves the binary internally.
+            console.log(`  • flipping fuses ${appPath}`)
+            await flipFuses(appPath, {
+                version: FuseVersion.V1,
+                [FuseV1Options.RunAsNode]: false,
+                [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
+                [FuseV1Options.EnableNodeCliInspectArguments]: false,
+            })
+            // 2. Now sign bottom-up. Skip when CSC_LINK is set — electron-builder
+            //    handles that case with the real cert.
+            if (!adHocSign) return
             console.log(`  • ad-hoc signing (bottom-up) ${appPath}`)
             adHocSignBundle(appPath)
         },
