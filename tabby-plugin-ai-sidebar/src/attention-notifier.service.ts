@@ -9,27 +9,17 @@ import { UnreadService } from './unread.service'
 type NotifyKind = 'permission' | 'ready'
 
 /**
- * How long an idle status must stay stable before we treat it as "agent
- * actually finished a turn" and notify. Claude/codex routinely sit at
- * idle for 1-2 seconds BETWEEN tool calls within a single turn — bytes
- * pause, the spinner stops, the tab classifies as idle, then 800ms later
- * the next tool call fires and we're back to working. Notifying on every
- * one of those transient idles is unusable. 3000ms is comfortably above
- * the longest inter-tool pause I've measured (under 2s for claude even
- * with slow tools like a long Bash) and low enough that "I just finished"
- * still feels real-time.
- */
-const READY_STABILITY_MS = 3_000
-
-/**
  * Fires a system notification when an AI tab transitions into a state that
  * needs the user's attention:
  *
  *   - `needs_permission`      block-on-user prompt (claude y/n menu, etc.)
  *                             fires immediately on the transition.
- *   - `working` → `idle`      AI finished its turn. Fires after the tab
- *                             stays in `idle` for READY_STABILITY_MS to
- *                             filter out inter-tool-call pauses.
+ *   - `working` → `idle`      AI finished its turn. Also fires immediately —
+ *                             the idle-stability gate lives upstream in
+ *                             TabMonitor (see IDLE_STABILITY_MS there), so
+ *                             by the time the transition reaches us the raw
+ *                             hook layer has already been idle long enough
+ *                             to be trustworthy.
  *
  * Both notifications are suppressed when the user is already looking at
  * the tab in question — the sidebar's coloured row is enough signal.
@@ -56,16 +46,6 @@ export class AttentionNotifierService implements OnDestroy {
     private lastFiredAt = new WeakMap<object, number>()
     private readonly COOLDOWN_MS = 8_000
 
-    /**
-     * Pending "ready" notification timers, one per tab. When a tab goes
-     * working → idle we schedule a delayed fire; if it goes idle → working
-     * (next tool call) or idle → needs_permission BEFORE the timer fires,
-     * we cancel — the turn isn't actually over.
-     */
-    private pendingReady = new WeakMap<object, ReturnType<typeof setTimeout>>()
-    /** Latest TabState per tab — needed for the deferred ready callback. */
-    private latestByTab = new WeakMap<object, TabState>()
-
     constructor (
         private app: AppService,
         private unread: UnreadService,
@@ -90,11 +70,6 @@ export class AttentionNotifierService implements OnDestroy {
     }
 
     private diff (states: TabState[]): void {
-        // Refresh the lookup so the deferred ready callback uses fresh data.
-        for (const s of states) {
-            this.latestByTab.set(s.innerTab as unknown as object, s)
-        }
-
         for (const s of states) {
             const key = s.innerTab as unknown as object
             const prev = this.prevStatus.get(key)
@@ -103,51 +78,22 @@ export class AttentionNotifierService implements OnDestroy {
             if (!this.bootstrapped) continue
             if (prev === s.status) continue
 
-            // Permission state: fire immediately. Also cancel any pending
-            // "ready" timer for this tab — the user needs to handle the
-            // prompt, not be told the prior turn ended.
+            // Permission state: fire immediately.
             if (s.status === 'needs_permission' && prev !== 'needs_permission') {
-                this.cancelPendingReady(key)
                 this.fire(s, 'permission')
                 continue
             }
 
-            // Working → idle: schedule a delayed "ready" notification.
-            // Use a quasi-idle-trigger: only schedule if we just left working.
+            // working → idle: fire immediately. The 3 s "is the agent really
+            // done?" debounce lives upstream in TabMonitor's idle-stability
+            // gate now, so any working → idle we see here has already been
+            // stable in the hook layer for the gate duration.
             if (s.status === 'idle' && prev === 'working') {
-                this.scheduleReady(key)
-                continue
-            }
-
-            // Any movement AWAY from idle while a ready timer is pending
-            // means the agent isn't actually done. Cancel the pending fire.
-            if (prev === 'idle' && s.status !== 'idle') {
-                this.cancelPendingReady(key)
+                this.fire(s, 'ready')
             }
         }
 
         this.bootstrapped = true
-    }
-
-    private scheduleReady (key: object): void {
-        this.cancelPendingReady(key)
-        const timer = setTimeout(() => {
-            this.pendingReady.delete(key)
-            const fresh = this.latestByTab.get(key)
-            if (!fresh) return
-            // Sanity check — only fire if the tab is STILL idle.
-            if (fresh.status !== 'idle') return
-            this.fire(fresh, 'ready')
-        }, READY_STABILITY_MS)
-        this.pendingReady.set(key, timer)
-    }
-
-    private cancelPendingReady (key: object): void {
-        const t = this.pendingReady.get(key)
-        if (t) {
-            clearTimeout(t)
-            this.pendingReady.delete(key)
-        }
     }
 
     /**

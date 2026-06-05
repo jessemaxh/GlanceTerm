@@ -14,6 +14,28 @@ import { HookInstallerService } from './hook-installer.service'
 const POLL_MS = 1500
 
 /**
+ * How long a raw `idle` must sit stable in the hook layer after a prior
+ * `working` before we surface it to UI consumers. Claude (and other agents
+ * we're likely to add) can fire Stop briefly between user prompts within
+ * a session — a Stop that's almost immediately followed by another
+ * UserPromptSubmit reads to the user as "the agent is still going", and a
+ * flicker working → ready → working in the rail dot looks like a bug. We
+ * hold the displayed status as `working` until the hook layer has been
+ * idle for IDLE_STABILITY_MS straight; only then do we expose `idle`.
+ *
+ * Gate is armed ONLY by an observed `working`. Idle that follows
+ * `SessionStart`, `needs_permission`, or first-observation (`awaitingFirstEvent`)
+ * is exposed immediately — those aren't the noisy transition we're filtering.
+ *
+ * 3 s matches the threshold previously used by AttentionNotifierService for
+ * its "ready" notification (now removed in favour of this single source of
+ * truth). Picked to comfortably exceed the longest inter-event flutter
+ * we've measured for Claude, while keeping the "agent finished" badge
+ * appearing within human-reaction-latency of the actual stop.
+ */
+const IDLE_STABILITY_MS = 3_000
+
+/**
  * `done` is render-derived, never emitted by hooks or this monitor. The sidebar
  * (and jumper) treat `idle` as `done` while UnreadService.isUnread() is true
  * for the tab — i.e. the agent finished a turn and the user hasn't focused the
@@ -172,6 +194,26 @@ export class TabMonitor implements OnDestroy {
      * worst case is one redundant lockfile probe.
      */
     private installTriggered = new Set<AiTool>()
+    /**
+     * Per-tab "the last non-idle hook status we saw was `working`" flag.
+     * Set to true the first time a tab's raw hook status is observed as
+     * `working`; cleared when raw goes to `needs_permission` or `no_ai`,
+     * or when an idle has been stable long enough to release the gate
+     * (see IDLE_STABILITY_MS). The flag drives the idle-stability gate:
+     * only an armed tab's idle gets held back. A SessionStart-fresh idle,
+     * or a permission → idle sequence, surfaces immediately.
+     */
+    private idleGateArmed = new WeakMap<BaseTabComponent, boolean>()
+    /**
+     * Per-tab "re-tick at gate release" timer. POLL_MS is 1.5 s, so without
+     * an explicit timer the user would see the rail dot stay on "working"
+     * for up to (3 s gate + 1.5 s poll = 4.5 s) instead of 3 s flat. The
+     * timer fires a single tick at the moment the gate is due to release;
+     * the tick re-reads snap.eventAt and exposes idle if still stable.
+     * Always reset, never accumulated — each new gate engagement replaces
+     * the previous timer.
+     */
+    private idleGateTimers = new WeakMap<BaseTabComponent, ReturnType<typeof setTimeout>>()
 
     readonly states$: Observable<TabState[]> = this.subject.asObservable()
 
@@ -364,7 +406,7 @@ export class TabMonitor implements OnDestroy {
             const tabId: string | undefined = envId ?? sess.glancetermTabId
             const snap = tabId ? this.hooks.getStatus(tabId) : null
             if (snap) {
-                status = snap.status
+                status = this.applyIdleGate(t.inner, snap.status, snap.eventAt)
                 lastActiveMs = Math.max(0, Date.now() - snap.eventAt)
             } else {
                 // Adapter exists and tool is running but no hook event in our
@@ -388,6 +430,74 @@ export class TabMonitor implements OnDestroy {
             status,
             lastActiveMs,
             awaitingFirstEvent,
+        }
+    }
+
+    /**
+     * Stability gate for `idle` (see IDLE_STABILITY_MS doc). Returns the
+     * status we should expose, mutates the per-tab armed flag, and (re)arms
+     * the gate-release timer when we hold an idle back. Pure inputs ⇒ pure
+     * outputs apart from the WeakMap mutations and the timer side-effect.
+     *
+     * State machine:
+     *   raw=working          → armed=true,  expose 'working'
+     *   raw=needs_permission → armed=false, expose 'needs_permission'
+     *   raw=no_ai            → armed=false, expose 'no_ai'
+     *   raw=idle, armed AND eventAt within window → expose 'working' (held),
+     *                                                schedule re-tick at
+     *                                                release moment.
+     *   raw=idle, armed AND eventAt past window   → expose 'idle',
+     *                                                armed=false (released).
+     *   raw=idle, not armed                       → expose 'idle' (fresh
+     *                                                session, post-perm, …).
+     */
+    private applyIdleGate (inner: BaseTabComponent, rawStatus: TabStatus, eventAt: number): TabStatus {
+        if (rawStatus === 'working') {
+            this.idleGateArmed.set(inner, true)
+            this.clearGateTimer(inner)
+            return 'working'
+        }
+        if (rawStatus === 'needs_permission' || rawStatus === 'no_ai') {
+            this.idleGateArmed.delete(inner)
+            this.clearGateTimer(inner)
+            return rawStatus
+        }
+        // rawStatus === 'idle' (and per the TabStatus union, nothing else
+        // reaches here — `done` is render-derived in the sidebar, not
+        // produced by hooks).
+        if (!this.idleGateArmed.get(inner)) {
+            return 'idle'
+        }
+        const idleAgeMs = Date.now() - eventAt
+        if (idleAgeMs >= IDLE_STABILITY_MS) {
+            this.idleGateArmed.delete(inner)
+            this.clearGateTimer(inner)
+            return 'idle'
+        }
+        // Hold idle as working. Schedule a single follow-up tick at the
+        // release moment so the UI doesn't have to wait up to POLL_MS to
+        // flip. Tick is idempotent: if a fresh hook event arrives first,
+        // hooks.snapshots$ already triggers a tick — we just race ourselves.
+        this.scheduleGateRelease(inner, IDLE_STABILITY_MS - idleAgeMs)
+        return 'working'
+    }
+
+    private scheduleGateRelease (inner: BaseTabComponent, delayMs: number): void {
+        this.clearGateTimer(inner)
+        // 25 ms slack so eventAt arithmetic on the re-tick is past the
+        // threshold rather than equal-to (idleAgeMs >= IDLE_STABILITY_MS).
+        const t = setTimeout(() => {
+            this.idleGateTimers.delete(inner)
+            void this.tick()
+        }, delayMs + 25)
+        this.idleGateTimers.set(inner, t)
+    }
+
+    private clearGateTimer (inner: BaseTabComponent): void {
+        const existing = this.idleGateTimers.get(inner)
+        if (existing) {
+            clearTimeout(existing)
+            this.idleGateTimers.delete(inner)
         }
     }
 
