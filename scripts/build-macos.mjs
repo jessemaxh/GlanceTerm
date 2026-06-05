@@ -28,7 +28,11 @@ builder({
         },
         forceCodeSigning: !!process.env.CSC_LINK,
         mac: {
-            identity: !process.env.CI || process.env.CSC_LINK ? undefined : null,
+            // GlanceTerm private build: ad-hoc sign by default. Auto-discovery
+            // picks whichever Apple Development cert sorts first in the keychain
+            // and silently produces a broken signature when that cert isn't ours.
+            // Set CSC_LINK to override (e.g. real Developer ID signing in CI).
+            identity: process.env.CSC_LINK ? undefined : '-',
             notarize: !!process.env.APPLE_TEAM_ID,
         },
         npmRebuild: process.env.ARCH !== 'arm64',
