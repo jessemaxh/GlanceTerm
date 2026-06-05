@@ -1,6 +1,7 @@
 import { Injectable, OnDestroy } from '@angular/core'
 import { BehaviorSubject, Observable } from 'rxjs'
 import { execSync } from 'child_process'
+import * as fsSync from 'fs'
 
 import { AppService, BaseTabComponent } from 'tabby-core'
 
@@ -127,6 +128,34 @@ export class TabMonitor implements OnDestroy {
     /** Cache so we don't re-stat per tick when nothing has changed. */
     private shellPidCache = new WeakMap<BaseTabComponent, number>()
     /**
+     * Per-tab cache of the REAL `GLANCETERM_TAB_ID` read from the running
+     * PTY process's environment block. Authoritative over `sess.glancetermTabId`
+     * because any path that attaches a NEW Session instance to a PRE-EXISTING
+     * pty produces a fresh field-initializer UUID on the Session while the
+     * live pty's env block still holds the UUID injected at the original
+     * spawn. The hook handler writes JSON named after the env-block UUID, so
+     * we must match THAT one or every row stays "awaitingFirstEvent" forever.
+     *
+     * Paths that trigger the mismatch:
+     *   - Renderer reload (dev hot-reload, or Cmd+R when TABBY_DEV adds the
+     *     `role: 'reload'` menu — see app/lib/app.ts). Main process keeps the
+     *     PTYManager alive, so PTYs survive while the renderer reconstructs
+     *     all Sessions from scratch.
+     *   - "Duplicate tab while keeping state" / split-tab recovery within a
+     *     running app — `terminalTab.component.ts` calls back into
+     *     `Session.start` with `restoreFromPTYID`, reattaching to a live pty.
+     *     (Available in release builds — user-triggered, but it exists.)
+     *   - Renderer-only crash recovery (rare): renderer dies and Electron
+     *     reloads it; main process and PTYs untouched.
+     *
+     * NOT a problem: cold app relaunch. Main process death takes PTYManager
+     * with it, all PTYs are killed, the next launch spawns fresh PTYs whose
+     * env block and Session UUID are generated together.
+     *
+     * Once captured, the value never changes — env blocks are immutable post-exec.
+     */
+    private envTabIdCache = new WeakMap<BaseTabComponent, string>()
+    /**
      * Per-tool flag — true once we've kicked off `installer.installFor(tool)`
      * in response to detecting that tool running. Covers the "installed
      * Claude AFTER GlanceTerm was already up" case: startup-time install
@@ -137,6 +166,13 @@ export class TabMonitor implements OnDestroy {
     private installTriggered = new Set<AiTool>()
 
     readonly states$: Observable<TabState[]> = this.subject.asObservable()
+
+    /** Snapshot of the most recent tick's states — useful for one-shot
+     *  consumers (e.g. the screenshot paste service) that need a value
+     *  without subscribing. */
+    get current (): TabState[] {
+        return this.subject.getValue()
+    }
 
     constructor (
         private app: AppService,
@@ -198,27 +234,74 @@ export class TabMonitor implements OnDestroy {
             return this.placeholderState(t)
         }
 
-        // 1. Shell PID is purely informational now — cache once.
-        if (!this.shellPidCache.has(t.inner)) {
-            try {
-                const pid = await sess.pty?.getTruePID?.()
-                if (typeof pid === 'number' && pid > 0) this.shellPidCache.set(t.inner, pid)
-            } catch { /* swallow */ }
+        // 1. truePID = the pty's foreground process leader. We also use it
+        //    as our shell-pid cache value (informational) AND include it in
+        //    the AI-tool scan — see (2) below.
+        let truePid: number | null = null
+        try {
+            const pid = await sess.pty?.getTruePID?.()
+            if (typeof pid === 'number' && pid > 0) {
+                truePid = pid
+                this.shellPidCache.set(t.inner, pid)
+            }
+        } catch { /* swallow */ }
+        if (!truePid && this.shellPidCache.has(t.inner)) {
+            truePid = this.shellPidCache.get(t.inner) ?? null
         }
 
         // 2. Process-tree AI tool detection. Tabby's `command` field lies
         //    for several tools (claude returns the version string), so
         //    re-read the real cmdline via ps.
+        //
+        //    IMPORTANT: scan both `children` AND `truePID` itself. When the
+        //    user runs an AI CLI like `claude` from a shell, the tty's
+        //    foreground process group leader becomes claude — so getTruePID
+        //    returns claude's pid, and `getChildProcesses` (which filters by
+        //    `ppid === truePID`) only returns claude's OWN children (zsh,
+        //    caffeinate). If we only inspect children we never see claude.
         let children: ChildProcessInfo[] = []
         try {
             children = await sess.getChildProcesses() ?? []
         } catch { /* swallow */ }
-        const realCmds = realCommandsFor(children.map(c => c.pid))
+
+        // Candidates: truePID + its ANCESTORS + its DIRECT CHILDREN.
+        //
+        // Why ancestors: the pty's foreground-process leader (truePID) is
+        // whichever process currently holds the controlling tty. When the
+        // user runs `claude`, claude may spawn helpers (zsh subshells,
+        // `caffeinate`, …). Any of those can end up as the foreground
+        // leader at the moment we poll, which means truePID is sometimes
+        // `caffeinate` while the actual AI tool sits one level up. We walk
+        // up the ppid chain a few steps to make sure we still see claude.
+        //
+        // Why direct children: covers the inverse case — e.g. shell is still
+        // foreground and claude was just launched but hasn't taken over yet.
+        //
+        // Ordering: truePID first, then ancestors (closest first), then
+        // children. First AI match wins, so the most "active" candidate
+        // (the foreground program itself) gets priority over its parent
+        // shell when both look AI-ish.
+        const candidates: ChildProcessInfo[] = []
+        const seenPids = new Set<number>()
+        const pushCand = (pid: number) => {
+            if (pid > 0 && !seenPids.has(pid)) {
+                seenPids.add(pid)
+                candidates.push({ pid, ppid: -1, command: '' })
+            }
+        }
+        if (truePid !== null) {
+            pushCand(truePid)
+            for (const a of ancestorsOf(truePid, 6)) pushCand(a)
+        }
+        for (const c of children) pushCand(c.pid)
+
+        const realCmds = realCommandsFor(candidates.map(c => c.pid))
 
         let aiTool: AiTool | null = null
         let aiPid: number | null = null
-        for (const c of children) {
+        for (const c of candidates) {
             const real = realCmds.get(c.pid) ?? c.command
+            if (!real) continue
             const match = AI_PATTERNS.find(p => p.regexes.some(r => r.test(real)))
             if (match) { aiTool = match.tool; aiPid = c.pid; break }
         }
@@ -255,7 +338,22 @@ export class TabMonitor implements OnDestroy {
             // degraded "we know it's alive, can't tell working vs idle" state.
             status = 'working'
         } else {
-            const tabId: string | undefined = sess.glancetermTabId
+            // Prefer the UUID actually present in the live process env block —
+            // see `envTabIdCache` doc above for why this beats sess.glancetermTabId.
+            //
+            // Try aiPid FIRST (almost always the right pick — claude/codex
+            // were spawned by Tabby's shell, so they inherit GLANCETERM_TAB_ID
+            // and are readable by `ps eww`/proc), then truePID, then ancestor
+            // chain. The fallback covers the case where the foreground process
+            // is a SIP-protected system binary like `caffeinate` whose env
+            // block macOS refuses to expose — its parent (claude) is fine.
+            const envCandidates: number[] = []
+            const push = (p: number | null) => { if (p && !envCandidates.includes(p)) envCandidates.push(p) }
+            push(aiPid)
+            push(truePid)
+            if (truePid) for (const a of ancestorsOf(truePid, 6)) push(a)
+            const envId = this.readEnvTabId(t.inner, envCandidates)
+            const tabId: string | undefined = envId ?? sess.glancetermTabId
             const snap = tabId ? this.hooks.getStatus(tabId) : null
             if (snap) {
                 status = snap.status
@@ -283,6 +381,24 @@ export class TabMonitor implements OnDestroy {
             lastActiveMs,
             awaitingFirstEvent,
         }
+    }
+
+    /**
+     * Read GLANCETERM_TAB_ID from a live process env block. Tries each pid in
+     * `candidatePids` order and returns the first hit. Cached per tab — env
+     * blocks don't change after exec, so a single successful read is enough
+     * for the lifetime of the pty.
+     */
+    private readEnvTabId (inner: BaseTabComponent, candidatePids: number[]): string | undefined {
+        if (this.envTabIdCache.has(inner)) return this.envTabIdCache.get(inner)
+        for (const pid of candidatePids) {
+            const id = readGlancetermTabIdFromPid(pid)
+            if (id) {
+                this.envTabIdCache.set(inner, id)
+                return id
+            }
+        }
+        return undefined
     }
 
     private placeholderState (
@@ -396,4 +512,105 @@ function realCommandsForWindows (pids: number[]): Map<number, string> {
         }
     } catch { /* swallow — degraded "no command info" mode is fine */ }
     return out
+}
+
+/**
+ * Walk up the ppid chain from `pid`, returning at most `maxDepth` ancestors
+ * (closest-first). Stops at pid 1 / 0 / failure. Cross-platform.
+ *
+ * Used by tab detection to find AI tools that sit above the pty's
+ * foreground process — e.g. truePID = caffeinate, ppid = claude, ppid =
+ * zsh. We want to inspect claude even though it isn't the foreground
+ * leader at this moment.
+ */
+function ancestorsOf (pid: number, maxDepth: number): number[] {
+    const out: number[] = []
+    let cur = pid
+    for (let i = 0; i < maxDepth; i++) {
+        const parent = parentPidOf(cur)
+        if (!parent || parent <= 1 || parent === cur) break
+        out.push(parent)
+        cur = parent
+    }
+    return out
+}
+
+function parentPidOf (pid: number): number | null {
+    if (process.platform === 'linux') {
+        try {
+            const data = fsSync.readFileSync(`/proc/${pid}/stat`, 'utf8')
+            // /proc/<pid>/stat: pid (comm) state ppid …
+            // `comm` may contain whitespace/parens, so anchor on the LAST ')'.
+            const close = data.lastIndexOf(')')
+            if (close < 0) return null
+            const rest = data.slice(close + 1).trim().split(/\s+/)
+            // After ')' the fields are: state, ppid, …
+            const ppid = parseInt(rest[1], 10)
+            return Number.isFinite(ppid) ? ppid : null
+        } catch { return null }
+    }
+    if (process.platform === 'darwin') {
+        try {
+            const out = execSync(`ps -p ${pid} -o ppid=`, { encoding: 'utf8', timeout: 300 })
+            const ppid = parseInt(out.trim(), 10)
+            return Number.isFinite(ppid) ? ppid : null
+        } catch { return null }
+    }
+    if (process.platform === 'win32') {
+        // Single-shot wmic is fast enough for the 6-deep walk; we accept
+        // the per-call cost vs setting up a batched PowerShell query that
+        // would only pay off for very deep trees.
+        try {
+            const out = execSync(`wmic process where ProcessId=${pid} get ParentProcessId /format:value`, {
+                encoding: 'utf8', timeout: 1500, windowsHide: true,
+            })
+            const m = out.match(/ParentProcessId=(\d+)/)
+            return m ? parseInt(m[1], 10) : null
+        } catch { return null }
+    }
+    return null
+}
+
+/**
+ * Cross-platform "read GLANCETERM_TAB_ID from this pid's env block."
+ * Returns null when:
+ *   - the platform reader isn't implemented (Windows fallback today),
+ *   - the process exited / we lack permission to read its env,
+ *   - the env var isn't set (a non-Tabby-spawned process).
+ *
+ * Callers must treat null as "fall back to sess.glancetermTabId" rather
+ * than as a hard failure.
+ */
+function readGlancetermTabIdFromPid (pid: number): string | null {
+    if (process.platform === 'linux') {
+        try {
+            const buf = fsSync.readFileSync(`/proc/${pid}/environ`)
+            for (const entry of buf.toString('utf8').split('\0')) {
+                if (entry.startsWith('GLANCETERM_TAB_ID=')) {
+                    return entry.slice('GLANCETERM_TAB_ID='.length)
+                }
+            }
+        } catch { /* swallow */ }
+        return null
+    }
+    if (process.platform === 'darwin') {
+        // `ps eww -p <pid> -o command=` prints argv followed by KEY=VAL pairs
+        // separated by single spaces. We can't disambiguate spaces in argv
+        // from the env-pair separator, but GLANCETERM_TAB_ID values are
+        // UUIDv4 — fixed shape — so a focused regex is enough.
+        try {
+            const out = execSync(`ps eww -p ${pid} -o command=`, {
+                encoding: 'utf8',
+                timeout: 500,
+            })
+            const m = out.match(/\bGLANCETERM_TAB_ID=([0-9a-fA-F-]{36})\b/)
+            return m ? m[1] : null
+        } catch { /* swallow */ }
+        return null
+    }
+    // Windows: reading another process's env block requires NtQueryInformation
+    // -Process gymnastics that aren't worth the bundle weight. We fall back
+    // to sess.glancetermTabId here; the mismatch only surfaces on
+    // session-restore which is rarer on Windows (no native session restore).
+    return null
 }
