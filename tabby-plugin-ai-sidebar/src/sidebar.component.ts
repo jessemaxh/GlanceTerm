@@ -662,12 +662,12 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     activeIsAi = false
     filterMode: FilterId = 'all'
     /** Pill definitions — order is render order, left → right. Mirrors the
-     *  attention-priority sort: `Done` sits between "All" and "Needs You" so
-     *  the fastest way to find an unseen-finished tab is right after All. */
+     *  attention-priority sort: blocking-on-user first, then "your turn",
+     *  then the non-attention buckets in their natural reading order. */
     readonly FILTERS: ReadonlyArray<{ id: FilterId; label: string }> = [
         { id: 'all',              label: 'All' },
-        { id: 'done',             label: 'Done' },
         { id: 'needs_permission', label: 'Needs You' },
+        { id: 'done',             label: 'Done' },
         { id: 'working',          label: 'Working' },
         { id: 'idle',             label: 'Idle' },
     ]
@@ -701,12 +701,32 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     private pinnedRawStatusAtPin = new Map<BaseTabComponent, TabState['status']>()
     private readonly PIN_MS = 2000
 
+    /**
+     * Two attention buckets float to the top — that's the whole point of the
+     * sidebar — and *everything else stays in Tabby's top-bar order*.
+     *
+     *   0. needs_permission — AI is blocked waiting on you, fix it first
+     *   1. done             — AI finished a turn, your reply queued
+     *   2. (rest)           — working / idle / no_ai all flat: position
+     *                         tracks Tabby's tab bar, so spatial memory works
+     *
+     * Why not put `working` above `idle` like we used to? The dot already
+     * encodes "this one is alive" (green breathing pulse) — encoding it a
+     * *second* time in vertical position just made the list re-sort every
+     * time a tab transitioned working→idle or vice versa, with zero
+     * information gain. Spatial memory > duplicate visual encoding.
+     *
+     * `no_ai` (plain shells) sits in its natural Tabby-bar position rather
+     * than being buried at the bottom — those are part of the workflow,
+     * not noise. CSS already lowers their opacity (.row[data-status="no_ai"])
+     * so they're visually de-emphasised without needing to be re-ordered.
+     */
     private static readonly STATUS_RANK: Record<TabState['status'], number> = {
-        done:             0,
-        needs_permission: 1,
+        needs_permission: 0,
+        done:             1,
         working:          2,
-        idle:             3,
-        no_ai:            4,
+        idle:             2,
+        no_ai:            2,
     }
 
     constructor (
@@ -808,18 +828,17 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     }
 
     /**
-     * Tabs we render, sorted by attention priority so the rows the user is
-     * most likely to act on bubble to the top.
+     * Tabs we render. Only the two "you have to act" states float to the top;
+     * everything else mirrors Tabby's top-bar tab order so spatial memory
+     * works (the 3rd row from top stays the 3rd row from top as long as no
+     * attention event interrupts).
      *
-     *   1. done             — "you owe a reply" — agent finished, you haven't looked
-     *   2. needs_permission — block-on-user, must act now
-     *   3. working          — actively producing output
-     *   4. idle             — AI running but waiting on you (already seen)
-     *   5. no_ai            — plain shell, low signal
+     * Sort key per row:
+     *   (pinnedRank ?? STATUS_RANK[effStatus], tabIdx)
      *
-     * Within a priority bucket we fall back to Tabby's own top-bar tab order.
-     * That's STABLE — using `lastActiveMs` as a tiebreaker would shuffle the
-     * list on every poll as the "working" rows tick, which reads as flicker.
+     * Within any rank tier we fall back to Tabby's tab-bar order — STABLE,
+     * so tabs only move when their attention status changes, not when their
+     * elapsed timer ticks. See STATUS_RANK doc for the bucket layout.
      *
      * NOTE: ranking and filtering both go through `effStatus`, not the raw
      * `s.status` from the monitor. The monitor never produces `'done'` — it's
