@@ -46,24 +46,25 @@ import { HookAdapter, HookEventEntry, InstallReport } from './adapter'
  *      elicitations, which PermissionRequest doesn't cover). Both
  *      events map to `needs_permission`; whichever arrives first wins.
  *
- * `PreToolUse` is subscribed PURELY as a counter signal for HookWatcher's
- * subagent-in-flight tracker — it fires with `tool_name: "Task"` right before
- * the main agent backgrounds a subagent, which is the increment trigger.
- * Earlier code mapped PreToolUse → working on the (wrong) theory that it was
- * the "user approved a permission prompt" follow-up event. Per the Claude
- * hooks reference, PreToolUse actually fires BEFORE PermissionRequest, not
- * after — so it can't carry the post-approval signal. mapEventToStatus
- * therefore returns null for it; the row keeps whatever status the most
- * recent status-mapping event set, and the displayed status only changes
- * via the events that DO map (UserPromptSubmit, PermissionRequest, Stop,
- * SubagentStop counter override, etc.).
+ * `PreToolUse` / `PostToolUse` map to `working`. Two motivations:
  *
- * Known limitation after a denied permission: the row holds at
- * `needs_permission` until the main agent's next Stop, because Claude
- * doesn't emit a discrete "permission denied" event the user-side hook
- * could observe. v0.3 may add `PostToolUse → working` to cut this short
- * after approve+run completes; we skip it in v0.2 to avoid the extra
- * hook-fire churn on every tool call.
+ *   - Counter side-channel: HookWatcher uses PreToolUse with
+ *     `tool_name: "Task"` to increment the subagent-in-flight tracker, and
+ *     PostToolUse to clear the per-tab currentTool string.
+ *   - **Unsticking needs_permission**: when the user approves an inline
+ *     prompt, Claude does not emit a discrete "permission resolved" event.
+ *     The next signal is the tool actually running — i.e. PostToolUse —
+ *     followed by further Pre/PostToolUse pairs as the AI keeps working.
+ *     Without mapping these to `working`, the row stayed red right up
+ *     until the main agent's next `Stop`, which can be minutes of the AI
+ *     visibly working with a stale "needs you" badge.
+ *
+ * The historical worry — "PreToolUse fires BEFORE PermissionRequest, so
+ * mapping it to working would race PermissionRequest" — is moot. They
+ * arrive in the same tool-invocation window within milliseconds, and
+ * PermissionRequest is last-writer, so the user sees needs_permission
+ * stable. Only the POST-approval Pre/PostToolUse — where no
+ * PermissionRequest follows — actually changes display state.
  */
 
 interface ClaudeHookEntry {
@@ -234,15 +235,23 @@ export class ClaudeHookAdapter extends HookAdapter {
                 return 'working'
             case 'PreToolUse':
             case 'PostToolUse':
-                // Counter-only signals — see top-of-file comment. PreToolUse
-                // fires BEFORE PermissionRequest in Claude's documented
-                // order, so it is NOT the "user just approved" indicator.
-                // PostToolUse arrives when a tool returns; HookWatcher uses
-                // it to clear the per-tab currentTool. Leaving displayed
-                // status untouched here lets the row keep the working /
-                // needs_permission state the most recent status-mapping
-                // event chose.
-                return null
+                // The AI is actively running a tool. Map both to working —
+                // this is what unsticks a row from `needs_permission` once
+                // the user approves a prompt: the next PreToolUse (the AI
+                // executing the approved tool, or its successor tool) wins
+                // over the lingering needs_permission, and PostToolUse keeps
+                // the row honest while Claude continues thinking between
+                // tool calls. Without this, the row stays red until the next
+                // Stop (whole turn ends) — which can be minutes, with the AI
+                // visibly working the whole time.
+                //
+                // The old worry "PreToolUse fires BEFORE PermissionRequest"
+                // is moot: PermissionRequest follows within milliseconds and
+                // overwrites back to needs_permission, so the user never
+                // sees the brief working → needs_permission ping. Only the
+                // post-approval Pre/PostToolUse — where no PermissionRequest
+                // follows — actually changes display state.
+                return 'working'
             case 'Stop':
                 return 'idle'
             case 'SubagentStop':
