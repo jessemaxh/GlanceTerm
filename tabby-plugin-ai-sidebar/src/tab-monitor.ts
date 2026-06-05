@@ -13,7 +13,15 @@ import { HookInstallerService } from './hook-installer.service'
  * is only here to discover when an AI tool starts/stops in a tab. */
 const POLL_MS = 1500
 
-export type TabStatus = 'working' | 'idle' | 'needs_permission' | 'no_ai'
+/**
+ * `done` is render-derived, never emitted by hooks or this monitor. The sidebar
+ * (and jumper) treat `idle` as `done` while UnreadService.isUnread() is true
+ * for the tab — i.e. the agent finished a turn and the user hasn't focused the
+ * tab since. The transition done → idle ("ready") happens automatically when
+ * UnreadService clears the entry on focus. Keeping it in the union lets all
+ * UI-facing consumers share one TabStatus type without a separate DisplayStatus.
+ */
+export type TabStatus = 'working' | 'done' | 'idle' | 'needs_permission' | 'no_ai'
 
 /**
  * AI CLIs we recognise from `ps` output. Knowing WHICH tool is running tells

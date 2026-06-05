@@ -9,7 +9,7 @@ import { UnreadService } from './unread.service'
 import { ScreenshotService } from './screenshot/screenshot.service'
 import { ScreenshotPasteService } from './screenshot/paste.service'
 
-type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
+type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
 
 /**
  * The actual sidebar content. NOT a BaseTabComponent — this is a plain
@@ -72,7 +72,7 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             <div *ngIf="visibleStates.length > 0" class="sb-list">
                 <div *ngFor="let s of visibleStates; trackBy: trackByTab"
                      class="row"
-                     [attr.data-status]="s.status"
+                     [attr.data-status]="effStatus(s)"
                      [class.active]="isActive(s)"
                      [attr.aria-label]="ariaLabel(s)"
                      [attr.title]="s.cwd || s.title"
@@ -81,29 +81,29 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
                      (contextmenu)="onContextMenu(s, $event)">
                     <div class="num" aria-hidden="true">{{ tabIndex(s) }}</div>
                     <div class="rail">
-                        <span class="dot" [attr.data-status]="s.status" aria-hidden="true"></span>
+                        <span class="dot" [attr.data-status]="effStatus(s)" aria-hidden="true"></span>
                     </div>
                     <div class="body">
                         <div class="line1">
                             <span class="primary" [attr.title]="s.cwd || s.title">{{ s.cwd ? folderName(s.cwd) : s.title }}</span>
-                            <span *ngIf="s.status === 'needs_permission'" class="attn" aria-hidden="true"></span>
-                            <span *ngIf="isUnread(s)" class="unread" title="Agent finished — click to dismiss" aria-label="Unread: agent finished"></span>
+                            <span *ngIf="effStatus(s) === 'needs_permission'" class="attn" aria-hidden="true"></span>
                         </div>
                         <div class="line2">
                             <span *ngIf="s.aiTool" class="tag" [attr.data-tool]="s.aiTool">{{ toolTag(s.aiTool) }}</span>
-                            <span class="status" [attr.data-status]="s.status">{{ statusLabel(s) }}</span>
+                            <span class="status" [attr.data-status]="effStatus(s)">{{ statusLabel(s) }}</span>
                         </div>
-                        <div *ngIf="s.cwd && s.status !== 'needs_permission'" class="line3">
+                        <div *ngIf="s.cwd && effStatus(s) !== 'needs_permission'" class="line3">
                             <span class="path-sub" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
                         </div>
                     </div>
                     <div class="meta">
-                        <span class="age" *ngIf="s.status !== 'no_ai' && s.lastActiveMs !== null">{{ ageStr(s.lastActiveMs) }}</span>
+                        <span class="age" *ngIf="effStatus(s) !== 'no_ai' && s.lastActiveMs !== null">{{ ageStr(s.lastActiveMs) }}</span>
                     </div>
                 </div>
             </div>
 
             <div *ngIf="visibleStates.length > 0" class="sb-footer">
+                <span *ngIf="countDone > 0" class="stat done-stat"><i></i>{{ countDone }}<span class="lbl"> done</span></span>
                 <span class="stat work"><i></i>{{ countWorking }}<span class="lbl"> working</span></span>
                 <span class="stat idle"><i></i>{{ countIdle }}<span class="lbl"> idle</span></span>
                 <span *ngIf="countAttn > 0" class="stat attn-stat"><i></i>{{ countAttn }}<span class="lbl"> need you</span></span>
@@ -149,6 +149,9 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             --gt-st-active:       #5B9EF5;
             --gt-st-active-bg:    rgba(91, 158, 245, 0.12);
             --gt-st-perm:         #FF9F45;
+            --gt-st-done:         #FF5252;
+            --gt-st-done-soft:    rgba(255, 82, 82, 0.14);
+            --gt-st-done-ring:    rgba(255, 82, 82, 0.45);
 
             --gt-surface-1: var(--bs-body-bg, #1C1F23);
             --gt-surface-2: rgba(255, 255, 255, 0.04);
@@ -261,6 +264,11 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             border-color: rgba(255, 159, 69, 0.6);
             color: var(--gt-st-perm);
         }
+        .pill[data-id="done"].active {
+            background: var(--gt-st-done-soft);
+            border-color: rgba(255, 82, 82, 0.6);
+            color: var(--gt-st-done);
+        }
         .pill .c {
             font-family: var(--gt-mono);
             font-size: 10px;
@@ -328,6 +336,19 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             background: rgba(255, 159, 69, 0.07);
         }
 
+        /* Done row — agent finished, user hasn't opened it yet. Quieter than
+           needs_permission (no animated indicator), louder than idle (tinted
+           background). All done styling is gated on :not(.active): an
+           active+done row is rare but possible — attention-notifier suppresses
+           the markReady ping only when document.hasFocus() is true, so a
+           backgrounded GlanceTerm window can mark its own active tab unread.
+           In that case the blue "you are here" surface wins until the user
+           refocuses (which clears unread and flips done → idle). */
+        .row[data-status="done"]:not(.active) {
+            box-shadow: inset 0 0 0 1px rgba(255, 82, 82, 0.3);
+            background: rgba(255, 82, 82, 0.06);
+        }
+
         .row.active { background: var(--gt-st-active-bg); }
         .row.active::before {
             content: "";
@@ -365,6 +386,14 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             box-shadow: inset 0 0 0 1.5px var(--gt-text-faint);
         }
         .dot[data-status="needs_permission"] { background: var(--gt-st-perm); }
+        /* Done — solid red, steady halo. No pulse: it shares the column with
+           working's pulsing green dot, and a second animation in the same
+           viewport reads as chaos. The halo + tinted row background carry
+           enough weight on their own. */
+        .dot[data-status="done"] {
+            background: var(--gt-st-done);
+            box-shadow: 0 0 0 2.5px var(--gt-st-done-ring);
+        }
 
         @keyframes ht-pulse {
             0%   { box-shadow: 0 0 0 0 var(--gt-st-working-glow); }
@@ -404,19 +433,6 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
         }
         @keyframes ht-attn { 50% { opacity: 0.25; } }
 
-        /* Unread "agent finished" red dot. Distinct from .attn (which means
-           "needs you now" — orange + pulsing): unread is a quieter red,
-           non-animated, larger so it reads as a notification badge rather
-           than a state-change indicator. Cleared when the row is focused. */
-        .unread {
-            width: 8px;
-            height: 8px;
-            border-radius: 99px;
-            background: #FF5252;
-            box-shadow: 0 0 0 1.5px var(--gt-surface-1);
-            flex: none;
-        }
-
         .line2 {
             display: flex;
             align-items: center;
@@ -434,6 +450,7 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
         .status[data-status="idle"]             { color: var(--gt-st-ready); }
         .status[data-status="no_ai"]            { color: var(--gt-text-faint); }
         .status[data-status="needs_permission"] { color: var(--gt-st-perm); font-weight: 600; }
+        .status[data-status="done"]             { color: var(--gt-st-done); font-weight: 600; }
 
         .line3 {
             display: flex;
@@ -521,6 +538,8 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
         .sb-footer .stat.idle i        { background: var(--gt-st-idle); }
         .sb-footer .stat.attn-stat     { color: var(--gt-st-perm); }
         .sb-footer .stat.attn-stat i   { background: var(--gt-st-perm); }
+        .sb-footer .stat.done-stat     { color: var(--gt-st-done); font-weight: 600; }
+        .sb-footer .stat.done-stat i   { background: var(--gt-st-done); }
 
         /* ---- bottom action row (screenshot etc.) ----
            Sits below the aggregate-stats footer. Always visible — the button
@@ -580,15 +599,19 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      */
     activeIsAi = false
     filterMode: FilterId = 'all'
-    /** Pill definitions — order is render order, left → right. */
+    /** Pill definitions — order is render order, left → right. Mirrors the
+     *  attention-priority sort: `Done` sits between "All" and "Needs You" so
+     *  the fastest way to find an unseen-finished tab is right after All. */
     readonly FILTERS: ReadonlyArray<{ id: FilterId; label: string }> = [
         { id: 'all',              label: 'All' },
+        { id: 'done',             label: 'Done' },
         { id: 'needs_permission', label: 'Needs You' },
         { id: 'working',          label: 'Working' },
         { id: 'idle',             label: 'Idle' },
     ]
     private sub?: Subscription
     private activeTabSub?: Subscription
+    private unreadSub?: Subscription
     private home = os.homedir()
     capturing = false
 
@@ -625,15 +648,6 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         return 'Take a screenshot — drag to select, annotate, then confirm to paste the path into the focused AI agent.'
     }
 
-    /**
-     * True when the tab transitioned working→ready and the user hasn't
-     * focused it yet. Drives the red dot. Clearing happens automatically in
-     * UnreadService when the user clicks the row (via activeTabChange$).
-     */
-    isUnread (s: TabState): boolean {
-        return this.unread.isUnread(s.innerTab)
-    }
-
     ngOnInit (): void {
         this.sub = this.monitor.states$.subscribe(s => {
             this.states = s
@@ -647,12 +661,39 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         this.activeTabSub = this.app.activeTabChange$.subscribe(() => {
             this.zone.run(() => this.recomputeActiveIsAi())
         })
+        // Unread set membership is what derives the `done` display status from
+        // a raw `idle`. The monitor's 1.5 s poll would eventually re-render
+        // anyway, but a focus-clear should flip done → ready instantly — so
+        // we subscribe to unread.count$ and bounce a CD pass through the zone.
+        // The subject also fires when `markReady` adds a tab, giving us a
+        // working → done flip with no perceived lag.
+        this.unreadSub = this.unread.count$.subscribe(() => {
+            this.zone.run(() => { /* trigger CD */ })
+        })
         this.recomputeActiveIsAi()
     }
 
     ngOnDestroy (): void {
         this.sub?.unsubscribe()
         this.activeTabSub?.unsubscribe()
+        this.unreadSub?.unsubscribe()
+    }
+
+    /**
+     * Render-time projection of the raw `TabState.status` to the displayable
+     * `TabStatus` (which adds `'done'`). A raw `idle` row whose innerTab is
+     * still in UnreadService — i.e. the agent finished its turn and the user
+     * hasn't focused this tab since — surfaces as `done`. Everything else is
+     * a pass-through. UnreadService is the source of truth for the flip; the
+     * monitor never produces `'done'` directly.
+     *
+     * Called from many template bindings (`[attr.data-status]`, `*ngIf`,
+     * status label, …). Cheap — a Set.has on a WeakSet-sized set, plus one
+     * conditional. Memoising would risk drift when the unread set changes.
+     */
+    effStatus (s: TabState): TabState['status'] {
+        if (s.status === 'idle' && this.unread.isUnread(s.innerTab)) return 'done'
+        return s.status
     }
 
     /**
@@ -668,28 +709,34 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         const focusedInner = focusedInnerOf(active)
         const match = this.states.find(s => s.outerTab === active && s.innerTab === focusedInner)
             ?? this.states.find(s => s.outerTab === active)
-        this.activeIsAi = !!(match && match.aiTool && match.status !== 'no_ai')
+        this.activeIsAi = !!(match && match.aiTool && this.effStatus(match) !== 'no_ai')
     }
 
     /**
      * Tabs we render, sorted by attention priority so the rows the user is
      * most likely to act on bubble to the top.
      *
-     *   1. needs_permission — block-on-user, must act now
-     *   2. working          — actively producing output
-     *   3. idle             — AI running but waiting on you
-     *   4. no_ai            — plain shell, low signal
+     *   1. done             — "you owe a reply" — agent finished, you haven't looked
+     *   2. needs_permission — block-on-user, must act now
+     *   3. working          — actively producing output
+     *   4. idle             — AI running but waiting on you (already seen)
+     *   5. no_ai            — plain shell, low signal
      *
      * Within a priority bucket we fall back to Tabby's own top-bar tab order.
      * That's STABLE — using `lastActiveMs` as a tiebreaker would shuffle the
      * list on every poll as the "working" rows tick, which reads as flicker.
+     *
+     * NOTE: ranking and filtering both go through `effStatus`, not the raw
+     * `s.status` from the monitor. The monitor never produces `'done'` — it's
+     * derived from raw `idle + isUnread`.
      */
     get visibleStates (): TabState[] {
         const rank: Record<TabState['status'], number> = {
-            needs_permission: 0,
-            working:          1,
-            idle:             2,
-            no_ai:            3,
+            done:             0,
+            needs_permission: 1,
+            working:          2,
+            idle:             3,
+            no_ai:            4,
         }
         const tabIdx = (s: TabState): number => {
             const i = this.app.tabs.indexOf(s.outerTab)
@@ -697,9 +744,9 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         }
         const filtered = this.filterMode === 'all'
             ? this.states
-            : this.states.filter(s => s.status === this.filterMode)
+            : this.states.filter(s => this.effStatus(s) === this.filterMode)
         return [...filtered].sort((a, b) => {
-            const dr = (rank[a.status] ?? 99) - (rank[b.status] ?? 99)
+            const dr = (rank[this.effStatus(a)] ?? 99) - (rank[this.effStatus(b)] ?? 99)
             return dr !== 0 ? dr : tabIdx(a) - tabIdx(b)
         })
     }
@@ -712,11 +759,12 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     /** Pill counter — `All` counts every tab; the others count their bucket. */
     countFor (id: FilterId): number {
         if (id === 'all') return this.states.length
-        return this.states.filter(s => s.status === id).length
+        return this.states.filter(s => this.effStatus(s) === id).length
     }
 
     filterLabel (): string {
         switch (this.filterMode) {
+            case 'done':             return 'finished tabs you haven’t opened'
             case 'needs_permission': return 'tabs need you right now'
             case 'working':          return 'working tabs'
             case 'idle':             return 'idle tabs'
@@ -725,15 +773,19 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     }
 
     get countWorking (): number {
-        return this.states.filter(s => s.status === 'working').length
+        return this.states.filter(s => this.effStatus(s) === 'working').length
     }
 
     get countIdle (): number {
-        return this.states.filter(s => s.status === 'idle').length
+        return this.states.filter(s => this.effStatus(s) === 'idle').length
     }
 
     get countAttn (): number {
-        return this.states.filter(s => s.status === 'needs_permission').length
+        return this.states.filter(s => this.effStatus(s) === 'needs_permission').length
+    }
+
+    get countDone (): number {
+        return this.states.filter(s => this.effStatus(s) === 'done').length
     }
 
     trackByTab = (_: number, s: TabState): any => s.innerTab
@@ -780,9 +832,10 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     }
 
     statusLabel (s: TabState): string {
-        switch (s.status) {
+        switch (this.effStatus(s)) {
             case 'working':          return 'working'
             case 'needs_permission': return 'needs you'
+            case 'done':             return 'done'
             case 'idle':             return 'ready'
             case 'no_ai':            return 'shell'
             default:                 return s.status
@@ -792,11 +845,13 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     ariaLabel (s: TabState): string {
         const a11y: Record<string, string> = {
             working: 'Working — AI responding',
-            idle: 'Idle — waiting for you',
+            done: 'Done — agent finished, click to view',
+            idle: 'Ready — waiting for you',
             needs_permission: 'Needs permission — decide now',
             no_ai: 'Plain shell, no AI',
         }
-        return `${s.title} — ${a11y[s.status] || s.status}`
+        const eff = this.effStatus(s)
+        return `${s.title} — ${a11y[eff] || eff}`
     }
 
     /** Full agent name for the chip on line2. */

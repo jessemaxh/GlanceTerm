@@ -113,10 +113,14 @@ export class ScreenshotPasteService {
             if (match) return { tab: match.innerTab, state: match }
         }
 
-        // 2. Best AI tab. Lower rank = higher priority.
+        // 2. Best AI tab. Lower rank = higher priority. `done` is a display-
+        //    only derivation in the sidebar (raw `idle` + isUnread); the
+        //    monitor never emits it, so we never see it here, but the type
+        //    union still requires a key — share idle's rank.
         const rank: Record<TabState['status'], number> = {
             needs_permission: 0,
             working:          1,
+            done:             2,
             idle:             2,
             no_ai:            3,
         }

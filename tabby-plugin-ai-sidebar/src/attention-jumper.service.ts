@@ -3,7 +3,8 @@ import { Subscription } from 'rxjs'
 
 import { AppService, HotkeysService } from 'tabby-core'
 
-import { TabMonitor, TabState } from './tab-monitor'
+import { TabMonitor, TabState, TabStatus } from './tab-monitor'
+import { UnreadService } from './unread.service'
 
 /**
  * Handles the "jump to next AI tab waiting on you" hotkeys.
@@ -11,13 +12,18 @@ import { TabMonitor, TabState } from './tab-monitor'
  * `Cmd-J` (Mac) / `Ctrl-J` (Win/Linux) walks forward through the rotation;
  * `Shift` reverses. Rotation order:
  *
- *   1. All `needs_permission` tabs (most urgent — claude blocked on prompt)
- *   2. All `idle` tabs (AI present but waiting on you)
+ *   1. All `done` tabs (agent finished, user hasn't opened it yet — top priority)
+ *   2. All `needs_permission` tabs (blocked on a prompt right now)
+ *   3. All `idle` tabs (AI present but waiting on you, already seen)
  *
  * Within a bucket we use Tabby's own top-bar tab order so the rotation
  * matches what the user sees on the tab strip. We skip `working` (don't
  * interrupt) and `no_ai` (nothing to do there). If no candidates exist,
  * the hotkey is a no-op rather than going to a "wrong" tab.
+ *
+ * `done` is derived (raw `idle` + UnreadService.isUnread) — see
+ * sidebar.component.effStatus() and tab-monitor's TabStatus comment. We
+ * apply the same derivation here so the jumper and the visual list agree.
  */
 @Injectable({ providedIn: 'root' })
 export class AttentionJumperService implements OnDestroy {
@@ -26,6 +32,7 @@ export class AttentionJumperService implements OnDestroy {
 
     constructor (
         private app: AppService,
+        private unread: UnreadService,
         monitor: TabMonitor,
         hotkeys: HotkeysService,
     ) {
@@ -40,14 +47,25 @@ export class AttentionJumperService implements OnDestroy {
         for (const s of this.subs) s.unsubscribe()
     }
 
+    private effStatus (s: TabState): TabStatus {
+        if (s.status === 'idle' && this.unread.isUnread(s.innerTab)) return 'done'
+        return s.status
+    }
+
     private jump (direction: 1 | -1): void {
-        const rank = (s: TabState): number => s.status === 'needs_permission' ? 0 : 1
+        const rank = (s: TabState): number => {
+            const eff = this.effStatus(s)
+            return eff === 'done' ? 0 : eff === 'needs_permission' ? 1 : 2
+        }
         const tabIdx = (s: TabState): number => {
             const i = this.app.tabs.indexOf(s.outerTab)
             return i < 0 ? Number.MAX_SAFE_INTEGER : i
         }
         const candidates = this.latest
-            .filter(s => s.status === 'needs_permission' || s.status === 'idle')
+            .filter(s => {
+                const eff = this.effStatus(s)
+                return eff === 'done' || eff === 'needs_permission' || eff === 'idle'
+            })
             .sort((a, b) => {
                 const dp = rank(a) - rank(b)
                 return dp !== 0 ? dp : tabIdx(a) - tabIdx(b)
