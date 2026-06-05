@@ -88,13 +88,22 @@ export class HookWatcherService implements OnDestroy {
      * count can change without forcing a snapshot replacement that would
      * disturb the idle-stability gate's eventAt arithmetic.
      *
-     * KNOWN LIMITATION: if a subagent crashes mid-task and Claude never
-     * emits SubagentStop for it, the counter stays > 0 for this tab until
-     * the user starts a fresh Claude session (SessionStart resets) or
-     * closes the tab (file delete prunes). No auto-reaper in v0.2 —
-     * adding one would need a tighter signal than "main has been idle a
-     * while" because the user can submit new prompts while a backgrounded
-     * subagent is still running.
+     * KNOWN LIMITATIONS:
+     *
+     *   1. If a subagent crashes mid-task and Claude never emits SubagentStop
+     *      for it, the counter stays > 0 until SessionStart resets it or
+     *      the tab is closed. Auto-reaper rejected for v0.2 because the user
+     *      can submit new prompts while a backgrounded subagent is running,
+     *      so "main has been idle a while" isn't a clean signal.
+     *
+     *   2. Two SubagentStops firing in the same wall-clock second are not
+     *      both decremented. The handler writes one file per tab, last-
+     *      write-wins; the watcher sees at most one of the two payloads.
+     *      Even if it saw both, the dedup `(ts, event)` gate would bail on
+     *      the second. Real bug for users with parallel Tasks finishing
+     *      simultaneously — counter sticks one too high. Root cause is the
+     *      single-file IPC; the proper fix (event-log / per-event files +
+     *      tool_use_id tracking) is a v0.3 IPC redesign.
      */
     private readonly subagentInFlight = new Map<string, number>()
 
@@ -130,8 +139,18 @@ export class HookWatcherService implements OnDestroy {
      * are gated on `eventAt >= startupTs`, so cold-loading a stale file whose
      * last-write was PreToolUse(Task) does NOT pollute the counter for a
      * tab_id the matching SubagentStop will never come back for.
+     *
+     * UNIT-CORRECTNESS NOTE: Claude's handler timestamp is `date +%s` (whole
+     * seconds), which we multiply by 1000 in ingest to derive `eventAt` in
+     * ms. That means `eventAt` is always a multiple of 1000. If we naively
+     * kept `Date.now()` with its sub-second precision, every event firing
+     * inside the same wall-clock second as launch would have
+     * `eventAt = floor(launchMs / 1000) * 1000 < Date.now()` and get
+     * mis-classified as stale (lost the increment / decrement). Flooring
+     * startupTs to the same second-granularity it'll be compared against
+     * makes `eventAt >= startupTs` correct in that boundary second.
      */
-    private readonly startupTs = Date.now()
+    private readonly startupTs = Math.floor(Date.now() / 1000) * 1000
 
     private watcher: fsSync.FSWatcher | null = null
     private rescanTimer: NodeJS.Timeout | null = null

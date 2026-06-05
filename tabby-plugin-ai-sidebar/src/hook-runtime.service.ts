@@ -18,10 +18,12 @@ import * as path from 'path'
  * Always exits 0 — failed status writes must not stall the agent's main loop.
  *
  * Hardening notes (post-review fixes):
- *   - Extracted fields are run through `tr -d '\\\000-\031'` to strip
- *     backslashes + control bytes; without this, a malicious cwd / matcher
- *     containing `\` or a literal newline would produce unparseable JSON that
- *     the watcher silently drops (issue C1 in the v0.2 review).
+ *   - Extracted fields are run through `tr -d '\\\000-\037'` to strip
+ *     backslashes + every ASCII control byte (0x00-0x1F, the full RFC 8259
+ *     forbidden range for JSON strings); without this a malicious cwd /
+ *     matcher containing `\` or a literal control character would produce
+ *     unparseable JSON that the watcher silently drops (issue C1 in the
+ *     v0.2 review).
  *   - If `GLANCETERM_TAB_ID` is missing/empty/"unknown", exit silently instead
  *     of writing to `hooks/unknown.json` — that file would otherwise get
  *     overwritten by every pre-injection Claude session and never match a
@@ -66,6 +68,11 @@ SAN='tr -d "\\\\\\\\\\000-\\037"'
 # event and corrupt the in-flight counter. grep -o emits each match on its
 # own line; head -1 takes the FIRST one, which in Claude top-level-keys-
 # first payload order is the real top-level field.
+#
+# IMPORTANT: $1 is interpolated INTO the grep regex without escaping. All
+# call sites pass static identifiers (lowercase + underscore) so this is
+# safe today; if you add a caller, pass only [a-z_]+ keys — anything with
+# a regex metacharacter would silently match nested fields.
 extract () {
     printf '%s' "$PAYLOAD" \\
         | grep -o "\\"$1\\"[[:space:]]*:[[:space:]]*\\"[^\\"]*\\"" \\
