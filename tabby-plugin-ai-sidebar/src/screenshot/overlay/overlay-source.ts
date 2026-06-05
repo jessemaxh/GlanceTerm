@@ -7,10 +7,16 @@
  * single `data:text/html` URL avoids the whole filesystem layout question and
  * means the overlay survives moves between dev / packaged / portable builds.
  *
- * The overlay receives its screenshot payload via `postMessage` from the
- * preload script the main process injects (see capture-window.ts), and posts
- * its result back the same way. No nodeIntegration, no `require` inside the
- * page — keeps the surface a normal sandboxed browser context.
+ * The overlay receives its screenshot payload via `postMessage` from main
+ * (see capture-window.ts) and posts its result back the same way. No
+ * nodeIntegration, no `require` inside the page — keeps the surface a normal
+ * sandboxed browser context.
+ *
+ * Annotation surface is INTENTIONALLY minimal: red rectangle only. No color
+ * picker, no stroke-width picker, no other shapes / text / mosaic. The goal
+ * is "circle the thing you want Claude to look at and hit Enter" — anything
+ * more is friction. If a future ask wants richer annotation, branch this
+ * file rather than re-bolting toggles onto the toolbar.
  */
 
 const OVERLAY_CSS = `
@@ -114,12 +120,14 @@ const OVERLAY_CSS = `
     margin-right: 4px;
   }
 
-  /* Annotation toolbar ----------------------------------------------------- */
+  /* Minimal annotation toolbar — undo + cancel + confirm only.
+     No tool picker, no color picker, no stroke picker. The single annotation
+     tool is "red rectangle"; clicking inside the selection draws one. */
   #toolbar {
     position: absolute;
     display: none;
     align-items: center;
-    gap: 1px;
+    gap: 4px;
     background: #1F2226;
     border: 1px solid rgba(255,255,255,0.10);
     border-radius: 8px;
@@ -130,7 +138,7 @@ const OVERLAY_CSS = `
     user-select: none;
   }
   #toolbar.visible { display: inline-flex; }
-  #toolbar .tool {
+  #toolbar .icon-btn {
     width: 30px; height: 30px;
     display: inline-flex; align-items: center; justify-content: center;
     border-radius: 5px;
@@ -141,44 +149,15 @@ const OVERLAY_CSS = `
     padding: 0;
     transition: background 0.1s ease, color 0.1s ease;
   }
-  #toolbar .tool:hover { background: rgba(255,255,255,0.06); color: #fff; }
-  #toolbar .tool.active {
-    background: rgba(91,158,245,0.22);
-    color: #5B9EF5;
-  }
-  #toolbar .tool svg { width: 16px; height: 16px; }
+  #toolbar .icon-btn:hover { background: rgba(255,255,255,0.06); color: #fff; }
+  #toolbar .icon-btn[disabled] { opacity: 0.35; cursor: default; }
+  #toolbar .icon-btn[disabled]:hover { background: transparent; color: #C9CCD1; }
+  #toolbar .icon-btn svg { width: 16px; height: 16px; }
   #toolbar .sep {
     width: 1px; height: 18px;
     background: rgba(255,255,255,0.10);
-    margin: 0 4px;
-  }
-  #toolbar .swatch {
-    width: 18px; height: 18px;
-    border-radius: 50%;
-    cursor: pointer;
     margin: 0 2px;
-    border: 2px solid transparent;
-    transition: transform 0.08s ease;
   }
-  #toolbar .swatch.active { border-color: #fff; transform: scale(1.12); }
-  #toolbar .stroke {
-    width: 22px; height: 22px;
-    display: inline-flex; align-items: center; justify-content: center;
-    border-radius: 4px;
-    cursor: pointer;
-    color: #C9CCD1;
-  }
-  #toolbar .stroke:hover { color: #fff; }
-  #toolbar .stroke.active { background: rgba(91,158,245,0.22); color: #5B9EF5; }
-  #toolbar .stroke i {
-    display: block;
-    background: currentColor;
-    border-radius: 99px;
-  }
-  #toolbar .stroke[data-size="s"] i { width: 8px;  height: 2px; }
-  #toolbar .stroke[data-size="m"] i { width: 12px; height: 4px; }
-  #toolbar .stroke[data-size="l"] i { width: 16px; height: 6px; }
-
   #toolbar .action {
     padding: 0 10px;
     height: 26px;
@@ -197,25 +176,6 @@ const OVERLAY_CSS = `
   }
   #toolbar .action.primary:hover { background: #4A8EE5; }
   #toolbar .action.danger:hover { color: #ff7a7a; }
-
-  /* Inline text-input overlay --------------------------------------------- */
-  #text-input {
-    position: absolute;
-    z-index: 60;
-    background: transparent;
-    border: 1px dashed rgba(91,158,245,0.8);
-    color: #FF5252;
-    font-size: 20px;
-    font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
-    padding: 2px 4px;
-    outline: none;
-    resize: none;
-    min-width: 60px;
-    min-height: 28px;
-    overflow: hidden;
-    display: none;
-    line-height: 1.2;
-  }
 
   /* Hint shown before any selection --------------------------------------- */
   #hint {
@@ -250,7 +210,7 @@ const OVERLAY_HTML = `<!doctype html>
   <canvas id="ann"></canvas>
   <canvas id="ann-preview"></canvas>
 
-  <div id="hint">Drag to capture · <kbd>Esc</kbd> cancel · <kbd>⏎</kbd> full screen</div>
+  <div id="hint">Drag to capture · click inside to draw a red box · <kbd>Esc</kbd> cancel · <kbd>⏎</kbd> confirm</div>
 
   <div id="magnifier">
     <canvas width="13" height="13"></canvas>
@@ -263,7 +223,6 @@ const OVERLAY_HTML = `<!doctype html>
 
   <div id="size-badge" style="display:none">0 × 0</div>
   <div id="toolbar"></div>
-  <textarea id="text-input" spellcheck="false"></textarea>
 
   <script>__OVERLAY_JS__</script>
 </body></html>`
@@ -278,10 +237,18 @@ const OVERLAY_HTML = `<!doctype html>
 // is at native device pixels — the on-screen canvases display it scaled to
 // CSS pixels, and when we crop on confirm we scale back up via `dpr` so the
 // exported PNG keeps full resolution.
+//
+// Annotation model: ONE tool, hard-coded as a red rectangle stroke. We keep
+// an `annotations[]` stack so undo/redo still work; each entry is just a
+// `{x,y,w,h}` in CSS px. No color/size/tool fields — they would be dead
+// weight and add surface area for accidental UI re-introduction.
 
 const OVERLAY_JS = `
 (() => {
   'use strict';
+
+  const RECT_COLOR = '#FF3B30';
+  const RECT_LINE_WIDTH = 4;
 
   // ── runtime state ─────────────────────────────────────────────────────────
   const $ = (sel) => document.querySelector(sel);
@@ -297,7 +264,6 @@ const OVERLAY_JS = `
   const sizeBadge = $('#size-badge');
   const toolbar  = $('#toolbar');
   const hint     = $('#hint');
-  const textInput = $('#text-input');
 
   const ctxBg   = bg.getContext('2d');
   const ctxDim  = dim.getContext('2d');
@@ -315,20 +281,14 @@ const OVERLAY_JS = `
 
   // Selection rect in CSS pixels (relative to viewport / overlay).
   let sel = null;        // { x, y, w, h }
-  let dragKind = null;   // 'new' | 'move' | 'resize-nw' | … | 'draw' | 'text'
+  let dragKind = null;   // 'new' | 'move' | 'resize-nw' | … | 'draw'
   let dragStart = null;  // { x, y, sel0? }
   let mouse = { x: 0, y: 0 };
 
-  // Annotation model. Each item is one finalised draw operation.
-  const annotations = [];          // [{ tool, color, size, ... }]
-  const undoStack = [];            // pre-mutation snapshots
-  let activeTool = 'rect';
-  let activeColor = '#FF5252';
-  let activeSize = 'm';            // s | m | l
-  const SIZE_PX = { s: 2, m: 4, l: 7 };
-  const COLORS = ['#FF5252', '#FFAA55', '#4CAF50', '#5B9EF5', '#FFFFFF', '#1B1B1B'];
-
-  let drawing = null;  // in-progress annotation while mouse held down
+  // Each annotation = { x, y, w, h } in CSS px. Tool/color/stroke are fixed.
+  const annotations = [];
+  const undoStack = [];
+  let drawing = null;    // in-progress rect while mouse held down
 
   // ── init from main process ────────────────────────────────────────────────
   window.addEventListener('message', (e) => {
@@ -369,7 +329,6 @@ const OVERLAY_JS = `
     ctxDim.fillRect(0, 0, cssW, cssH);
     if (sel && sel.w > 0 && sel.h > 0) {
       ctxDim.clearRect(sel.x, sel.y, sel.w, sel.h);
-      // selection border
       ctxDim.strokeStyle = '#5B9EF5';
       ctxDim.lineWidth = 1;
       ctxDim.strokeRect(sel.x + 0.5, sel.y + 0.5, sel.w - 1, sel.h - 1);
@@ -379,85 +338,17 @@ const OVERLAY_JS = `
   // ── annotation rendering ─────────────────────────────────────────────────
   function renderAnnotations() {
     ctxAnn.clearRect(0, 0, cssW, cssH);
-    for (const a of annotations) drawOne(ctxAnn, a);
+    for (const a of annotations) drawRect(ctxAnn, a);
   }
 
-  function drawOne(ctx, a) {
+  function drawRect(ctx, a) {
     ctx.save();
-    ctx.strokeStyle = a.color;
-    ctx.fillStyle   = a.color;
-    ctx.lineWidth   = SIZE_PX[a.size] || 4;
+    ctx.strokeStyle = RECT_COLOR;
+    ctx.lineWidth   = RECT_LINE_WIDTH;
     ctx.lineCap = 'round';
     ctx.lineJoin = 'round';
-    if (a.tool === 'rect') {
-      ctx.strokeRect(a.x, a.y, a.w, a.h);
-    } else if (a.tool === 'ellipse') {
-      ctx.beginPath();
-      ctx.ellipse(a.x + a.w/2, a.y + a.h/2, Math.abs(a.w/2), Math.abs(a.h/2), 0, 0, Math.PI*2);
-      ctx.stroke();
-    } else if (a.tool === 'arrow') {
-      drawArrow(ctx, a.x, a.y, a.x + a.w, a.y + a.h, ctx.lineWidth);
-    } else if (a.tool === 'pen') {
-      const pts = a.points;
-      if (pts.length < 2) {
-        ctx.beginPath();
-        ctx.arc(pts[0].x, pts[0].y, ctx.lineWidth/2, 0, Math.PI*2);
-        ctx.fill();
-      } else {
-        ctx.beginPath();
-        ctx.moveTo(pts[0].x, pts[0].y);
-        for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
-        ctx.stroke();
-      }
-    } else if (a.tool === 'mosaic') {
-      // pixelate the screenshot under the rect by drawing it scaled-down then back up
-      const block = 10;
-      const x = Math.min(a.x, a.x + a.w);
-      const y = Math.min(a.y, a.y + a.h);
-      const w = Math.abs(a.w);
-      const h = Math.abs(a.h);
-      if (w < 2 || h < 2 || !bgImage) { ctx.restore(); return; }
-      const sx = x * dpr, sy = y * dpr, sw = w * dpr, sh = h * dpr;
-      const dw = Math.max(1, Math.floor(w / block));
-      const dh = Math.max(1, Math.floor(h / block));
-      const tmp = document.createElement('canvas');
-      tmp.width = dw; tmp.height = dh;
-      const tctx = tmp.getContext('2d');
-      tctx.imageSmoothingEnabled = false;
-      tctx.drawImage(bgImage, sx, sy, sw, sh, 0, 0, dw, dh);
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(tmp, 0, 0, dw, dh, x, y, w, h);
-      ctx.imageSmoothingEnabled = true;
-    } else if (a.tool === 'text') {
-      ctx.fillStyle = a.color;
-      ctx.font = (a.fontSize || 20) + 'px -apple-system, "Segoe UI", system-ui, sans-serif';
-      ctx.textBaseline = 'top';
-      const lines = (a.text || '').split('\\n');
-      for (let i = 0; i < lines.length; i++) {
-        ctx.fillText(lines[i], a.x, a.y + i * (a.fontSize || 20) * 1.2);
-      }
-    }
+    ctx.strokeRect(a.x, a.y, a.w, a.h);
     ctx.restore();
-  }
-
-  function drawArrow(ctx, x1, y1, x2, y2, lw) {
-    const dx = x2 - x1, dy = y2 - y1;
-    const len = Math.hypot(dx, dy);
-    if (len < 1) return;
-    const head = Math.max(10, lw * 4);
-    const ang = Math.atan2(dy, dx);
-    const bx = x2 - Math.cos(ang) * head * 0.6;
-    const by = y2 - Math.sin(ang) * head * 0.6;
-    ctx.beginPath();
-    ctx.moveTo(x1, y1);
-    ctx.lineTo(bx, by);
-    ctx.stroke();
-    ctx.beginPath();
-    ctx.moveTo(x2, y2);
-    ctx.lineTo(x2 - Math.cos(ang - Math.PI/7) * head, y2 - Math.sin(ang - Math.PI/7) * head);
-    ctx.lineTo(x2 - Math.cos(ang + Math.PI/7) * head, y2 - Math.sin(ang + Math.PI/7) * head);
-    ctx.closePath();
-    ctx.fill();
   }
 
   // ── selection handles + size badge ───────────────────────────────────────
@@ -493,62 +384,30 @@ const OVERLAY_JS = `
     const wpx = Math.round(sel.w * dpr);
     const hpx = Math.round(sel.h * dpr);
     sizeBadge.textContent = wpx + ' × ' + hpx;
-    // Above the selection if there's room, otherwise inside.
     const top = sel.y - 26;
     sizeBadge.style.left = sel.x + 'px';
     sizeBadge.style.top  = (top < 4 ? sel.y + 6 : top) + 'px';
   }
 
-  // ── toolbar ──────────────────────────────────────────────────────────────
+  // ── toolbar (undo / cancel / confirm) ────────────────────────────────────
   function renderToolbar() {
     if (phase !== 'edit' || !sel) { toolbar.classList.remove('visible'); return; }
     toolbar.innerHTML = '';
-    const tools = [
-      { id: 'rect',    title: 'Rectangle (R)', svg: ICONS.rect },
-      { id: 'ellipse', title: 'Ellipse (O)',   svg: ICONS.ellipse },
-      { id: 'arrow',   title: 'Arrow (A)',     svg: ICONS.arrow },
-      { id: 'pen',     title: 'Pen (P)',       svg: ICONS.pen },
-      { id: 'mosaic',  title: 'Mosaic (M)',    svg: ICONS.mosaic },
-      { id: 'text',    title: 'Text (T)',      svg: ICONS.text },
-    ];
-    for (const t of tools) {
-      const b = document.createElement('button');
-      b.className = 'tool' + (activeTool === t.id ? ' active' : '');
-      b.title = t.title;
-      b.innerHTML = t.svg;
-      b.addEventListener('mousedown', (e) => { e.preventDefault(); setTool(t.id); });
-      toolbar.appendChild(b);
-    }
-    toolbar.appendChild(makeSep());
-    for (const sz of ['s', 'm', 'l']) {
-      const b = document.createElement('button');
-      b.className = 'stroke' + (activeSize === sz ? ' active' : '');
-      b.dataset.size = sz;
-      b.innerHTML = '<i></i>';
-      b.title = 'Stroke size ' + sz.toUpperCase();
-      b.addEventListener('mousedown', (e) => { e.preventDefault(); activeSize = sz; renderToolbar(); });
-      toolbar.appendChild(b);
-    }
-    toolbar.appendChild(makeSep());
-    for (const c of COLORS) {
-      const b = document.createElement('button');
-      b.className = 'swatch' + (activeColor === c ? ' active' : '');
-      b.style.background = c;
-      b.title = c;
-      b.addEventListener('mousedown', (e) => { e.preventDefault(); activeColor = c; renderToolbar(); });
-      toolbar.appendChild(b);
-    }
-    toolbar.appendChild(makeSep());
+
     const undoBtn = document.createElement('button');
-    undoBtn.className = 'tool';
-    undoBtn.title = 'Undo (⌘Z)';
+    undoBtn.className = 'icon-btn';
+    undoBtn.title = 'Undo last box (⌘Z)';
     undoBtn.innerHTML = ICONS.undo;
+    undoBtn.disabled = undoStack.length === 0;
     undoBtn.addEventListener('mousedown', (e) => { e.preventDefault(); undo(); });
     toolbar.appendChild(undoBtn);
+
+    toolbar.appendChild(makeSep());
 
     const cancelBtn = document.createElement('button');
     cancelBtn.className = 'action danger';
     cancelBtn.textContent = 'Cancel';
+    cancelBtn.title = 'Cancel (Esc)';
     cancelBtn.addEventListener('mousedown', (e) => { e.preventDefault(); cancel(); });
     toolbar.appendChild(cancelBtn);
 
@@ -570,25 +429,18 @@ const OVERLAY_JS = `
 
   function positionToolbar() {
     if (!sel) return;
-    const tw = toolbar.offsetWidth || 380;
+    const tw = toolbar.offsetWidth || 200;
     const th = toolbar.offsetHeight || 40;
     let x = sel.x + sel.w - tw;
     if (x < 6) x = 6;
     if (x + tw > cssW - 6) x = cssW - tw - 6;
     let y = sel.y + sel.h + 8;
     if (y + th > cssH - 6) {
-      // No room below — try above; otherwise put inside.
       const above = sel.y - th - 8;
       y = above > 6 ? above : Math.max(6, sel.y + 8);
     }
     toolbar.style.left = x + 'px';
     toolbar.style.top  = y + 'px';
-  }
-
-  function setTool(id) {
-    activeTool = id;
-    renderToolbar();
-    document.body.style.cursor = id === 'text' ? 'text' : 'crosshair';
   }
 
   // ── magnifier (pre-selection) ────────────────────────────────────────────
@@ -598,7 +450,6 @@ const OVERLAY_JS = `
       return;
     }
     magEl.style.display = 'block';
-    // 13×13 native-pixel sample, scaled up 9× (118/13 ≈ 9.1) with image-rendering: pixelated.
     const samplePx = 13;
     const sx = mouse.x * dpr - Math.floor(samplePx / 2);
     const sy = mouse.y * dpr - Math.floor(samplePx / 2);
@@ -606,7 +457,6 @@ const OVERLAY_JS = `
     ctxMag.clearRect(0, 0, samplePx, samplePx);
     ctxMag.drawImage(bgImage, sx, sy, samplePx, samplePx, 0, 0, samplePx, samplePx);
 
-    // Read the center pixel to show RGB + swatch.
     try {
       const data = ctxMag.getImageData(Math.floor(samplePx/2), Math.floor(samplePx/2), 1, 1).data;
       const hex = '#' + [data[0], data[1], data[2]].map(v => v.toString(16).padStart(2,'0')).join('').toUpperCase();
@@ -618,7 +468,6 @@ const OVERLAY_JS = `
     }
     magXY.textContent = Math.round(mouse.x * dpr) + ', ' + Math.round(mouse.y * dpr);
 
-    // Position the magnifier so it doesn't sit under the cursor.
     const off = 18;
     let mx = mouse.x + off;
     let my = mouse.y + off;
@@ -630,10 +479,7 @@ const OVERLAY_JS = `
   }
 
   // ── mouse interaction ────────────────────────────────────────────────────
-  function pos(e) {
-    return { x: e.clientX, y: e.clientY };
-  }
-
+  function pos(e) { return { x: e.clientX, y: e.clientY }; }
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
   function hitHandle(e) {
@@ -693,8 +539,7 @@ const OVERLAY_JS = `
   }
 
   document.addEventListener('mousedown', (e) => {
-    // Don't intercept clicks on the toolbar or text input — they have their own handlers.
-    if (e.target.closest('#toolbar') || e.target === textInput) return;
+    if (e.target.closest('#toolbar')) return;
 
     if (phase === 'select') {
       hint.style.display = 'none';
@@ -711,22 +556,15 @@ const OVERLAY_JS = `
       }
       const p = pos(e);
       if (insideSel(p.x, p.y)) {
-        // Inside selection: either move, or begin drawing if a tool is "active".
-        // We can't read mind — distinguish by: if user clicked near the centre,
-        // assume move; if near the edge interior, also move. Actually simpler:
-        // any click inside selection draws using the active tool. To "move"
-        // the selection, drag from a handle. This matches WeChat behaviour
-        // once you've started annotating — selection becomes a canvas.
-        if (activeTool === 'text') {
-          beginText(p.x, p.y);
-          return;
-        }
+        // Single tool: any click inside the selection starts drawing a red
+        // rectangle. To MOVE/RESIZE the selection itself, use the handles.
         dragKind = 'draw';
         dragStart = p;
         beginDrawing(p.x, p.y);
       } else {
-        // Clicked outside selection: start a new selection over.
-        commitTextIfAny();
+        // Clicked outside selection: start a new selection over. Wipes all
+        // current annotations — the user is restarting the framing step, so
+        // any boxes drawn into the old selection don't make sense anymore.
         annotations.length = 0;
         undoStack.length = 0;
         renderAnnotations();
@@ -744,7 +582,6 @@ const OVERLAY_JS = `
 
   document.addEventListener('mouseup', () => {
     if (phase === 'select' && dragKind === 'new') {
-      // If the user just clicked without dragging, ignore — no selection yet.
       if (!sel || sel.w < 4 || sel.h < 4) {
         sel = null;
         renderDim(); renderSizeBadge();
@@ -758,6 +595,7 @@ const OVERLAY_JS = `
       finalizeDrawing();
       renderPreview();
       renderAnnotations();
+      renderToolbar();   // refresh undo-button disabled state
     }
     dragKind = null;
     dragStart = null;
@@ -765,32 +603,19 @@ const OVERLAY_JS = `
 
   // ── drawing in-progress preview ──────────────────────────────────────────
   function beginDrawing(x, y) {
-    if (activeTool === 'pen') {
-      drawing = { tool: 'pen', color: activeColor, size: activeSize, points: [{x, y}] };
-    } else {
-      drawing = { tool: activeTool, color: activeColor, size: activeSize, x, y, w: 0, h: 0 };
-    }
+    drawing = { x, y, w: 0, h: 0 };
   }
   function updateDrawing(x, y) {
     if (!drawing) return;
     // Clamp to selection rect so annotations stay within the crop area.
     const cx = clamp(x, sel.x, sel.x + sel.w);
     const cy = clamp(y, sel.y, sel.y + sel.h);
-    if (drawing.tool === 'pen') {
-      drawing.points.push({ x: cx, y: cy });
-    } else {
-      drawing.w = cx - drawing.x;
-      drawing.h = cy - drawing.y;
-    }
+    drawing.w = cx - drawing.x;
+    drawing.h = cy - drawing.y;
   }
   function finalizeDrawing() {
     if (!drawing) return;
-    if (drawing.tool === 'pen') {
-      if (drawing.points.length > 0) {
-        pushUndo();
-        annotations.push(drawing);
-      }
-    } else if (Math.abs(drawing.w) >= 3 && Math.abs(drawing.h) >= 3) {
+    if (Math.abs(drawing.w) >= 3 && Math.abs(drawing.h) >= 3) {
       pushUndo();
       annotations.push(drawing);
     }
@@ -798,7 +623,7 @@ const OVERLAY_JS = `
   }
   function renderPreview() {
     ctxPrev.clearRect(0, 0, cssW, cssH);
-    if (drawing) drawOne(ctxPrev, drawing);
+    if (drawing) drawRect(ctxPrev, drawing);
   }
 
   function pushUndo() {
@@ -806,77 +631,19 @@ const OVERLAY_JS = `
     if (undoStack.length > 50) undoStack.shift();
   }
   function undo() {
-    commitTextIfAny();
     if (undoStack.length === 0) return;
     const prev = undoStack.pop();
     annotations.length = 0;
     annotations.push(...prev);
     renderAnnotations();
+    renderToolbar();
   }
-
-  // ── text tool ────────────────────────────────────────────────────────────
-  let textTarget = null; // { x, y } in CSS px
-  function beginText(x, y) {
-    commitTextIfAny();
-    textTarget = { x, y };
-    textInput.value = '';
-    textInput.style.display = 'block';
-    textInput.style.left = x + 'px';
-    textInput.style.top  = y + 'px';
-    textInput.style.color = activeColor;
-    textInput.style.fontSize = '20px';
-    textInput.focus();
-  }
-  function commitTextIfAny() {
-    if (!textTarget) return;
-    const v = textInput.value;
-    textInput.style.display = 'none';
-    textInput.value = '';
-    if (v.trim().length > 0) {
-      pushUndo();
-      annotations.push({
-        tool: 'text',
-        color: activeColor,
-        size: activeSize,
-        x: textTarget.x,
-        y: textTarget.y,
-        text: v,
-        fontSize: 20,
-      });
-      renderAnnotations();
-    }
-    textTarget = null;
-  }
-
-  textInput.addEventListener('keydown', (e) => {
-    e.stopPropagation();
-    if (e.key === 'Escape') {
-      textTarget = null;
-      textInput.style.display = 'none';
-      textInput.value = '';
-    } else if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      commitTextIfAny();
-    }
-    // Auto-grow textarea so users see what they typed.
-    requestAnimationFrame(() => {
-      textInput.style.height = 'auto';
-      textInput.style.height = textInput.scrollHeight + 'px';
-      textInput.style.width  = Math.max(60, textInput.scrollWidth + 8) + 'px';
-    });
-  });
 
   // ── keyboard ──────────────────────────────────────────────────────────────
   document.addEventListener('keydown', (e) => {
-    if (document.activeElement === textInput) return;
     if (e.key === 'Escape') { e.preventDefault(); cancel(); return; }
     if (e.key === 'Enter')  { e.preventDefault(); confirm(); return; }
     if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); undo(); return; }
-    // tool hotkeys (only active in edit phase)
-    if (phase !== 'edit') return;
-    const map = { r:'rect', o:'ellipse', a:'arrow', p:'pen', m:'mosaic', t:'text' };
-    const t = map[e.key.toLowerCase()];
-    if (t) { e.preventDefault(); setTool(t); }
   });
 
   // ── result + dispatch ─────────────────────────────────────────────────────
@@ -884,9 +651,7 @@ const OVERLAY_JS = `
     window.postMessage({ kind: 'cancel' }, '*');
   }
   function confirm() {
-    commitTextIfAny();
     if (!sel || sel.w < 4 || sel.h < 4) { cancel(); return; }
-    // Build the cropped PNG at native resolution.
     const W = Math.round(sel.w * dpr);
     const H = Math.round(sel.h * dpr);
     const out = document.createElement('canvas');
@@ -901,7 +666,7 @@ const OVERLAY_JS = `
     oc.save();
     oc.translate(-sel.x * dpr, -sel.y * dpr);
     oc.scale(dpr, dpr);
-    for (const a of annotations) drawOne(oc, a);
+    for (const a of annotations) drawRect(oc, a);
     oc.restore();
     const dataURL = out.toDataURL('image/png');
     window.postMessage({
@@ -913,13 +678,7 @@ const OVERLAY_JS = `
 
   // ── icons (inline SVG, currentColor-driven) ──────────────────────────────
   const ICONS = {
-    rect:    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="2.5" y="3.5" width="11" height="9" rx="1"/></svg>',
-    ellipse: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><ellipse cx="8" cy="8" rx="5.5" ry="4.5"/></svg>',
-    arrow:   '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 13 L13 3 M13 3 L8 3 M13 3 L13 8"/></svg>',
-    pen:     '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M2 14 L8 13 L13 4 L11 2 L2 11 Z M9 4 L11 6"/></svg>',
-    mosaic:  '<svg viewBox="0 0 16 16" fill="currentColor"><rect x="2" y="2" width="4" height="4"/><rect x="10" y="2" width="4" height="4"/><rect x="6" y="6" width="4" height="4"/><rect x="2" y="10" width="4" height="4"/><rect x="10" y="10" width="4" height="4"/></svg>',
-    text:    '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M3 3 L13 3 L13 5 L9 5 L9 13 L7 13 L7 5 L3 5 Z"/></svg>',
-    undo:    '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7 L7 3 L7 5 L10 5 A4 4 0 1 1 6 13"/></svg>',
+    undo: '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7 L7 3 L7 5 L10 5 A4 4 0 1 1 6 13"/></svg>',
   };
 })();
 `
