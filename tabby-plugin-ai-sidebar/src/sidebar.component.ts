@@ -1,11 +1,13 @@
-import { Component, OnDestroy, OnInit } from '@angular/core'
+import { Component, NgZone, OnDestroy, OnInit } from '@angular/core'
 import { Subscription } from 'rxjs'
 import * as os from 'os'
 
-import { AppService, MenuItemOptions, PlatformService } from 'tabby-core'
+import { AppService, BaseTabComponent, MenuItemOptions, PlatformService } from 'tabby-core'
 
 import { TabMonitor, TabState } from './tab-monitor'
 import { UnreadService } from './unread.service'
+import { ScreenshotService } from './screenshot/screenshot.service'
+import { ScreenshotPasteService } from './screenshot/paste.service'
 
 type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
 
@@ -105,6 +107,31 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
                 <span class="stat work"><i></i>{{ countWorking }}<span class="lbl"> working</span></span>
                 <span class="stat idle"><i></i>{{ countIdle }}<span class="lbl"> idle</span></span>
                 <span *ngIf="countAttn > 0" class="stat attn-stat"><i></i>{{ countAttn }}<span class="lbl"> need you</span></span>
+            </div>
+
+            <!-- "AI toolbar" — only visible when the focused tab is an AI agent.
+                 First action is Screenshot; future AI-scoped actions slot in here.
+                 Hidden for plain shells (and when no tab is active) to keep the
+                 sidebar quiet when there's nothing AI-specific to do. -->
+            <div *ngIf="activeIsAi" class="sb-actions" role="toolbar" aria-label="AI tab actions">
+                <button type="button"
+                        class="action-btn"
+                        [class.busy]="capturing"
+                        [disabled]="capturing"
+                        (click)="onScreenshot()"
+                        [title]="screenshotTitle()"
+                        aria-label="Take a screenshot and paste it into the focused AI agent">
+                    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M5.2 3.5 L6.3 2.2 L9.7 2.2 L10.8 3.5 L13.2 3.5
+                                 A1.5 1.5 0 0 1 14.7 5 V11.8
+                                 A1.5 1.5 0 0 1 13.2 13.3 H2.8
+                                 A1.5 1.5 0 0 1 1.3 11.8 V5
+                                 A1.5 1.5 0 0 1 2.8 3.5 Z"
+                              stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                        <circle cx="8" cy="8.4" r="2.6" stroke="currentColor" stroke-width="1.2" fill="none"/>
+                    </svg>
+                    <span class="lbl">{{ capturing ? 'Capturing…' : 'Screenshot' }}</span>
+                </button>
             </div>
         </div>
     `,
@@ -493,6 +520,48 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
         .sb-footer .stat.attn-stat     { color: var(--gt-st-perm); }
         .sb-footer .stat.attn-stat i   { background: var(--gt-st-perm); }
 
+        /* ---- bottom action row (screenshot etc.) ----
+           Sits below the aggregate-stats footer. Always visible — the button
+           must be reachable even when no AI tabs are open (the user might
+           want to capture something to share into a shell they're about to
+           start). */
+        .sb-actions {
+            display: flex;
+            gap: 8px;
+            padding: 8px 12px 12px;
+            border-top: 1px solid var(--gt-border);
+        }
+        .action-btn {
+            flex: 1 1 auto;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 7px;
+            padding: 8px 12px;
+            border-radius: 8px;
+            background: var(--gt-surface-2);
+            border: 1px solid var(--gt-border);
+            color: var(--gt-text-dim);
+            font: inherit;
+            font-size: 12.5px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: background-color 0.13s ease, color 0.13s ease,
+                        border-color 0.13s ease, transform 0.06s ease;
+        }
+        .action-btn:hover {
+            background: var(--gt-accent-soft);
+            border-color: rgba(255, 170, 85, 0.45);
+            color: var(--gt-accent);
+        }
+        .action-btn:active { transform: translateY(0.5px); }
+        .action-btn:disabled {
+            opacity: 0.55;
+            cursor: progress;
+        }
+        .action-btn.busy { color: var(--gt-accent); }
+        .action-btn svg { flex: none; }
+
         @media (prefers-reduced-motion: reduce) {
             .dot[data-status="working"],
             .attn { animation: none !important; }
@@ -501,6 +570,13 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
 })
 export class AiSidebarComponent implements OnInit, OnDestroy {
     states: TabState[] = []
+    /**
+     * True when the focused inner tab is one of our recognised AI agents
+     * (`aiTool != null` AND `status != 'no_ai'`). Drives `*ngIf` on the
+     * "AI toolbar" row at the bottom of the sidebar so it only surfaces
+     * actions (Screenshot, …) when there's an AI agent to act on.
+     */
+    activeIsAi = false
     filterMode: FilterId = 'all'
     /** Pill definitions — order is render order, left → right. */
     readonly FILTERS: ReadonlyArray<{ id: FilterId; label: string }> = [
@@ -510,14 +586,42 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         { id: 'idle',             label: 'Idle' },
     ]
     private sub?: Subscription
+    private activeTabSub?: Subscription
     private home = os.homedir()
+    capturing = false
 
     constructor (
         public app: AppService,
         public monitor: TabMonitor,
         private platform: PlatformService,
         private unread: UnreadService,
+        private screenshot: ScreenshotService,
+        private screenshotPaste: ScreenshotPasteService,
+        private zone: NgZone,
     ) {}
+
+    /**
+     * Capture flow: open the WeChat-style overlay, then route the cropped PNG
+     * through the per-agent paste adapter (Claude first, fallback = generic).
+     * `capturing` flips the button into a disabled / "Capturing…" state so
+     * users don't double-trigger.
+     */
+    async onScreenshot (): Promise<void> {
+        if (this.capturing) return
+        this.capturing = true
+        try {
+            const result = await this.screenshot.capture()
+            if (!result) return   // user cancelled or capture failed
+            await this.screenshotPaste.paste(result.buffer)
+        } finally {
+            this.capturing = false
+        }
+    }
+
+    screenshotTitle (): string {
+        if (this.capturing) return 'Capture in progress…'
+        return 'Take a screenshot — drag to select, annotate, then confirm to paste the path into the focused AI agent.'
+    }
 
     /**
      * True when the tab transitioned working→ready and the user hasn't
@@ -531,11 +635,38 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     ngOnInit (): void {
         this.sub = this.monitor.states$.subscribe(s => {
             this.states = s
+            this.recomputeActiveIsAi()
         })
+        // Tab switches don't change `states`, but they do change which row is
+        // "active" — so the toolbar visibility (`activeIsAi`) needs to
+        // re-evaluate. AppService emits outside the Angular zone in some
+        // paths (focus restoration), so re-enter the zone to keep the
+        // *ngIf reactive.
+        this.activeTabSub = this.app.activeTabChange$.subscribe(() => {
+            this.zone.run(() => this.recomputeActiveIsAi())
+        })
+        this.recomputeActiveIsAi()
     }
 
     ngOnDestroy (): void {
         this.sub?.unsubscribe()
+        this.activeTabSub?.unsubscribe()
+    }
+
+    /**
+     * Recompute `activeIsAi` from the current `app.activeTab` and the latest
+     * state snapshot. We match by inner pane: a focused leaf inside a split
+     * may have a different status than its sibling, so we mirror the same
+     * "outer match + focused inner" logic the paste service uses for
+     * picking the target tab.
+     */
+    private recomputeActiveIsAi (): void {
+        const active = this.app.activeTab
+        if (!active) { this.activeIsAi = false; return }
+        const focusedInner = focusedInnerOf(active)
+        const match = this.states.find(s => s.outerTab === active && s.innerTab === focusedInner)
+            ?? this.states.find(s => s.outerTab === active)
+        this.activeIsAi = !!(match && match.aiTool && match.status !== 'no_ai')
     }
 
     /**
@@ -775,4 +906,20 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         ]
         this.platform.popupContextMenu(items, ev)
     }
+}
+
+/**
+ * Resolve the focused leaf of a tab. For a split tab, `getFocusedTab()`
+ * returns the currently-focused pane; for everything else (or if the API
+ * throws) the tab itself IS the leaf.
+ */
+function focusedInnerOf (outer: BaseTabComponent): BaseTabComponent {
+    try {
+        const fn = (outer as any).getFocusedTab
+        if (typeof fn === 'function') {
+            const inner = fn.call(outer)
+            if (inner) return inner
+        }
+    } catch { /* fall through */ }
+    return outer
 }

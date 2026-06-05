@@ -22,6 +22,8 @@ import { HookAdapterRegistry } from './hook-adapters/registry'
 import { HookRuntimeService } from './hook-runtime.service'
 import { HookInstallerService } from './hook-installer.service'
 import { HookWatcherService } from './hook-watcher.service'
+import { ScreenshotService } from './screenshot/screenshot.service'
+import { ScreenshotPasteService } from './screenshot/paste.service'
 
 const BASE_ICON_INNER = `
   <rect x="1" y="2" width="5" height="12" rx="1" fill="currentColor" opacity="0.85"/>
@@ -100,6 +102,8 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
         UnreadService,
         AttentionJumperService,
         AttentionNotifierService,
+        ScreenshotService,
+        ScreenshotPasteService,
         { provide: SidebarProvider,       useClass: AiSidebarContribProvider,      multi: true },
         { provide: ToolbarButtonProvider, useClass: ToggleAiSidebarButtonProvider, multi: true },
         { provide: HotkeyProvider,        useClass: AiSidebarHotkeyProvider,       multi: true },
