@@ -85,7 +85,7 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
                     </div>
                     <div class="body">
                         <div class="line1">
-                            <span class="ttl">{{ s.title }}</span>
+                            <span class="primary" [attr.title]="s.cwd || s.title">{{ s.cwd ? folderName(s.cwd) : s.title }}</span>
                             <span *ngIf="s.status === 'needs_permission'" class="attn" aria-hidden="true"></span>
                             <span *ngIf="isUnread(s)" class="unread" title="Agent finished — click to dismiss" aria-label="Unread: agent finished"></span>
                         </div>
@@ -94,7 +94,7 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
                             <span class="status" [attr.data-status]="s.status">{{ statusLabel(s) }}</span>
                         </div>
                         <div *ngIf="s.cwd && s.status !== 'needs_permission'" class="line3">
-                            <span class="cwd" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
+                            <span class="path-sub" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
                         </div>
                     </div>
                     <div class="meta">
@@ -339,7 +339,7 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             border-radius: 0 3px 3px 0;
             background: var(--gt-st-active);
         }
-        .row.active .ttl { color: var(--gt-text); font-weight: 600; }
+        .row.active .primary { color: var(--gt-text); font-weight: 600; }
 
         /* ---- status rail dot ---- */
         .rail {
@@ -380,15 +380,19 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             gap: 7px;
             min-width: 0;
         }
-        .ttl {
+        /* Primary identifier on line1 — folder basename (the project the user
+           is in). Falls back to the tab title when cwd isn't reported. Single
+           line with end-ellipsis; the full path lives on line3 (.path-sub). */
+        .primary {
             font-size: 15px;
             font-weight: 500;
             color: var(--gt-text);
-            overflow-wrap: anywhere;
-            word-break: break-word;
             line-height: 1.3;
             flex: 1 1 auto;
             min-width: 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         .attn {
             width: 6px;
@@ -437,18 +441,17 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             margin-top: 3px;
             min-width: 0;
         }
-        /* Up to 3 lines; long paths are pre-truncated with a middle '…' in JS
-           (displayCwd) so the END of the path — usually the most specific
-           directory — always stays visible. Hover the row to see the full
-           path via the [title] attribute. */
-        .cwd {
+        /* Full path under the folder name — mono, dim, up to 2 lines. Long
+           paths are pre-truncated with a middle '…' by displayCwd, so the
+           END (most specific directory) is always visible. */
+        .path-sub {
             font-family: var(--gt-mono);
             font-size: 12px;
             line-height: 1.35;
             color: var(--gt-text-faint);
             display: -webkit-box;
             -webkit-box-orient: vertical;
-            -webkit-line-clamp: 3;
+            -webkit-line-clamp: 2;
             overflow: hidden;
             overflow-wrap: anywhere;
             word-break: break-all;
@@ -476,7 +479,6 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             font-family: var(--gt-mono);
             font-size: 11px;
             font-weight: 600;
-            letter-spacing: 0.04em;
             padding: 3px 6px;
             border-radius: 5px;
             line-height: 1;
@@ -797,18 +799,18 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         return `${s.title} — ${a11y[s.status] || s.status}`
     }
 
-    /** 3-letter uppercase tag matching the GlanceTerm design language. */
+    /** Full agent name for the chip on line2. */
     toolTag (tool: string | null): string {
         if (!tool) return ''
         const tags: Record<string, string> = {
-            claude:   'CLA',
-            codex:    'CDX',
-            gemini:   'GEM',
-            opencode: 'OPC',
-            aider:    'AID',
-            goose:    'GSE',
+            claude:   'Claude',
+            codex:    'Codex',
+            gemini:   'Gemini',
+            opencode: 'OpenCode',
+            aider:    'Aider',
+            goose:    'Goose',
         }
-        return tags[tool] || tool.slice(0, 3).toUpperCase()
+        return tags[tool] || tool.charAt(0).toUpperCase() + tool.slice(1)
     }
 
     ageStr (ms: number | null): string {
@@ -859,6 +861,20 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         const tail = Math.ceil(keep * 0.7)
         const head = keep - tail
         return s.slice(0, head) + ELLIPSIS + s.slice(s.length - tail)
+    }
+
+    /**
+     * Trailing folder name (basename) of a cwd. Used as the prominent label
+     * on line1 — typically the project the user is working in. Handles both
+     * `/` and `\` separators, trims trailing ones, and degrades gracefully
+     * for filesystem roots (`/`, `C:\`) by returning the input unchanged.
+     */
+    folderName (p: string | null): string {
+        if (!p) return ''
+        const trimmed = p.replace(/[/\\]+$/, '')
+        if (!trimmed) return p
+        const m = trimmed.match(/[^/\\]+$/)
+        return m ? m[0] : p
     }
 
     /**
