@@ -46,14 +46,24 @@ import { HookAdapter, HookEventEntry, InstallReport } from './adapter'
  *      elicitations, which PermissionRequest doesn't cover). Both
  *      events map to `needs_permission`; whichever arrives first wins.
  *
- * `PreToolUse` is subscribed for one specific transition: when the user
- * answers a permission prompt with "approve", the next event Claude fires
- * is PreToolUse for the actual tool. Mapping it to `working` flips the
- * row out of needs_permission instantly instead of leaving it stuck red
- * until the eventual Stop. PreToolUse fires for every tool call (not just
- * post-permission), so the mapping is a no-op when status was already
- * `working` — cost is one harmless re-emit per tool call, coalesced by
- * the watcher's 60ms debounce.
+ * `PreToolUse` is subscribed PURELY as a counter signal for HookWatcher's
+ * subagent-in-flight tracker — it fires with `tool_name: "Task"` right before
+ * the main agent backgrounds a subagent, which is the increment trigger.
+ * Earlier code mapped PreToolUse → working on the (wrong) theory that it was
+ * the "user approved a permission prompt" follow-up event. Per the Claude
+ * hooks reference, PreToolUse actually fires BEFORE PermissionRequest, not
+ * after — so it can't carry the post-approval signal. mapEventToStatus
+ * therefore returns null for it; the row keeps whatever status the most
+ * recent status-mapping event set, and the displayed status only changes
+ * via the events that DO map (UserPromptSubmit, PermissionRequest, Stop,
+ * SubagentStop counter override, etc.).
+ *
+ * Known limitation after a denied permission: the row holds at
+ * `needs_permission` until the main agent's next Stop, because Claude
+ * doesn't emit a discrete "permission denied" event the user-side hook
+ * could observe. v0.3 may add `PostToolUse → working` to cut this short
+ * after approve+run completes; we skip it in v0.2 to avoid the extra
+ * hook-fire churn on every tool call.
  */
 
 interface ClaudeHookEntry {
@@ -217,12 +227,13 @@ export class ClaudeHookAdapter extends HookAdapter {
             case 'UserPromptSubmit':
                 return 'working'
             case 'PreToolUse':
-                // Flips the row out of needs_permission instantly when the
-                // user approves a permission prompt — the next event Claude
-                // fires after approval is PreToolUse for the actual tool.
-                // Harmless re-affirmation for tools that didn't go through
-                // a permission step.
-                return 'working'
+                // Counter-only signal — see top-of-file comment. PreToolUse
+                // fires BEFORE PermissionRequest in Claude's documented
+                // order, so it is NOT the "user just approved" indicator.
+                // Leaving displayed status untouched here lets the row keep
+                // the working / needs_permission state the most recent
+                // status-mapping event chose.
+                return null
             case 'Stop':
                 return 'idle'
             case 'SubagentStop':

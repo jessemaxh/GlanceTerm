@@ -50,16 +50,39 @@ PAYLOAD=$(head -c 1048576)
 # class blocks injected quotes, then tr strips backslashes + ASCII control
 # bytes so a literal backslash or newline in the payload cannot break the
 # JSON we emit downstream.
-SAN='tr -d "\\\\\\\\\\000\\001\\002\\003\\004\\005\\006\\007\\010\\011\\012\\013\\014\\015\\016\\017\\020\\021\\022\\023\\024\\025\\026\\027\\030\\031"'
-EVENT=$(printf '%s' "$PAYLOAD" | sed -n 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -1 | eval "$SAN")
-SESSION_ID=$(printf '%s' "$PAYLOAD" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -1 | eval "$SAN")
-MATCHER=$(printf '%s' "$PAYLOAD" | sed -n 's/.*"matcher"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -1 | eval "$SAN")
+# tr range \\000-\\037 covers ALL ASCII control bytes (NUL through US, i.e. all
+# RFC 8259 forbidden chars in JSON strings) plus the literal backslash. An
+# earlier draft listed only \\000-\\031 and let 0x1A-0x1F (SUB/ESC/FS/GS/RS/US)
+# through — those bytes pass the sed regex but break JSON.parse downstream,
+# making the watcher silently drop the event.
+SAN='tr -d "\\\\\\\\\\000-\\037"'
+
+# Field extraction uses grep -o "key":"val" | head -1 rather than a greedy
+# sed regex. The earlier sed pattern (.*"tool_name".*) matches the LAST
+# occurrence of the key on the line — fine for fields Claude only ever puts at
+# the top level (event/session_id/cwd) but broken for tool_name once a Task
+# subagent's free-form tool_response content contains a literal
+# "tool_name":"..." substring on PostToolUse, which would mis-classify the
+# event and corrupt the in-flight counter. grep -o emits each match on its
+# own line; head -1 takes the FIRST one, which in Claude top-level-keys-
+# first payload order is the real top-level field.
+extract () {
+    printf '%s' "$PAYLOAD" \\
+        | grep -o "\\"$1\\"[[:space:]]*:[[:space:]]*\\"[^\\"]*\\"" \\
+        | head -1 \\
+        | sed -n 's/.*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' \\
+        | eval "$SAN"
+}
+
+EVENT=$(extract hook_event_name)
+SESSION_ID=$(extract session_id)
+MATCHER=$(extract matcher)
 # tool_name only present on PreToolUse / PostToolUse payloads. We need it to
 # know which PreToolUse events are "Task" (spawning a subagent) vs every
 # other tool — only Task ones bump the subagent in-flight counter that keeps
 # the row at 'working' across main-agent Stop.
-TOOL_NAME=$(printf '%s' "$PAYLOAD" | sed -n 's/.*"tool_name"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -1 | eval "$SAN")
-CWD=$(printf '%s' "$PAYLOAD" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -1 | eval "$SAN")
+TOOL_NAME=$(extract tool_name)
+CWD=$(extract cwd)
 TS=$(date +%s)
 
 OUT="$STATE_DIR/$TAB_ID.json"
