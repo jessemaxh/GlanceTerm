@@ -45,10 +45,13 @@ export async function openCaptureWindow (opts: OpenOpts): Promise<CaptureResult>
         frame: false,
         transparent: true,
         fullscreen: false,
-        // `fullscreen: true` on macOS animates into a separate Space which is
-        // jarring and slow. `kiosk` covers the screen instantly without the
-        // animation, and we set alwaysOnTop to be safe.
-        kiosk: process.platform === 'darwin',
+        // NO kiosk on macOS. Kiosk applies NSApplicationPresentationHideDock
+        // (and HideMenuBar) — Electron has a long-standing bug where closing
+        // a kiosk window doesn't restore those flags, leaving the user with
+        // a permanently-hidden Dock until they log out or relaunch the
+        // Dock process. `setAlwaysOnTop(_, 'screen-saver')` already paints
+        // the overlay above the Dock (screen-saver level 1000 > Dock level
+        // 20), so we don't need to ASK macOS to hide it — we just cover it.
         alwaysOnTop: true,
         movable: false,
         resizable: false,
@@ -77,6 +80,16 @@ export async function openCaptureWindow (opts: OpenOpts): Promise<CaptureResult>
         const done = (result: CaptureResult): void => {
             if (settled) return
             settled = true
+            try {
+                // Belt-and-braces: if a future change ever reintroduces kiosk
+                // (or a future Electron defaults a different presentation flag
+                // on transparent always-on-top windows), clearing it here
+                // before close stops the Dock-vanishes-forever regression
+                // from coming back.
+                if (process.platform === 'darwin' && typeof (win as any).setKiosk === 'function' && (win as any).isKiosk?.()) {
+                    (win as any).setKiosk(false)
+                }
+            } catch { /* */ }
             try { win.close() } catch { /* */ }
             resolve(result)
         }

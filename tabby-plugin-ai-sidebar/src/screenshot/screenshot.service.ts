@@ -72,6 +72,15 @@ export class ScreenshotService {
         const ourWindow: any = remote.getCurrentWindow()
         const target = this.pickDisplay(screen, ourWindow)
 
+        // Defensive: macOS's NSApplicationPresentation flags (Dock visibility,
+        // Dock icon presentation policy) sometimes get left in a "hidden"
+        // state by a prior crashed/aborted overlay session — kiosk mode is
+        // the historical offender, but other paths can leak too. Re-asserting
+        // dock.show() before every capture costs nothing and recovers the
+        // user's Dock + Dock icon if they were stuck hidden from a previous
+        // bad run.
+        ensureDockVisible(remote)
+
         const wasVisible = !ourWindow.isMinimized() && ourWindow.isVisible()
         try {
             // Hide so the GlanceTerm UI isn't in the screenshot. minimize()
@@ -116,6 +125,10 @@ export class ScreenshotService {
                     ourWindow.focus()
                 }
             } catch { /* */ }
+            // Always re-assert dock visibility — covers the case where the
+            // overlay window or main-window hide somehow flipped a
+            // presentation flag we didn't expect.
+            ensureDockVisible(remote)
             this.inProgress = false
         }
     }
@@ -153,5 +166,38 @@ export class ScreenshotService {
         const img = match.thumbnail
         if (!img || img.isEmpty?.()) return null
         return img.toDataURL()
+    }
+}
+
+/**
+ * Force the macOS Dock and the app's Dock icon back to visible.
+ *
+ * Background — the first GlanceTerm release of the screenshot button set
+ * `kiosk: true` on the overlay BrowserWindow. macOS kiosk mode applies
+ * NSApplicationPresentationKioskMode, which includes both HideDock and
+ * HideMenuBar, and Electron has a bug where closing such a window doesn't
+ * always restore those flags. Users hit two visible symptoms:
+ *   1. The whole macOS Dock stayed hidden.
+ *   2. GlanceTerm's icon disappeared from the Dock even after Dock came back
+ *      (the app's activation policy got stuck on `accessory`).
+ *
+ * We've since dropped `kiosk: true` from capture-window.ts, but this helper
+ * stays as belt-and-braces:
+ *   - `app.dock.show()` flips activation policy back to `regular`, restoring
+ *     the app's icon in the Dock.
+ *   - It also re-asserts default presentation options on the app, which
+ *     re-shows the system Dock if a leftover flag was hiding it.
+ *
+ * No-op on non-macOS platforms (Linux/Windows don't have `app.dock`).
+ */
+function ensureDockVisible (remote: any): void {
+    if (process.platform !== 'darwin') return
+    try {
+        const app = remote.getBuiltin?.('app') ?? remote.app
+        if (app?.dock?.show) {
+            void app.dock.show()
+        }
+    } catch {
+        /* swallow — defensive call, never block the screenshot flow */
     }
 }
