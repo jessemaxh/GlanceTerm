@@ -95,6 +95,7 @@ export { TerminalDecorator, TerminalContextMenuItemProvider, TerminalColorScheme
 export { Frontend, XTermFrontend, XTermWebGLFrontend }
 export { BaseTerminalTabComponent } from './api/baseTerminalTab.component'
 export { ConnectableTerminalTabComponent } from './api/connectableTerminalTab.component'
+export { IMAGE_PASTE_HOOK, ImagePasteHook, ImagePasteTarget } from './api/imagePasteHook'
 export * from './api/interfaces'
 export * from './middleware/streamProcessing'
 export * from './middleware/loginScriptProcessing'

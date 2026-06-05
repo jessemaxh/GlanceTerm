@@ -10,11 +10,24 @@
 set -euo pipefail
 FORK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN="$FORK/tabby-plugin-ai-sidebar"
+TERMINAL_PKG="$FORK/tabby-terminal"
 USER_DATA="$HOME/Library/Application Support/GlanceTerm-dev"
 
 # Rebuild the plugin (fast, idempotent).
 echo "→ building plugin…"
 (cd "$PLUGIN" && npm run build) >/dev/null
+
+# Rebuild tabby-terminal too — we vendored an `IMAGE_PASTE_HOOK` extension
+# point into BaseTerminalTabComponent (see tabby-terminal/src/api/), and a
+# stale dist/ from before that change will make Angular fail to resolve the
+# IMAGE_PASTE_HOOK token at construction time. dist/ is gitignored so anyone
+# pulling these changes will have an out-of-date built tree until this runs.
+# ~3 s on a warm machine; skip with SKIP_TERMINAL_BUILD=1 once you know it's
+# in sync.
+if [[ -z "${SKIP_TERMINAL_BUILD:-}" ]]; then
+    echo "→ building tabby-terminal…"
+    (cd "$TERMINAL_PKG" && ../node_modules/.bin/webpack --progress=false) >/dev/null
+fi
 
 # We do NOT touch brewed Tabby — separate user-data-dir means independent locks.
 # But if a previous GlanceTerm-dev Electron is still alive, quit it. Scoped

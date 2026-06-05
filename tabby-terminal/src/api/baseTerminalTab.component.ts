@@ -11,6 +11,7 @@ import { Frontend } from '../frontends/frontend'
 import { XTermFrontend, XTermWebGLFrontend } from '../frontends/xtermFrontend'
 import { ResizeEvent, BaseTerminalProfile } from './interfaces'
 import { TerminalDecorator } from './decorator'
+import { IMAGE_PASTE_HOOK, ImagePasteHook } from './imagePasteHook'
 import { SearchPanelComponent } from '../components/searchPanel.component'
 import { MultifocusService } from '../services/multifocus.service'
 import { getTerminalBackgroundColor } from '../helpers'
@@ -129,6 +130,15 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
     protected translate: TranslateService
     protected multifocus: MultifocusService
     protected themes: ThemesService
+    /**
+     * Optional plugin-provided hook that intercepts `paste()` BEFORE the
+     * text-clipboard read. Used by GlanceTerm to detect a PNG on the system
+     * clipboard, save it to a temp file, and type the path into the
+     * terminal so AI agents like Claude Code can read it as an attachment.
+     * Returns true → paste() returns early. False / no hook → default text
+     * path runs unchanged.
+     */
+    protected imagePasteHook?: ImagePasteHook
     // Deps end
 
     protected logger: Logger
@@ -208,6 +218,7 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
         this.translate = injector.get(TranslateService)
         this.multifocus = injector.get(MultifocusService)
         this.themes = injector.get(ThemesService)
+        this.imagePasteHook = injector.get<any>(IMAGE_PASTE_HOOK, null, InjectFlags.Optional) as ImagePasteHook | undefined
 
         this.logger = this.log.create('baseTerminalTab')
         this.setTitle(this.translate.instant('Terminal'))
@@ -531,6 +542,19 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
     }
 
     async paste (): Promise<void> {
+        // GlanceTerm: let an injected hook intercept paste BEFORE we read
+        // text clipboard. Today this routes a PNG-on-clipboard through the
+        // image-paste path (save temp file → type the path). If no hook is
+        // injected, or the hook decides this isn't its event, fall through
+        // to the original text-clipboard pipeline unchanged.
+        try {
+            if (this.imagePasteHook && await this.imagePasteHook.tryHandle(this)) {
+                return
+            }
+        } catch (e) {
+            this.logger.warn('image paste hook threw — falling back to text paste', e)
+        }
+
         let data = this.platform.readClipboard()
         if (this.hostApp.platform === Platform.Windows) {
             data = data.replaceAll('\r\n', '\r')
