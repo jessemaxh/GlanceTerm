@@ -261,14 +261,32 @@ export class HookWatcherService implements OnDestroy {
     private scheduleFlush (filePath: string): void {
         // Read immediately but coalesce the OBSERVABLE emission so a flurry
         // of events during one Claude turn becomes a single sidebar repaint.
-        void this.ingest(filePath).then(() => {
-            if (this.flushScheduled) return
-            this.flushScheduled = true
-            setTimeout(() => {
-                this.flushScheduled = false
-                this.emit()
-            }, 60)
-        })
+        void this.ingest(filePath).then(() => this.scheduleEmit())
+    }
+
+    /**
+     * Single debounced-emit primitive. Sets `flushScheduled` and arms a
+     * 60 ms timer that fires `emit()` once per window — any number of
+     * `scheduleEmit()` calls inside the window collapse to one repaint.
+     *
+     * Use this from EVERY ingest path that wants to surface a state change
+     * (snapshot, counter, currentTool, dedup, …). Calling `this.emit()`
+     * directly from inside `ingest()` would double-fire on the fs.watch
+     * path: ingest's inner emit + scheduleFlush's `.then(() => emit)`
+     * trailing emit. For a 30-tool turn that's the difference between 30
+     * tab-monitor ticks and 60+ (each tick scans process trees and reads
+     * env blocks — non-trivial work).
+     *
+     * Only `coldLoad()` keeps a direct `this.emit()` call, because it
+     * batches its own end-of-pass emit after processing all files.
+     */
+    private scheduleEmit (): void {
+        if (this.flushScheduled) return
+        this.flushScheduled = true
+        setTimeout(() => {
+            this.flushScheduled = false
+            this.emit()
+        }, 60)
     }
 
     private async ingest (filePath: string, opts: { skipEmit?: boolean } = {}): Promise<void> {
@@ -289,7 +307,7 @@ export class HookWatcherService implements OnDestroy {
             const counterDropped = this.subagentInFlight.delete(baseName)
             const toolDropped = this.currentTool.delete(baseName)
             const dedupDropped = this.lastProcessedEvent.delete(baseName)
-            if ((snapshotDropped || counterDropped || toolDropped || dedupDropped) && !opts.skipEmit) this.emit()
+            if ((snapshotDropped || counterDropped || toolDropped || dedupDropped) && !opts.skipEmit) this.scheduleEmit()
             return
         }
 
@@ -352,7 +370,15 @@ export class HookWatcherService implements OnDestroy {
                     this.subagentInFlight.set(parsed.tab_id, cur - 1)
                     sideEffectChanged = true
                 }
-            } else if (parsed.event === 'SessionStart') {
+            } else if (parsed.event === 'SessionStart' || parsed.event === 'SessionEnd') {
+                // Session boundary — any subagent still in our books is
+                // either pre-existing leftover (SessionStart from a fresh
+                // Claude that doesn't know about prior state) or
+                // unambiguously dead (SessionEnd = parent gone, all
+                // subagents necessarily terminated). Both → reset to 0.
+                // Pre-fix, only SessionStart reset, so a crashed Claude
+                // mid-subagent could pin the row to working until the
+                // next session start, which might be never.
                 if ((this.subagentInFlight.get(parsed.tab_id) ?? 0) !== 0) {
                     this.subagentInFlight.set(parsed.tab_id, 0)
                     sideEffectChanged = true
@@ -365,6 +391,19 @@ export class HookWatcherService implements OnDestroy {
         // the case where a tool was interrupted mid-run and PostToolUse
         // never fired (Claude crash, network drop). Cleared on SessionStart
         // too so a fresh Claude doesn't inherit a stale tool name.
+        //
+        // INTENTIONALLY does NOT clear on PermissionRequest / Notification.
+        // When the user sits on a "Bash(rm *) y/n?" prompt, the row reading
+        // "needs you · Bash" tells them WHICH tool is blocked — actively
+        // useful, not stale. The clear happens naturally on whichever event
+        // resolves the prompt (PostToolUse if approved, Stop if denied).
+        //
+        // Defensive note: PreToolUse with empty tool_name (shouldn't happen
+        // — our handlers always populate it on Pre/PostToolUse) is a no-op
+        // rather than a clear. Treating it as "clear" would risk wiping a
+        // legitimate currentTool whenever a malformed payload races through.
+        // The next real PostToolUse / Stop / SessionEnd will clear it
+        // anyway.
         if (eventAt >= this.startupTs) {
             if (parsed.event === 'PreToolUse' && parsed.tool_name) {
                 if (this.currentTool.get(parsed.tab_id) !== parsed.tool_name) {
@@ -386,10 +425,11 @@ export class HookWatcherService implements OnDestroy {
         const status = adapter.mapEventToStatus(parsed.event, parsed.matcher)
         if (!status) {
             // Adapter says this event doesn't change displayed status (e.g.
-            // SubagentStop, PreToolUse, PostToolUse, PreCompact). Emit
-            // anyway if any of our side-tracker maps changed, so the
-            // tab-monitor override and sidebar tool indicator re-evaluate.
-            if (sideEffectChanged && !opts.skipEmit) this.emit()
+            // SubagentStop, PreToolUse, PostToolUse, PreCompact). Route
+            // any side-tracker changes through the debounced emit so the
+            // tab-monitor override and sidebar tool indicator re-evaluate
+            // — without flooding it with a tick per Pre/PostToolUse fire.
+            if (sideEffectChanged && !opts.skipEmit) this.scheduleEmit()
             return
         }
 
