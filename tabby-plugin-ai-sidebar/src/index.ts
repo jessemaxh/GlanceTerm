@@ -10,6 +10,7 @@ import {
     ToolbarButtonProvider,
     ToolbarButton,
 } from 'tabby-core'
+import { IMAGE_PASTE_HOOK } from 'tabby-terminal'
 
 import { AiSidebarComponent } from './sidebar.component'
 import { AiSidebarConfigProvider } from './ai-config-provider'
@@ -24,6 +25,7 @@ import { HookInstallerService } from './hook-installer.service'
 import { HookWatcherService } from './hook-watcher.service'
 import { ScreenshotService } from './screenshot/screenshot.service'
 import { ScreenshotPasteService } from './screenshot/paste.service'
+import { ImagePasteHookService } from './image-paste-hook.service'
 
 const BASE_ICON_INNER = `
   <rect x="1" y="2" width="5" height="12" rx="1" fill="currentColor" opacity="0.85"/>
@@ -104,10 +106,17 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
         AttentionNotifierService,
         ScreenshotService,
         ScreenshotPasteService,
+        ImagePasteHookService,
         { provide: SidebarProvider,       useClass: AiSidebarContribProvider,      multi: true },
         { provide: ToolbarButtonProvider, useClass: ToggleAiSidebarButtonProvider, multi: true },
         { provide: HotkeyProvider,        useClass: AiSidebarHotkeyProvider,       multi: true },
         { provide: ConfigProvider,        useClass: AiSidebarConfigProvider,       multi: true },
+        // Hook into BaseTerminalTabComponent.paste() so a PNG on the system
+        // clipboard turns into a temp-file path typed into the focused terminal.
+        // Hook lives in our plugin; the vendored conditional in
+        // tabby-terminal's paste() is one line. Image-clipboard absent → hook
+        // returns false → default text paste runs.
+        { provide: IMAGE_PASTE_HOOK,      useExisting: ImagePasteHookService },
     ],
 })
 export default class AiSidebarModule {
