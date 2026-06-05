@@ -91,6 +91,8 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
                         <div class="line2">
                             <span *ngIf="s.aiTool" class="tag" [attr.data-tool]="s.aiTool">{{ toolTag(s.aiTool) }}</span>
                             <span class="status" [attr.data-status]="effStatus(s)">{{ statusLabel(s) }}</span>
+                            <span *ngIf="s.currentTool" class="micro">{{ s.currentTool }}</span>
+                            <span *ngIf="s.subagentCount > 0" class="micro accent">{{ s.subagentCount }} {{ s.subagentCount === 1 ? 'agent' : 'agents' }}</span>
                         </div>
                         <div *ngIf="s.cwd && effStatus(s) !== 'needs_permission'" class="line3">
                             <span class="path-sub" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
@@ -478,6 +480,34 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
         .status[data-status="no_ai"]            { color: var(--gt-text-faint); }
         .status[data-status="needs_permission"] { color: var(--gt-st-perm); font-weight: 600; }
         .status[data-status="done"]             { color: var(--gt-st-done); font-weight: 600; }
+
+        /* Inline secondary info on line2 — currentTool ("· Bash") and
+           subagent count ("· 2 agents"). Each pill gets a leading bullet
+           via ::before so the template doesn't carry literal separators.
+           .accent variant: subagent count uses the brand honey so the
+           backgrounded-work indicator pops vs the dim tool name. Both
+           pills shrink/clip rather than push status off-row on narrow
+           sidebars. */
+        .micro {
+            font-family: var(--gt-mono);
+            font-size: 12.5px;
+            font-weight: 500;
+            color: var(--gt-text-faint);
+            white-space: nowrap;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            flex: 0 1 auto;
+        }
+        .micro::before {
+            content: "· ";
+            color: var(--gt-text-faint);
+            opacity: 0.6;
+        }
+        .micro.accent {
+            color: var(--gt-accent);
+            font-weight: 600;
+        }
 
         .line3 {
             display: flex;

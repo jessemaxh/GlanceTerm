@@ -108,6 +108,25 @@ export class HookWatcherService implements OnDestroy {
     private readonly subagentInFlight = new Map<string, number>()
 
     /**
+     * Per-tab "what tool is the main agent currently inside" — the tool_name
+     * from the most recent PreToolUse, cleared on PostToolUse / Stop /
+     * SessionEnd. Surfaces in the sidebar as a `working · Bash` suffix on
+     * the status line so the user can see what Claude is actually doing
+     * between status transitions.
+     *
+     * Fast tools (Read / Grep / sub-second Bash) will set+clear within a
+     * single render cycle and visibly flicker; that's intentional — the
+     * flicker IS the signal "Claude is firing many quick tools right now".
+     * Slow tools (long Bash, WebFetch, Task) linger long enough to read
+     * easily. No debounce.
+     *
+     * Independent of HookSnapshot for the same reason as `subagentInFlight`:
+     * we want tool transitions to refresh the UI without rewriting the
+     * snapshot's eventAt, which would disturb the idle-stability gate.
+     */
+    private readonly currentTool = new Map<string, string>()
+
+    /**
      * Per-tab "last event we've already processed" — `{ts, event}`. Used to
      * make `ingest()` idempotent across the four ways the same on-disk file
      * can get read more than once:
@@ -186,6 +205,13 @@ export class HookWatcherService implements OnDestroy {
         return this.subagentInFlight.get(tabId) ?? 0
     }
 
+    /** Sync lookup — name of the tool whose PreToolUse arrived without a
+     *  matching PostToolUse / Stop yet. Sidebar renders it inline after the
+     *  status text. Null when between tool calls. */
+    getCurrentTool (tabId: string): string | null {
+        return this.currentTool.get(tabId) ?? null
+    }
+
     private async start (): Promise<void> {
         await this.runtime.ensureReady()
 
@@ -261,8 +287,9 @@ export class HookWatcherService implements OnDestroy {
             // reuses the same tab_id.
             const snapshotDropped = this.map.delete(baseName)
             const counterDropped = this.subagentInFlight.delete(baseName)
+            const toolDropped = this.currentTool.delete(baseName)
             const dedupDropped = this.lastProcessedEvent.delete(baseName)
-            if ((snapshotDropped || counterDropped || dedupDropped) && !opts.skipEmit) this.emit()
+            if ((snapshotDropped || counterDropped || toolDropped || dedupDropped) && !opts.skipEmit) this.emit()
             return
         }
 
@@ -301,7 +328,7 @@ export class HookWatcherService implements OnDestroy {
         }
         this.lastProcessedEvent.set(parsed.tab_id, { ts: eventAt, event: parsed.event })
 
-        // (2) Subagent in-flight counter — runs BEFORE the status-mapping
+        // (2a) Subagent in-flight counter — runs BEFORE the status-mapping
         // bail so SubagentStop (which maps to null) still decrements. Three
         // transitions matter:
         //   PreToolUse(tool_name=Task) → +1
@@ -314,21 +341,43 @@ export class HookWatcherService implements OnDestroy {
         // last-write was PreToolUse(Task) would push the counter to 1 for a
         // tab_id whose matching SubagentStop will never arrive, pinning the
         // row to working forever.
-        let counterChanged = false
+        let sideEffectChanged = false
         if (eventAt >= this.startupTs) {
             if (parsed.event === 'PreToolUse' && parsed.tool_name === 'Task') {
                 this.subagentInFlight.set(parsed.tab_id, (this.subagentInFlight.get(parsed.tab_id) ?? 0) + 1)
-                counterChanged = true
+                sideEffectChanged = true
             } else if (parsed.event === 'SubagentStop') {
                 const cur = this.subagentInFlight.get(parsed.tab_id) ?? 0
                 if (cur > 0) {
                     this.subagentInFlight.set(parsed.tab_id, cur - 1)
-                    counterChanged = true
+                    sideEffectChanged = true
                 }
             } else if (parsed.event === 'SessionStart') {
                 if ((this.subagentInFlight.get(parsed.tab_id) ?? 0) !== 0) {
                     this.subagentInFlight.set(parsed.tab_id, 0)
-                    counterChanged = true
+                    sideEffectChanged = true
+                }
+            }
+        }
+
+        // (2b) Current-tool tracker — same stale-file rule. PreToolUse sets,
+        // every "tool sequence ended" signal clears. Stop / SessionEnd cover
+        // the case where a tool was interrupted mid-run and PostToolUse
+        // never fired (Claude crash, network drop). Cleared on SessionStart
+        // too so a fresh Claude doesn't inherit a stale tool name.
+        if (eventAt >= this.startupTs) {
+            if (parsed.event === 'PreToolUse' && parsed.tool_name) {
+                if (this.currentTool.get(parsed.tab_id) !== parsed.tool_name) {
+                    this.currentTool.set(parsed.tab_id, parsed.tool_name)
+                    sideEffectChanged = true
+                }
+            } else if (parsed.event === 'PostToolUse'
+                    || parsed.event === 'Stop'
+                    || parsed.event === 'SessionStart'
+                    || parsed.event === 'SessionEnd') {
+                if (this.currentTool.has(parsed.tab_id)) {
+                    this.currentTool.delete(parsed.tab_id)
+                    sideEffectChanged = true
                 }
             }
         }
@@ -337,9 +386,10 @@ export class HookWatcherService implements OnDestroy {
         const status = adapter.mapEventToStatus(parsed.event, parsed.matcher)
         if (!status) {
             // Adapter says this event doesn't change displayed status (e.g.
-            // SubagentStop, PreToolUse, PreCompact). Emit anyway if the
-            // counter changed so the tab-monitor override re-evaluates.
-            if (counterChanged && !opts.skipEmit) this.emit()
+            // SubagentStop, PreToolUse, PostToolUse, PreCompact). Emit
+            // anyway if any of our side-tracker maps changed, so the
+            // tab-monitor override and sidebar tool indicator re-evaluate.
+            if (sideEffectChanged && !opts.skipEmit) this.emit()
             return
         }
 

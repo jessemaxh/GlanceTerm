@@ -126,6 +126,19 @@ export interface TabState {
      * than a stale or fabricated status.
      */
     awaitingFirstEvent: boolean
+    /**
+     * Name of the tool the agent is currently inside (`Bash` / `Read` / `Task`
+     * / …) — sidebar renders it as `working · Bash`. Null when between tool
+     * calls or when no AI tool is recognised on the tab.
+     */
+    currentTool: string | null
+    /**
+     * Number of subagents the main agent has spawned without a matching
+     * SubagentStop yet. Sidebar renders `· N agents` after the status when
+     * > 0. Also drives the idle→working override (see hook-watcher's
+     * subagentInFlight doc).
+     */
+    subagentCount: number
 }
 
 interface ChildProcessInfo { pid: number; ppid: number; command: string }
@@ -380,6 +393,11 @@ export class TabMonitor implements OnDestroy {
         let status: TabStatus
         let lastActiveMs: number | null = null
         let awaitingFirstEvent = false
+        // tabId hoisted to function scope so the TabState return at the
+        // bottom can read HookWatcher's side-trackers (currentTool,
+        // subagentInFlight). Stays undefined for tabs without an adapter-
+        // supported AI tool, which short-circuits the side-channel reads.
+        let tabId: string | undefined
 
         if (!aiTool) {
             status = 'no_ai'
@@ -403,7 +421,7 @@ export class TabMonitor implements OnDestroy {
             push(truePid)
             if (truePid) for (const a of ancestorsOf(truePid, 6)) push(a)
             const envId = this.readEnvTabId(t.inner, envCandidates)
-            const tabId: string | undefined = envId ?? sess.glancetermTabId
+            tabId = envId ?? sess.glancetermTabId
             const snap = tabId ? this.hooks.getStatus(tabId) : null
             if (snap) {
                 // Subagent in-flight override: when the main agent has
@@ -441,6 +459,12 @@ export class TabMonitor implements OnDestroy {
             status,
             lastActiveMs,
             awaitingFirstEvent,
+            // Side-channel reads from HookWatcher. Default to null / 0 when
+            // we couldn't resolve a tabId (no env var captured yet, no hook
+            // event yet, etc.) — sidebar treats both defaults as "render
+            // nothing", matching the placeholderState case.
+            currentTool: tabId ? this.hooks.getCurrentTool(tabId) : null,
+            subagentCount: tabId ? this.hooks.getSubagentInFlight(tabId) : 0,
         }
     }
 
@@ -543,6 +567,8 @@ export class TabMonitor implements OnDestroy {
             status: 'no_ai',
             lastActiveMs: null,
             awaitingFirstEvent: false,
+            currentTool: null,
+            subagentCount: 0,
         }
     }
 

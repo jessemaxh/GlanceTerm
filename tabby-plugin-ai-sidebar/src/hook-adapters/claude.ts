@@ -93,6 +93,12 @@ const EVENTS: HookEventEntry[] = [
     { event: 'SessionStart',      async: true },
     { event: 'UserPromptSubmit',  async: true },
     { event: 'PreToolUse',        async: true },
+    // Counter-side signal — HookWatcher uses PostToolUse to clear the
+    // per-tab currentTool, so the sidebar can render "working · Bash"
+    // while a tool is running and drop the suffix between tool calls.
+    // Doubles the per-turn hook traffic vs not subscribing, but each
+    // invocation is sub-100 ms async so it doesn't block Claude.
+    { event: 'PostToolUse',       async: true },
     { event: 'Stop',              async: true },
     // Subagent lifecycle. When the main agent invokes the `Task` tool to
     // background a subagent, the main agent's response ends immediately and
@@ -227,12 +233,15 @@ export class ClaudeHookAdapter extends HookAdapter {
             case 'UserPromptSubmit':
                 return 'working'
             case 'PreToolUse':
-                // Counter-only signal — see top-of-file comment. PreToolUse
+            case 'PostToolUse':
+                // Counter-only signals — see top-of-file comment. PreToolUse
                 // fires BEFORE PermissionRequest in Claude's documented
                 // order, so it is NOT the "user just approved" indicator.
-                // Leaving displayed status untouched here lets the row keep
-                // the working / needs_permission state the most recent
-                // status-mapping event chose.
+                // PostToolUse arrives when a tool returns; HookWatcher uses
+                // it to clear the per-tab currentTool. Leaving displayed
+                // status untouched here lets the row keep the working /
+                // needs_permission state the most recent status-mapping
+                // event chose.
                 return null
             case 'Stop':
                 return 'idle'
