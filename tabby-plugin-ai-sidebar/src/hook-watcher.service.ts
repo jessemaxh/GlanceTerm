@@ -17,6 +17,11 @@ interface HookStatusFile {
     agent: string
     event: string
     matcher?: string
+    /** Set only on PreToolUse / PostToolUse payloads — used by the
+     *  subagent in-flight counter to detect `Task` tool invocations
+     *  (which spawn background subagents). Other events leave this
+     *  field empty. */
+    tool_name?: string
     session_id?: string
     cwd?: string
     ts: number
@@ -69,6 +74,22 @@ export class HookWatcherService implements OnDestroy {
     private readonly subject = new BehaviorSubject<Map<string, HookSnapshot>>(this.map)
     readonly snapshots$: Observable<Map<string, HookSnapshot>> = this.subject.asObservable()
 
+    /**
+     * Per-tab count of in-flight subagents — how many `Task` tool calls have
+     * been started (PreToolUse with tool_name=Task) without a matching
+     * SubagentStop yet. Tab-monitor consults this to override raw `idle` to
+     * `working` while the count is > 0, which fixes the "main agent's Stop
+     * fired but a backgrounded subagent is still chewing tokens" case
+     * where the row would otherwise read as ready.
+     *
+     * Reset to 0 on SessionStart so a stale count from a prior Claude
+     * session (e.g. crashed before SubagentStop landed) doesn't pin the
+     * row to working forever. Kept separate from HookSnapshot so the
+     * count can change without forcing a snapshot replacement that would
+     * disturb the idle-stability gate's eventAt arithmetic.
+     */
+    private readonly subagentInFlight = new Map<string, number>()
+
     private watcher: fsSync.FSWatcher | null = null
     private rescanTimer: NodeJS.Timeout | null = null
     /** Debounce: a Claude turn fires several events in quick succession;
@@ -94,6 +115,13 @@ export class HookWatcherService implements OnDestroy {
     /** Sync lookup used by the sidebar render path. */
     getStatus (tabId: string): HookSnapshot | null {
         return this.map.get(tabId) ?? null
+    }
+
+    /** Sync lookup — how many subagents the main agent has spawned without a
+     *  SubagentStop for them yet. TabMonitor uses this to keep the row
+     *  green even after the main agent fires Stop. */
+    getSubagentInFlight (tabId: string): number {
+        return this.subagentInFlight.get(tabId) ?? 0
     }
 
     private async start (): Promise<void> {
@@ -184,8 +212,42 @@ export class HookWatcherService implements OnDestroy {
         const adapter = this.registry.forTool(parsed.agent as AiTool)
         if (!adapter) return
 
+        // Subagent in-flight counter — runs BEFORE the status-mapping bail-
+        // out so SubagentStop (which maps to null) still decrements. Three
+        // transitions matter:
+        //   PreToolUse(tool_name=Task) → +1   (main agent spawned a subagent)
+        //   SubagentStop                → -1   (subagent finished)
+        //   SessionStart                → 0    (fresh Claude session — wipe
+        //                                       any stale count from a prior
+        //                                       run that died mid-subagent)
+        // For other events the count is left as-is. A drift beyond 0 floors
+        // at 0; a drop below zero never persists.
+        let counterChanged = false
+        if (parsed.event === 'PreToolUse' && parsed.tool_name === 'Task') {
+            this.subagentInFlight.set(parsed.tab_id, (this.subagentInFlight.get(parsed.tab_id) ?? 0) + 1)
+            counterChanged = true
+        } else if (parsed.event === 'SubagentStop') {
+            const cur = this.subagentInFlight.get(parsed.tab_id) ?? 0
+            if (cur > 0) {
+                this.subagentInFlight.set(parsed.tab_id, cur - 1)
+                counterChanged = true
+            }
+        } else if (parsed.event === 'SessionStart') {
+            if ((this.subagentInFlight.get(parsed.tab_id) ?? 0) !== 0) {
+                this.subagentInFlight.set(parsed.tab_id, 0)
+                counterChanged = true
+            }
+        }
+
         const status = adapter.mapEventToStatus(parsed.event, parsed.matcher)
-        if (!status) return     // Event we don't care about (e.g. PreCompact).
+        if (!status) {
+            // Adapter says this event doesn't change displayed status (e.g.
+            // SubagentStop, PreCompact). But if the counter changed, we
+            // still need consumers to re-render so the tab-monitor override
+            // notices — emit unless the caller asked us not to.
+            if (counterChanged && !opts.skipEmit) this.emit()
+            return
+        }
 
         // Ts-aware merge (issue M1): two events arriving in close succession
         // can have their readFile()s complete out of order. The later read

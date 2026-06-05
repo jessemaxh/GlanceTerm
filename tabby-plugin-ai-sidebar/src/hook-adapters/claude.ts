@@ -84,6 +84,13 @@ const EVENTS: HookEventEntry[] = [
     { event: 'UserPromptSubmit',  async: true },
     { event: 'PreToolUse',        async: true },
     { event: 'Stop',              async: true },
+    // Subagent lifecycle. When the main agent invokes the `Task` tool to
+    // background a subagent, the main agent's response ends immediately and
+    // fires Stop — so without this subscription the sidebar drops to "ready"
+    // while the subagent is still chewing on tokens. HookWatcher uses
+    // PreToolUse(tool=Task) + SubagentStop to maintain an in-flight counter,
+    // and TabMonitor overrides idle → working while the counter is non-zero.
+    { event: 'SubagentStop',      async: true },
     // Canonical event for the inline `Bash(rm *)`-style permission dialog.
     // Fires reliably regardless of terminal focus (unlike Notification).
     { event: 'PermissionRequest', async: true },
@@ -218,6 +225,14 @@ export class ClaudeHookAdapter extends HookAdapter {
                 return 'working'
             case 'Stop':
                 return 'idle'
+            case 'SubagentStop':
+                // A subagent finishing is not the same as the main agent
+                // finishing — we don't change the row's displayed status
+                // here. The HookWatcher uses this event purely to decrement
+                // its in-flight subagent counter; whatever the main agent's
+                // current status is (working / idle / needs_permission)
+                // remains correct.
+                return null
             case 'PermissionRequest':
                 return 'needs_permission'
             case 'Notification':

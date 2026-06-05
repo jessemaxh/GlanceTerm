@@ -54,6 +54,11 @@ SAN='tr -d "\\\\\\\\\\000\\001\\002\\003\\004\\005\\006\\007\\010\\011\\012\\013
 EVENT=$(printf '%s' "$PAYLOAD" | sed -n 's/.*"hook_event_name"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -1 | eval "$SAN")
 SESSION_ID=$(printf '%s' "$PAYLOAD" | sed -n 's/.*"session_id"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -1 | eval "$SAN")
 MATCHER=$(printf '%s' "$PAYLOAD" | sed -n 's/.*"matcher"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -1 | eval "$SAN")
+# tool_name only present on PreToolUse / PostToolUse payloads. We need it to
+# know which PreToolUse events are "Task" (spawning a subagent) vs every
+# other tool — only Task ones bump the subagent in-flight counter that keeps
+# the row at 'working' across main-agent Stop.
+TOOL_NAME=$(printf '%s' "$PAYLOAD" | sed -n 's/.*"tool_name"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -1 | eval "$SAN")
 CWD=$(printf '%s' "$PAYLOAD" | sed -n 's/.*"cwd"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' | head -1 | eval "$SAN")
 TS=$(date +%s)
 
@@ -61,7 +66,7 @@ OUT="$STATE_DIR/$TAB_ID.json"
 TMP="$OUT.tmp.$$"
 
 cat > "$TMP" <<EOF_GT
-{"tab_id":"$TAB_ID","agent":"$AGENT","event":"$EVENT","matcher":"$MATCHER","session_id":"$SESSION_ID","cwd":"$CWD","ts":$TS}
+{"tab_id":"$TAB_ID","agent":"$AGENT","event":"$EVENT","matcher":"$MATCHER","tool_name":"$TOOL_NAME","session_id":"$SESSION_ID","cwd":"$CWD","ts":$TS}
 EOF_GT
 
 mv "$TMP" "$OUT" 2>/dev/null
@@ -104,11 +109,17 @@ try { $json = $payload | ConvertFrom-Json } catch { exit 0 }
 $matcher = ""
 if ($json.matcher -and ($json.matcher -is [string])) { $matcher = [string]$json.matcher }
 
+# tool_name only present on PreToolUse / PostToolUse — see the sh handler
+# comment for the rationale (Task subagent in-flight counter).
+$toolName = ""
+if ($json.tool_name -and ($json.tool_name -is [string])) { $toolName = [string]$json.tool_name }
+
 $out = [ordered]@{
     tab_id     = [string]$tabId
     agent      = [string]$Agent
     event      = [string]$json.hook_event_name
     matcher    = $matcher
+    tool_name  = $toolName
     session_id = [string]$json.session_id
     cwd        = [string]$json.cwd
     ts         = [int][double]::Parse((Get-Date -UFormat %s))

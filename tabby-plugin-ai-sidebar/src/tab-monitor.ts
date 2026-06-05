@@ -406,7 +406,18 @@ export class TabMonitor implements OnDestroy {
             const tabId: string | undefined = envId ?? sess.glancetermTabId
             const snap = tabId ? this.hooks.getStatus(tabId) : null
             if (snap) {
-                status = this.applyIdleGate(t.inner, snap.status, snap.eventAt)
+                // Subagent in-flight override: when the main agent has
+                // spawned a backgrounded Task subagent, the main agent's
+                // response ends → Stop → raw status = idle. The subagent
+                // is still chewing tokens though, so we surface it as
+                // working until the matching SubagentStop arrives and
+                // drops the counter back to 0. See HookWatcher's
+                // `subagentInFlight` doc for the counter contract.
+                let rawStatus = snap.status
+                if (rawStatus === 'idle' && tabId && this.hooks.getSubagentInFlight(tabId) > 0) {
+                    rawStatus = 'working'
+                }
+                status = this.applyIdleGate(t.inner, rawStatus, snap.eventAt)
                 lastActiveMs = Math.max(0, Date.now() - snap.eventAt)
             } else {
                 // Adapter exists and tool is running but no hook event in our
