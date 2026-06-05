@@ -7,6 +7,19 @@ import * as fs from 'node:fs'
 import path from 'node:path'
 import * as vars from './vars.mjs'
 
+// Ensure builtin-plugins/ is in sync with current source.
+// build-macos used to assume the developer ran `npm run build` and
+// `node scripts/prepackage-plugins.mjs` first; forgetting either silently
+// shipped a stale plugin snapshot inside the .dmg (you'd notice when a
+// freshly-installed app was missing recently-merged features). We now do
+// both unconditionally so the .dmg always reflects HEAD.
+// Override with SKIP_PREPACKAGE=1 if you're iterating only on the Electron
+// shell and know plugins are fresh.
+if (!process.env.SKIP_PREPACKAGE) {
+    execFileSync('npm', ['run', 'build'],                    { stdio: 'inherit' })
+    execFileSync('node', ['scripts/prepackage-plugins.mjs'], { stdio: 'inherit' })
+}
+
 const isTag = (process.env.GITHUB_REF || '').startsWith('refs/tags/')
 
 process.env.ARCH = process.env.ARCH || process.arch

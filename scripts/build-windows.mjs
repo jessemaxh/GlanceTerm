@@ -2,7 +2,16 @@
 /* eslint-disable @typescript-eslint/prefer-nullish-coalescing */
 import { build as builder } from 'electron-builder'
 import * as vars from './vars.mjs'
-import { execSync } from 'child_process'
+import { execSync, execFileSync } from 'child_process'
+
+// Ensure builtin-plugins/ is in sync with current source.
+// See build-macos.mjs for the rationale — a stale builtin-plugins/ snapshot
+// silently ships missing/old features inside the package. Override with
+// SKIP_PREPACKAGE=1 when iterating on the shell only.
+if (!process.env.SKIP_PREPACKAGE) {
+    execFileSync('npm', ['run', 'build'],                    { stdio: 'inherit', shell: true })
+    execFileSync('node', ['scripts/prepackage-plugins.mjs'], { stdio: 'inherit' })
+}
 
 const isTag = (process.env.GITHUB_REF || process.env.BUILD_SOURCEBRANCH || '').startsWith('refs/tags/')
 const keypair = process.env.SM_KEYPAIR_ALIAS

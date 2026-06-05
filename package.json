@@ -103,6 +103,7 @@
   "scripts": {
     "build": "npm run build:typings && node scripts/build-modules.mjs",
     "build:typings": "node scripts/build-typings.mjs",
+    "dmg:mac": "node scripts/build-macos.mjs",
     "watch": "cross-env TABBY_DEV=1 webpack --progress --color --watch",
     "start": "cross-env TABBY_DEV=1 electron app -d --inspect",
     "start:prod": "electron app --debug",
