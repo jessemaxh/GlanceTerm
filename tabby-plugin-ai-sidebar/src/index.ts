@@ -26,6 +26,16 @@ import { HookWatcherService } from './hook-watcher.service'
 import { ScreenshotService } from './screenshot/screenshot.service'
 import { ScreenshotPasteService } from './screenshot/paste.service'
 import { ImagePasteHookService } from './image-paste-hook.service'
+import { SplitShellService } from './split-shell.service'
+
+// "splitscreen_right" — left pane outlined, right pane filled (the new shell).
+// 16x16 viewBox to match the sidebar-toggle icon already in this file so the
+// two buttons line up visually in the toolbar.
+const SPLIT_SHELL_ICON = `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" fill="currentColor">
+  <rect x="1.5" y="2.5" width="6" height="11" rx="1" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.7"/>
+  <rect x="8.5" y="2.5" width="6" height="11" rx="1"/>
+</svg>`
 
 const BASE_ICON_INNER = `
   <rect x="1" y="2" width="5" height="12" rx="1" fill="currentColor" opacity="0.85"/>
@@ -92,6 +102,21 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
     }
 }
 
+@Injectable()
+class SplitShellButtonProvider extends ToolbarButtonProvider {
+    constructor (private splitShell: SplitShellService) {
+        super()
+    }
+    provide (): ToolbarButton[] {
+        return [{
+            icon: SPLIT_SHELL_ICON,
+            title: 'Open shell in current tab CWD',
+            weight: 6,
+            click: () => this.splitShell.openShellInCurrentTab('r'),
+        }]
+    }
+}
+
 @NgModule({
     imports: [CommonModule],
     declarations: [AiSidebarComponent],
@@ -107,8 +132,10 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
         ScreenshotService,
         ScreenshotPasteService,
         ImagePasteHookService,
+        SplitShellService,
         { provide: SidebarProvider,       useClass: AiSidebarContribProvider,      multi: true },
         { provide: ToolbarButtonProvider, useClass: ToggleAiSidebarButtonProvider, multi: true },
+        { provide: ToolbarButtonProvider, useClass: SplitShellButtonProvider,      multi: true },
         { provide: HotkeyProvider,        useClass: AiSidebarHotkeyProvider,       multi: true },
         { provide: ConfigProvider,        useClass: AiSidebarConfigProvider,       multi: true },
         // Hook into BaseTerminalTabComponent.paste() so a PNG on the system
