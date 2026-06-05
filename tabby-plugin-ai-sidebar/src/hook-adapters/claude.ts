@@ -28,12 +28,32 @@ import { HookAdapter, HookEventEntry, InstallReport } from './adapter'
  *
  * Reference: https://code.claude.com/docs/en/hooks
  *
- * Event list rationale (post-review fix C4):
- *   The earlier code subscribed to `PermissionRequest`, which is an Agent
- *   SDK concept — the CLI hook config silently ignores it. The correct
- *   "needs you" signal in the CLI is the `Notification` event with a
- *   `permission_prompt|elicitation_dialog` matcher, which we already
- *   handle. So PermissionRequest is removed.
+ * Event list rationale — two complementary paths to `needs_permission`:
+ *
+ *   1. `PermissionRequest` — the canonical event for inline "y/n" tool
+ *      permission prompts (e.g. `Bash(rm *)` when the user's
+ *      permissions.ask list matches). Per the docs it fires reliably the
+ *      moment Claude renders the dialog, regardless of terminal focus.
+ *      An earlier iteration of this adapter dropped this subscription
+ *      under the (mistaken) belief that it was Agent SDK-only and the
+ *      CLI ignored it — restoring it is what fixes the "Claude is sat
+ *      on a rm * prompt but the sidebar still says working" bug.
+ *
+ *   2. `Notification` (matcher `permission_prompt|elicitation_dialog`) —
+ *      kept as a backstop. Notification is documented as observability-
+ *      only, but it does fire on permission-related notifications under
+ *      some configurations (and on `elicitation_dialog` for MCP
+ *      elicitations, which PermissionRequest doesn't cover). Both
+ *      events map to `needs_permission`; whichever arrives first wins.
+ *
+ * `PreToolUse` is subscribed for one specific transition: when the user
+ * answers a permission prompt with "approve", the next event Claude fires
+ * is PreToolUse for the actual tool. Mapping it to `working` flips the
+ * row out of needs_permission instantly instead of leaving it stuck red
+ * until the eventual Stop. PreToolUse fires for every tool call (not just
+ * post-permission), so the mapping is a no-op when status was already
+ * `working` — cost is one harmless re-emit per tool call, coalesced by
+ * the watcher's 60ms debounce.
  */
 
 interface ClaudeHookEntry {
@@ -62,10 +82,15 @@ type ReadResult =
 const EVENTS: HookEventEntry[] = [
     { event: 'SessionStart',      async: true },
     { event: 'UserPromptSubmit',  async: true },
+    { event: 'PreToolUse',        async: true },
     { event: 'Stop',              async: true },
-    // Claude fires Notification for many things; matcher narrows to the
-    // two that actually mean "user must decide". This is the only correct
-    // path to "needs_permission" status in the current CLI hook system.
+    // Canonical event for the inline `Bash(rm *)`-style permission dialog.
+    // Fires reliably regardless of terminal focus (unlike Notification).
+    { event: 'PermissionRequest', async: true },
+    // Backstop / MCP elicitation coverage — matcher narrows to the two
+    // notification types that mean "user must decide". Documented as
+    // observability-only, but fires in some cases PermissionRequest
+    // doesn't cover (e.g. elicitation_dialog).
     { event: 'Notification',      async: true, matcher: 'permission_prompt|elicitation_dialog' },
     { event: 'SessionEnd',        async: true },
 ]
@@ -180,17 +205,28 @@ export class ClaudeHookAdapter extends HookAdapter {
         })
     }
 
-    mapEventToStatus (event: string, matcher?: string): TabStatus | null {
+    mapEventToStatus (event: string, _matcher?: string): TabStatus | null {
         switch (event) {
             case 'UserPromptSubmit':
                 return 'working'
+            case 'PreToolUse':
+                // Flips the row out of needs_permission instantly when the
+                // user approves a permission prompt — the next event Claude
+                // fires after approval is PreToolUse for the actual tool.
+                // Harmless re-affirmation for tools that didn't go through
+                // a permission step.
+                return 'working'
             case 'Stop':
                 return 'idle'
+            case 'PermissionRequest':
+                return 'needs_permission'
             case 'Notification':
-                if (matcher === 'permission_prompt' || matcher === 'elicitation_dialog') {
-                    return 'needs_permission'
-                }
-                return null
+                // The settings.json matcher already narrowed the firing set
+                // to permission_prompt|elicitation_dialog — any Notification
+                // we receive here is a permission ask. We trust the install-
+                // time matcher rather than re-checking a `matcher` field in
+                // the payload (which Claude does not always populate).
+                return 'needs_permission'
             case 'SessionStart':
                 return 'idle'
             case 'SessionEnd':
