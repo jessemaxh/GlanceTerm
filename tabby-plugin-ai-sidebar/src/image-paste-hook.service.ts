@@ -6,6 +6,20 @@ import * as path from 'path'
 import { NotificationsService } from 'tabby-core'
 import { ImagePasteHook, ImagePasteTarget } from 'tabby-terminal'
 
+import { TabMonitor, AiTool } from './tab-monitor'
+
+/**
+ * AI CLIs we believe handle binary image paste themselves: they intercept
+ * `Ctrl+V` (`\x16`) at the readline layer and read the OS clipboard via their
+ * own code. For these tabs we skip the "save PNG + type path" routine and
+ * just forward `\x16` so the agent draws its native `[Image #N]` indicator
+ * (Claude Code's behaviour in iTerm/Terminal.app).
+ *
+ * Conservative starting set — Claude is verified. codex/gemini believed to
+ * support the same pattern but unverified on this platform; add when tested.
+ */
+const BINARY_PASTE_TOOLS: ReadonlySet<AiTool> = new Set(['claude'])
+
 /**
  * Image-aware paste for ANY terminal tab — registered as the
  * `IMAGE_PASTE_HOOK` provider so it runs at the top of
@@ -44,11 +58,33 @@ import { ImagePasteHook, ImagePasteTarget } from 'tabby-terminal'
 export class ImagePasteHookService implements ImagePasteHook {
     private readonly dir = path.join(os.homedir(), '.glanceterm', 'clipboard-images')
 
-    constructor (private notifications: NotificationsService) {}
+    constructor (
+        private notifications: NotificationsService,
+        private monitor: TabMonitor,
+    ) {}
 
     async tryHandle (tab: ImagePasteTarget): Promise<boolean> {
         const png = readClipboardPng()
         if (!png) return false
+
+        // Fast-path for AI agents that read the OS clipboard themselves: just
+        // forward `Ctrl+V` (`\x16`). The image is already on the clipboard
+        // (we got it via readClipboardPng), so the agent's own paste handler
+        // will pick it up and render its native `[Image #N]` indicator. No
+        // temp file, no path text.
+        const aiTool = this.findAiToolForTab(tab)
+        if (aiTool && BINARY_PASTE_TOOLS.has(aiTool)) {
+            try {
+                tab.sendInput('\x16')
+                // eslint-disable-next-line no-console
+                console.log(`[glanceterm] image-paste: forwarded Ctrl+V to ${aiTool}`)
+            } catch (e: any) {
+                // eslint-disable-next-line no-console
+                console.error('[glanceterm] image-paste: Ctrl+V forward failed:', e)
+                this.notifications.error(`Couldn't pass image to ${aiTool}: ${e?.message ?? e}`)
+            }
+            return true
+        }
 
         let filePath: string
         try {
@@ -73,6 +109,21 @@ export class ImagePasteHookService implements ImagePasteHook {
             this.notifications.error(`Couldn't insert image path: ${e?.message ?? e}. File saved at ${filePath}`)
         }
         return true
+    }
+
+    /**
+     * Match the paste target against TabMonitor's current snapshot. Reference
+     * equality on `innerTab` works because both are the same
+     * `BaseTerminalTabComponent` instance — the monitor stores the live tab
+     * objects, and `paste()` passes `this` as the ImagePasteTarget.
+     *
+     * Returns null when the tab isn't an AI tab (or TabMonitor hasn't seen
+     * it yet — first poll within ~1.5s of spawn).
+     */
+    private findAiToolForTab (tab: ImagePasteTarget): AiTool | null {
+        const states = this.monitor.current
+        const match = states.find(s => (s.innerTab as unknown) === tab)
+        return match?.aiTool ?? null
     }
 
     private async saveTempPng (buf: Buffer): Promise<string> {

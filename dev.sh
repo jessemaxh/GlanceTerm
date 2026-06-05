@@ -26,7 +26,7 @@ echo "→ building plugin…"
 # in sync.
 if [[ -z "${SKIP_TERMINAL_BUILD:-}" ]]; then
     echo "→ building tabby-terminal…"
-    (cd "$TERMINAL_PKG" && ../node_modules/.bin/webpack --progress=false) >/dev/null
+    (cd "$TERMINAL_PKG" && ../node_modules/.bin/webpack) >/dev/null 2>&1
 fi
 
 # We do NOT touch brewed Tabby — separate user-data-dir means independent locks.
