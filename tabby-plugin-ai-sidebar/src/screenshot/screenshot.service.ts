@@ -166,22 +166,40 @@ export class ScreenshotService {
      * call — we MUST NOT touch getSources() until the OS-level status is
      * 'granted', otherwise the user falls into the restart trap.
      *
+     * Live-status correctness on our target: Electron's
+     * `getMediaAccessStatus('screen')` returns a STALE cached value on
+     * macOS 12 Monterey and older (electron#36722). On macOS 13 Ventura+
+     * Chromium switched to `CGPreflightScreenCaptureAccess`, which returns
+     * the actual current state with no restart needed — confirmed by
+     * Electron maintainers in that thread. GlanceTerm targets macOS 13+,
+     * so the gate's "next click finds 'granted' after user toggles"
+     * assumption holds in practice.
+     *
      * Defensive against missing API surface: `getMediaAccessStatus('screen')`
      * is supported in Electron 25+; older Electrons return undefined for
      * unknown media types. If the call throws or returns undefined we fall
      * through and let getSources do whatever it does — degraded to the old
      * (sometimes-restart-needed) flow, which is still better than blocking
-     * the button outright.
+     * the button outright. We log a warning in that case so any future
+     * Electron regression that drops support shows up in console rather
+     * than silently re-trapping users.
      */
     private async checkMacScreenPermission (remote: any, win: any): Promise<boolean> {
         let status: string | undefined
         try {
             const systemPreferences = remote.getBuiltin('systemPreferences')
             status = systemPreferences?.getMediaAccessStatus?.('screen')
-        } catch {
+        } catch (e) {
+            // eslint-disable-next-line no-console
+            console.warn('[glanceterm] getMediaAccessStatus(screen) threw — falling through to legacy capture flow; permission UX may degrade:', e)
             return false
         }
-        if (!status || status === 'granted') return false
+        if (status === undefined) {
+            // eslint-disable-next-line no-console
+            console.warn('[glanceterm] getMediaAccessStatus(screen) returned undefined — Electron API surface unexpected, falling through to legacy capture flow.')
+            return false
+        }
+        if (status === 'granted') return false
 
         // status is 'not-determined' | 'denied' | 'restricted' | 'unknown'.
         // 'restricted' is MDM-locked — opening Settings won't help, but the
