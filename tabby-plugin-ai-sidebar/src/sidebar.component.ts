@@ -121,7 +121,7 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
                         (click)="onScreenshot()"
                         [title]="screenshotTitle()"
                         aria-label="Take a screenshot and paste it into the focused AI agent">
-                    <svg width="15" height="15" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                         <path d="M5.2 3.5 L6.3 2.2 L9.7 2.2 L10.8 3.5 L13.2 3.5
                                  A1.5 1.5 0 0 1 14.7 5 V11.8
                                  A1.5 1.5 0 0 1 13.2 13.3 H2.8
@@ -170,7 +170,7 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             background: var(--gt-surface-1);
             color: var(--gt-text);
             overflow: hidden;
-            font-size: 15px;
+            font-size: 17px;
             -webkit-font-smoothing: antialiased;
         }
 
@@ -186,11 +186,11 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
         .sb-header {
             display: flex;
             align-items: center;
-            gap: 9px;
-            padding: 13px 14px 11px;
+            gap: 10px;
+            padding: 16px 16px 13px;
         }
         .sb-header .h-title {
-            font-size: 11px;
+            font-size: 12.5px;
             font-weight: 600;
             letter-spacing: 0.13em;
             text-transform: uppercase;
@@ -204,46 +204,46 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            gap: 16px;
-            padding: 30px 24px;
+            gap: 18px;
+            padding: 34px 26px;
             text-align: center;
         }
         .sb-empty.filtered {
             flex: 0 0 auto;
-            padding: 28px 18px;
-            gap: 6px;
+            padding: 30px 20px;
+            gap: 7px;
         }
         .sb-empty .comb { opacity: 0.8; }
         .sb-empty .et {
-            font-size: 13px;
+            font-size: 15px;
             font-weight: 600;
             color: var(--gt-text-dim);
         }
         .sb-empty .es {
-            font-size: 12px;
+            font-size: 13.5px;
             color: var(--gt-text-faint);
             line-height: 1.5;
-            max-width: 190px;
+            max-width: 210px;
         }
 
         /* ---- filter pills (v0.2-2) ---- */
         .sb-filters {
             display: flex;
             flex-wrap: wrap;
-            gap: 6px;
-            padding: 0 12px 10px;
+            gap: 7px;
+            padding: 0 14px 12px;
         }
         .pill {
             display: inline-flex;
             align-items: center;
-            gap: 6px;
-            padding: 4px 10px;
+            gap: 7px;
+            padding: 6px 12px;
             border-radius: 99px;
             border: 1px solid var(--gt-border);
             background: transparent;
             color: var(--gt-text-dim);
             font: inherit;
-            font-size: 11.5px;
+            font-size: 13px;
             font-weight: 500;
             line-height: 1.2;
             cursor: pointer;
@@ -271,7 +271,7 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
         }
         .pill .c {
             font-family: var(--gt-mono);
-            font-size: 10px;
+            font-size: 11.5px;
             font-weight: 600;
             opacity: 0.85;
             font-variant-numeric: tabular-nums;
@@ -283,10 +283,10 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             flex: 1;
             overflow-y: auto;
             overflow-x: hidden;
-            padding: 2px 8px 10px;
+            padding: 4px 10px 12px;
             min-height: 0;
         }
-        .sb-list::-webkit-scrollbar { width: 9px; }
+        .sb-list::-webkit-scrollbar { width: 10px; }
         .sb-list::-webkit-scrollbar-thumb {
             background: var(--gt-border);
             border-radius: 99px;
@@ -301,20 +301,20 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
         .row {
             position: relative;
             display: grid;
-            grid-template-columns: 22px 14px minmax(0, 1fr) auto;
+            grid-template-columns: 26px 18px minmax(0, 1fr) auto;
             align-items: center;
-            gap: 11px;
-            padding: 11px 12px 11px 10px;
-            border-radius: 9px;
+            gap: 13px;
+            padding: 13px 14px 13px 12px;
+            border-radius: 10px;
             cursor: pointer;
             transition: background-color 0.13s ease;
-            margin-bottom: 2px;
+            margin-bottom: 3px;
         }
 
         /* ---- tab index (matches the numeric prefix on Tabby's top tab bar) ---- */
         .num {
             font-family: var(--gt-mono);
-            font-size: 13px;
+            font-size: 15px;
             font-weight: 500;
             color: var(--gt-text-faint);
             text-align: right;
@@ -369,16 +369,28 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             align-self: stretch;
         }
         .dot {
-            width: 11px;
-            height: 11px;
+            width: 14px;
+            height: 14px;
             border-radius: 99px;
             position: relative;
             display: block;
+            transform-origin: center;
         }
+        /* Working — "breathing" dot. Three layers:
+             1. The dot itself scales 1 → 1.22 → 1 each cycle.
+             2. An outer ripple (the 0 0 0 Npx ring) grows from 0 to ~13 px
+                while fading to alpha 0 — radiates outward.
+             3. A static glow halo (the 0 0 Npx blur) that intensifies at the
+                peak of the breath — gives the dot a soft "alive" feel even
+                between ripple peaks.
+           Slightly slower cadence (1.9 s) + ease-in-out feels more like
+           breathing than a tick. */
         .dot[data-status="working"] {
             background: var(--gt-st-working);
-            box-shadow: 0 0 0 0 var(--gt-st-working-glow);
-            animation: ht-pulse 1.7s ease-out infinite;
+            box-shadow:
+                0 0 0 0 rgba(76, 175, 80, 0.55),
+                0 0 6px rgba(76, 175, 80, 0.45);
+            animation: ht-pulse 1.9s ease-in-out infinite;
         }
         .dot[data-status="idle"]             { background: var(--gt-st-idle); }
         .dot[data-status="no_ai"] {
@@ -392,13 +404,28 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
            enough weight on their own. */
         .dot[data-status="done"] {
             background: var(--gt-st-done);
-            box-shadow: 0 0 0 2.5px var(--gt-st-done-ring);
+            box-shadow: 0 0 0 3px var(--gt-st-done-ring);
         }
 
         @keyframes ht-pulse {
-            0%   { box-shadow: 0 0 0 0 var(--gt-st-working-glow); }
-            70%  { box-shadow: 0 0 0 6px rgba(76, 175, 80, 0); }
-            100% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0); }
+            0% {
+                box-shadow:
+                    0 0 0 0 rgba(76, 175, 80, 0.6),
+                    0 0 4px rgba(76, 175, 80, 0.35);
+                transform: scale(1);
+            }
+            50% {
+                box-shadow:
+                    0 0 0 13px rgba(76, 175, 80, 0),
+                    0 0 16px rgba(76, 175, 80, 0.75);
+                transform: scale(1.22);
+            }
+            100% {
+                box-shadow:
+                    0 0 0 0 rgba(76, 175, 80, 0),
+                    0 0 4px rgba(76, 175, 80, 0.35);
+                transform: scale(1);
+            }
         }
 
         /* ---- body ---- */
@@ -406,14 +433,14 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
         .line1 {
             display: flex;
             align-items: center;
-            gap: 7px;
+            gap: 8px;
             min-width: 0;
         }
         /* Primary identifier on line1 — folder basename (the project the user
            is in). Falls back to the tab title when cwd isn't reported. Single
            line with end-ellipsis; the full path lives on line3 (.path-sub). */
         .primary {
-            font-size: 15px;
+            font-size: 17px;
             font-weight: 500;
             color: var(--gt-text);
             line-height: 1.3;
@@ -424,8 +451,8 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             text-overflow: ellipsis;
         }
         .attn {
-            width: 6px;
-            height: 6px;
+            width: 8px;
+            height: 8px;
             border-radius: 99px;
             background: var(--gt-st-perm);
             flex: none;
@@ -436,12 +463,12 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
         .line2 {
             display: flex;
             align-items: center;
-            gap: 7px;
-            margin-top: 4px;
+            gap: 8px;
+            margin-top: 5px;
             min-width: 0;
         }
         .status {
-            font-size: 13px;
+            font-size: 15px;
             font-weight: 500;
             white-space: nowrap;
             flex: none;
@@ -455,7 +482,7 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
         .line3 {
             display: flex;
             align-items: flex-start;
-            margin-top: 3px;
+            margin-top: 4px;
             min-width: 0;
         }
         /* Full path under the folder name — mono, dim, up to 2 lines. Long
@@ -463,7 +490,7 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
            END (most specific directory) is always visible. */
         .path-sub {
             font-family: var(--gt-mono);
-            font-size: 12px;
+            font-size: 13.5px;
             line-height: 1.35;
             color: var(--gt-text-faint);
             display: -webkit-box;
@@ -481,22 +508,22 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             display: flex;
             flex-direction: column;
             align-items: flex-end;
-            gap: 5px;
+            gap: 6px;
             align-self: flex-start;
-            padding-top: 1px;
+            padding-top: 2px;
         }
         .age {
             font-family: var(--gt-mono);
-            font-size: 12px;
+            font-size: 13.5px;
             color: var(--gt-text-faint);
         }
 
         /* ---- tool tag ---- */
         .tag {
             font-family: var(--gt-mono);
-            font-size: 11px;
+            font-size: 12.5px;
             font-weight: 600;
-            padding: 3px 6px;
+            padding: 4px 7px;
             border-radius: 5px;
             line-height: 1;
             white-space: nowrap;
@@ -514,21 +541,21 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
         .sb-footer {
             display: flex;
             align-items: center;
-            gap: 10px;
-            padding: 9px 14px;
+            gap: 12px;
+            padding: 11px 16px;
             border-top: 1px solid var(--gt-border);
             font-family: var(--gt-mono);
-            font-size: 10.5px;
+            font-size: 12px;
             color: var(--gt-text-dim);
         }
         .sb-footer .stat {
             display: inline-flex;
             align-items: center;
-            gap: 5px;
+            gap: 6px;
         }
         .sb-footer .stat i {
-            width: 7px;
-            height: 7px;
+            width: 8px;
+            height: 8px;
             border-radius: 99px;
             display: block;
         }
@@ -548,8 +575,8 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
            start). */
         .sb-actions {
             display: flex;
-            gap: 8px;
-            padding: 8px 12px 12px;
+            gap: 9px;
+            padding: 10px 14px 14px;
             border-top: 1px solid var(--gt-border);
         }
         .action-btn {
@@ -557,14 +584,14 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            gap: 7px;
-            padding: 8px 12px;
-            border-radius: 8px;
+            gap: 8px;
+            padding: 10px 14px;
+            border-radius: 9px;
             background: var(--gt-surface-2);
             border: 1px solid var(--gt-border);
             color: var(--gt-text-dim);
             font: inherit;
-            font-size: 12.5px;
+            font-size: 14px;
             font-weight: 500;
             cursor: pointer;
             transition: background-color 0.13s ease, color 0.13s ease,

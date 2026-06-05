@@ -64,8 +64,8 @@ class AiSidebarContribProvider extends SidebarProvider {
             title: 'AI Tabs',
             component: AiSidebarComponent,
             side: 'left',
-            defaultWidth: 380,
-            minWidth: 260,
+            defaultWidth: 440,
+            minWidth: 300,
             maxWidth: 720,
             defaultVisible: true,
         }]
