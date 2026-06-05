@@ -1,12 +1,12 @@
 ---
-appId: com.souplin.hiveterm
-productName: HiveTerm
+appId: com.souplin.glanceterm
+productName: GlanceTerm
 compression: normal
 npmRebuild: false
 protocols:
-  - name: HiveTerm URL
+  - name: GlanceTerm URL
     schemes:
-      - hiveterm
+      - glanceterm
 files:
 - '**/*'
 - dist
@@ -40,19 +40,19 @@ asarUnpack:
 - node_modules/**/*.node
 win:
   icon: "./build/windows/icon.ico"
-  artifactName: tabby-${version}-portable-${env.ARCH}.${ext}
+  artifactName: GlanceTerm-${version}-portable-${env.ARCH}.${ext}
   signtoolOptions:
     rfc3161TimeStampServer: http://timestamp.sectigo.com
 nsis:
   oneClick: false
-  artifactName: tabby-${version}-setup-${env.ARCH}.${ext}
+  artifactName: GlanceTerm-${version}-setup-${env.ARCH}.${ext}
   installerIcon: "./build/windows/icon.ico"
   allowToChangeInstallationDirectory: true
   shortcutName: Tabby Terminal
 mac:
   category: public.app-category.utilities
   icon: "./build/mac/icon.icns"
-  artifactName: tabby-${version}-macos-${env.ARCH}.${ext}
+  artifactName: GlanceTerm-${version}-macos-${env.ARCH}.${ext}
   hardenedRuntime: true
   entitlements: "./build/mac/entitlements.plist"
   entitlementsInherit: "./build/mac/entitlements.plist"
@@ -72,7 +72,7 @@ mac:
 linux:
   category: "Utility;TerminalEmulator;System"
   icon: "./build/icons"
-  artifactName: tabby-${version}-linux-${env.ARCH}.${ext}
+  artifactName: GlanceTerm-${version}-linux-${env.ARCH}.${ext}
   executableArgs:
   - "--no-sandbox"
   desktop:

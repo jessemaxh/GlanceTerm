@@ -36,7 +36,16 @@ export class Command {
         const command = new Command()
         command.label = button.title
         command.run = async () => button.click?.()
-        command.icon = button.icon
+        // Proxy `icon` to the source button so providers can return a getter
+        // that reflects live state (e.g. a sidebar plugin embedding an unread
+        // count into its SVG). Without this, getCommands() snapshots the icon
+        // string at startup and badge updates would never reach the toolbar.
+        Object.defineProperty(command, 'icon', {
+            get: () => button.icon,
+            set: v => { button.icon = v },
+            enumerable: true,
+            configurable: true,
+        })
         command.locations = [CommandLocation.StartPage]
         if ((button.weight ?? 0) <= 0) {
             command.locations.push(CommandLocation.LeftToolbar)

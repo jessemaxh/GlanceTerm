@@ -1,33 +1,42 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
-  <defs>
-    <linearGradient id="hex" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ffaa55"/>
-      <stop offset="1" stop-color="#ff7a3d"/>
-    </linearGradient>
-    <radialGradient id="cell" cx="512" cy="512" r="380" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ffffff" stop-opacity="0.18"/>
-      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
-    </radialGradient>
-  </defs>
-  <!-- Outer hexagon (hive cell) -->
-  <polygon points="512,72 902,292 902,732 512,952 122,732 122,292"
-           fill="url(#hex)"/>
-  <polygon points="512,72 902,292 902,732 512,952 122,732 122,292"
-           fill="url(#cell)"/>
-  <!-- 6 inner cells forming a honeycomb pattern -->
-  <g fill="#1c1f23" opacity="0.85">
-    <!-- top-left -->
-    <polygon points="320,330 420,272 520,330 520,446 420,504 320,446"/>
-    <!-- top-right -->
-    <polygon points="504,330 604,272 704,330 704,446 604,504 504,446"/>
-    <!-- middle (active agent) — bright -->
-    <polygon points="412,494 512,436 612,494 612,610 512,668 412,610" fill="#ffffff" opacity="0.95"/>
-    <!-- bottom-left -->
-    <polygon points="320,654 420,596 520,654 520,770 420,828 320,770"/>
-    <!-- bottom-right -->
-    <polygon points="504,654 604,596 704,654 704,770 604,828 504,770"/>
-  </g>
-  <!-- Terminal prompt mark > inside the bright cell -->
-  <text x="512" y="588" text-anchor="middle" font-family="ui-monospace, SF Mono, Menlo, monospace"
-        font-size="120" font-weight="700" fill="#1c1f23">&gt;_</text>
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+<defs>
+  <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#1D212A"></stop>
+    <stop offset="0.55" stop-color="#13161C"></stop>
+    <stop offset="1" stop-color="#0B0D11"></stop>
+  </linearGradient>
+  <radialGradient id="glow" cx="0.82" cy="0.08" r="0.75">
+    <stop offset="0" stop-color="#FFAA55" stop-opacity="0.22"></stop>
+    <stop offset="0.5" stop-color="#FFAA55" stop-opacity="0.05"></stop>
+    <stop offset="1" stop-color="#FFAA55" stop-opacity="0"></stop>
+  </radialGradient>
+  <radialGradient id="glow2" cx="0.12" cy="0.96" r="0.65">
+    <stop offset="0" stop-color="#5BD068" stop-opacity="0.13"></stop>
+    <stop offset="1" stop-color="#5BD068" stop-opacity="0"></stop>
+  </radialGradient>
+  <radialGradient id="liveGlow" cx="0.5" cy="0.5" r="0.5">
+    <stop offset="0" stop-color="#5BD068" stop-opacity="0.6"></stop>
+    <stop offset="1" stop-color="#5BD068" stop-opacity="0"></stop>
+  </radialGradient>
+  <clipPath id="sq"><rect x="0" y="0" width="1024" height="1024" rx="224"></rect></clipPath>
+</defs>
+<g clip-path="url(#sq)">
+  <rect width="1024" height="1024" fill="url(#bg)"></rect>
+  <g stroke="#FFFFFF" stroke-opacity="0.035" stroke-width="2"><line x1="80" y1="0" x2="80" y2="1024"></line><line x1="160" y1="0" x2="160" y2="1024"></line><line x1="240" y1="0" x2="240" y2="1024"></line><line x1="320" y1="0" x2="320" y2="1024"></line><line x1="400" y1="0" x2="400" y2="1024"></line><line x1="480" y1="0" x2="480" y2="1024"></line><line x1="560" y1="0" x2="560" y2="1024"></line><line x1="640" y1="0" x2="640" y2="1024"></line><line x1="720" y1="0" x2="720" y2="1024"></line><line x1="800" y1="0" x2="800" y2="1024"></line><line x1="880" y1="0" x2="880" y2="1024"></line><line x1="960" y1="0" x2="960" y2="1024"></line><line x1="0" y1="80" x2="1024" y2="80"></line><line x1="0" y1="160" x2="1024" y2="160"></line><line x1="0" y1="240" x2="1024" y2="240"></line><line x1="0" y1="320" x2="1024" y2="320"></line><line x1="0" y1="400" x2="1024" y2="400"></line><line x1="0" y1="480" x2="1024" y2="480"></line><line x1="0" y1="560" x2="1024" y2="560"></line><line x1="0" y1="640" x2="1024" y2="640"></line><line x1="0" y1="720" x2="1024" y2="720"></line><line x1="0" y1="800" x2="1024" y2="800"></line><line x1="0" y1="880" x2="1024" y2="880"></line><line x1="0" y1="960" x2="1024" y2="960"></line></g>
+  <rect width="1024" height="1024" fill="url(#glow)"></rect>
+  <rect width="1024" height="1024" fill="url(#glow2)"></rect>
+</g>
+<rect x="3" y="3" width="1018" height="1018" rx="221" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="2.5"></rect>
+<g transform="translate(512 512) scale(1.3) translate(-512 -512)">
+  <path d="M398 286 L282 286 Q212 286 212 356 L212 668 Q212 738 282 738 L398 738 Z" fill="#FFAA55" fill-opacity="0.15"></path>
+  <rect x="212" y="286" width="600" height="452" rx="70" fill="none" stroke="#FFAA55" stroke-width="22"></rect>
+  <line x1="398" y1="302" x2="398" y2="722" stroke="#FFAA55" stroke-opacity="0.45" stroke-width="8"></line>
+  <circle cx="305" cy="372" r="74" fill="url(#liveGlow)"></circle>
+  <rect x="236" y="338" width="12" height="68" rx="6" fill="#5BD068"></rect>
+  <circle cx="305" cy="372" r="27" fill="#5BD068"></circle>
+  <circle cx="305" cy="512" r="27" fill="#FFAA55"></circle>
+  <circle cx="305" cy="652" r="27" fill="#FFAA55" fill-opacity="0.5"></circle>
+  <path d="M556 450 L614 512 L556 574" fill="none" stroke="#FFAA55" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"></path>
+  <rect x="630" y="556" width="106" height="20" rx="10" fill="#FFAA55"></rect>
+</g>
 </svg>

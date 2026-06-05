@@ -5,6 +5,7 @@ import * as os from 'os'
 import { AppService, MenuItemOptions, PlatformService } from 'tabby-core'
 
 import { TabMonitor, TabState } from './tab-monitor'
+import { UnreadService } from './unread.service'
 
 type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
 
@@ -17,9 +18,10 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
  * terminal tab is active. Click a row → AppService.selectTab() focuses that
  * terminal tab.
  *
- * Visual system: HiveTerm "Restrained" direction — honey accent on a dark
- * surface, status conveyed by colour + shape + word (color-blind safe), and
- * blue reserved for the active row so it always reads as "you are here."
+ * Visual system: GlanceTerm "Restrained" direction — single warm accent
+ * on a dark surface, status conveyed by colour + shape + word (color-blind
+ * safe), and blue reserved for the active row so it always reads as
+ * "you are here."
  */
 @Component({
     selector: 'ai-sidebar',
@@ -27,7 +29,6 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
         <div class="sb">
             <div class="sb-header">
                 <span class="h-title">AI Tabs</span>
-                <span class="h-badge" *ngIf="states.length > 0">{{ states.length }}</span>
             </div>
 
             <div class="sb-filters" *ngIf="states.length > 0">
@@ -44,31 +45,21 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             </div>
 
             <div *ngIf="states.length === 0" class="sb-empty">
-                <svg class="comb" width="78" height="74" viewBox="0 0 60 64" fill="none" aria-hidden="true">
-                    <polygon points="39.5,3.5 39.5,14.5 30,20 20.5,14.5 20.5,3.5 30,-2"
-                             stroke="var(--ht-text-faint)" stroke-width="1.3" fill="none"
-                             stroke-linejoin="round" opacity="0.55" />
-                    <polygon points="61.5,15.5 61.5,26.5 52,32 42.5,26.5 42.5,15.5 52,10"
-                             stroke="var(--ht-text-faint)" stroke-width="1.3" fill="none"
-                             stroke-linejoin="round" opacity="0.55" />
-                    <polygon points="61.5,39.5 61.5,50.5 52,56 42.5,50.5 42.5,39.5 52,34"
-                             stroke="var(--ht-text-faint)" stroke-width="1.3" fill="none"
-                             stroke-linejoin="round" opacity="0.55" />
-                    <polygon points="39.5,51.5 39.5,62.5 30,68 20.5,62.5 20.5,51.5 30,46"
-                             stroke="var(--ht-text-faint)" stroke-width="1.3" fill="none"
-                             stroke-linejoin="round" opacity="0.55" />
-                    <polygon points="17.5,39.5 17.5,50.5 8,56 -1.5,50.5 -1.5,39.5 8,34"
-                             stroke="var(--ht-text-faint)" stroke-width="1.3" fill="none"
-                             stroke-linejoin="round" opacity="0.55" />
-                    <polygon points="17.5,15.5 17.5,26.5 8,32 -1.5,26.5 -1.5,15.5 8,10"
-                             stroke="var(--ht-text-faint)" stroke-width="1.3" fill="none"
-                             stroke-linejoin="round" opacity="0.55" />
-                    <polygon points="39.5,27.5 39.5,38.5 30,44 20.5,38.5 20.5,27.5 30,22"
-                             stroke="var(--ht-honey)" stroke-width="1.3" fill="var(--ht-honey-soft)"
-                             stroke-linejoin="round" />
+                <!-- Empty-state glyph: three stacked "tab rows" representing
+                     what the sidebar will fill with. The bottom row has a
+                     filled accent dot to hint "this is where status lights
+                     up". -->
+                <svg class="emptyglyph" width="82" height="58" viewBox="0 0 82 58" fill="none" aria-hidden="true">
+                    <rect x="1" y="1"  width="80" height="14" rx="3"
+                          stroke="var(--gt-text-faint)" stroke-width="1.2" opacity="0.45" fill="none"/>
+                    <rect x="1" y="22" width="80" height="14" rx="3"
+                          stroke="var(--gt-text-faint)" stroke-width="1.2" opacity="0.55" fill="none"/>
+                    <rect x="1" y="43" width="80" height="14" rx="3"
+                          stroke="var(--gt-accent)" stroke-width="1.3" fill="var(--gt-accent-soft)"/>
+                    <circle cx="11" cy="50" r="3" fill="var(--gt-accent)"/>
                 </svg>
-                <div class="et">The hive is empty</div>
-                <div class="es">No AI agents running yet. Open a shell and start one to see it light up here.</div>
+                <div class="et">Nothing to glance at yet</div>
+                <div class="es">No AI agents running. Open a shell, start one, and it'll light up here.</div>
             </div>
 
             <div *ngIf="states.length > 0 && visibleStates.length === 0" class="sb-empty filtered">
@@ -94,6 +85,7 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
                         <div class="line1">
                             <span class="ttl">{{ s.title }}</span>
                             <span *ngIf="s.status === 'needs_permission'" class="attn" aria-hidden="true"></span>
+                            <span *ngIf="isUnread(s)" class="unread" title="Agent finished — click to dismiss" aria-label="Unread: agent finished"></span>
                         </div>
                         <div class="line2">
                             <span *ngIf="s.aiTool" class="tag" [attr.data-tool]="s.aiTool">{{ toolTag(s.aiTool) }}</span>
@@ -105,14 +97,6 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
                     </div>
                     <div class="meta">
                         <span class="age" *ngIf="s.status !== 'no_ai' && s.lastActiveMs !== null">{{ ageStr(s.lastActiveMs) }}</span>
-                        <svg *ngIf="hasSpark(s)"
-                             class="spark"
-                             [attr.data-status]="s.status"
-                             viewBox="0 0 52 14"
-                             preserveAspectRatio="none"
-                             aria-hidden="true">
-                            <polyline [attr.points]="sparkPoints(s)" />
-                        </svg>
                     </div>
                 </div>
             </div>
@@ -126,35 +110,35 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
     `,
     styles: [`
         :host {
-            /* HiveTerm tokens — dark direction. Light theme not wired (Tabby is dark-first). */
-            --ht-honey:        #FFAA55;
-            --ht-honey-deep:   #FF7A3D;
-            --ht-honey-soft:   rgba(255, 170, 85, 0.14);
+            /* GlanceTerm tokens — dark direction. Light theme not wired (Tabby is dark-first). */
+            --gt-accent:        #FFAA55;
+            --gt-accent-deep:   #FF7A3D;
+            --gt-accent-soft:   rgba(255, 170, 85, 0.14);
 
-            --ht-st-working:      #4CAF50;
-            --ht-st-working-glow: rgba(76, 175, 80, 0.45);
-            --ht-st-idle:         #8A9099;
-            --ht-st-ready:        #5B9EF5;
-            --ht-st-active:       #5B9EF5;
-            --ht-st-active-bg:    rgba(91, 158, 245, 0.12);
-            --ht-st-perm:         #FF9F45;
+            --gt-st-working:      #4CAF50;
+            --gt-st-working-glow: rgba(76, 175, 80, 0.45);
+            --gt-st-idle:         #8A9099;
+            --gt-st-ready:        #5B9EF5;
+            --gt-st-active:       #5B9EF5;
+            --gt-st-active-bg:    rgba(91, 158, 245, 0.12);
+            --gt-st-perm:         #FF9F45;
 
-            --ht-surface-1: var(--bs-body-bg, #1C1F23);
-            --ht-surface-2: rgba(255, 255, 255, 0.04);
-            --ht-surface-3: rgba(255, 255, 255, 0.07);
+            --gt-surface-1: var(--bs-body-bg, #1C1F23);
+            --gt-surface-2: rgba(255, 255, 255, 0.04);
+            --gt-surface-3: rgba(255, 255, 255, 0.07);
 
-            --ht-border:    rgba(255, 255, 255, 0.07);
-            --ht-text:      var(--bs-body-color, #E7E9EC);
-            --ht-text-dim:  #9BA1A9;
-            --ht-text-faint:#6B7178;
+            --gt-border:    rgba(255, 255, 255, 0.07);
+            --gt-text:      var(--bs-body-color, #E7E9EC);
+            --gt-text-dim:  #9BA1A9;
+            --gt-text-faint:#6B7178;
 
-            --ht-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
+            --gt-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
 
             display: block;
             width: 100%;
             height: 100%;
-            background: var(--ht-surface-1);
-            color: var(--ht-text);
+            background: var(--gt-surface-1);
+            color: var(--gt-text);
             overflow: hidden;
             font-size: 15px;
             -webkit-font-smoothing: antialiased;
@@ -180,23 +164,9 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             font-weight: 600;
             letter-spacing: 0.13em;
             text-transform: uppercase;
-            color: var(--ht-text-faint);
+            color: var(--gt-text-faint);
             white-space: nowrap;
         }
-        .sb-header .h-badge {
-            font-family: var(--ht-mono);
-            font-size: 10.5px;
-            font-weight: 600;
-            min-width: 18px;
-            height: 18px;
-            padding: 0 5px;
-            border-radius: 99px;
-            display: grid;
-            place-items: center;
-            background: var(--ht-honey-soft);
-            color: var(--ht-honey);
-        }
-
         /* ---- empty state (C2) ---- */
         .sb-empty {
             flex: 1;
@@ -217,11 +187,11 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
         .sb-empty .et {
             font-size: 13px;
             font-weight: 600;
-            color: var(--ht-text-dim);
+            color: var(--gt-text-dim);
         }
         .sb-empty .es {
             font-size: 12px;
-            color: var(--ht-text-faint);
+            color: var(--gt-text-faint);
             line-height: 1.5;
             max-width: 190px;
         }
@@ -239,9 +209,9 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             gap: 6px;
             padding: 4px 10px;
             border-radius: 99px;
-            border: 1px solid var(--ht-border);
+            border: 1px solid var(--gt-border);
             background: transparent;
-            color: var(--ht-text-dim);
+            color: var(--gt-text-dim);
             font: inherit;
             font-size: 11.5px;
             font-weight: 500;
@@ -250,22 +220,22 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
         }
         .pill:hover {
-            background: var(--ht-surface-2);
-            color: var(--ht-text);
+            background: var(--gt-surface-2);
+            color: var(--gt-text);
             border-color: rgba(255,255,255,0.14);
         }
         .pill.active {
-            background: var(--ht-honey-soft);
+            background: var(--gt-accent-soft);
             border-color: rgba(255, 170, 85, 0.55);
-            color: var(--ht-honey);
+            color: var(--gt-accent);
         }
         .pill[data-id="needs_permission"].active {
             background: rgba(255, 159, 69, 0.18);
             border-color: rgba(255, 159, 69, 0.6);
-            color: var(--ht-st-perm);
+            color: var(--gt-st-perm);
         }
         .pill .c {
-            font-family: var(--ht-mono);
+            font-family: var(--gt-mono);
             font-size: 10px;
             font-weight: 600;
             opacity: 0.85;
@@ -283,7 +253,7 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
         }
         .sb-list::-webkit-scrollbar { width: 9px; }
         .sb-list::-webkit-scrollbar-thumb {
-            background: var(--ht-border);
+            background: var(--gt-border);
             border-radius: 99px;
             border: 2px solid transparent;
             background-clip: padding-box;
@@ -308,16 +278,16 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
 
         /* ---- tab index (matches the numeric prefix on Tabby's top tab bar) ---- */
         .num {
-            font-family: var(--ht-mono);
+            font-family: var(--gt-mono);
             font-size: 13px;
             font-weight: 500;
-            color: var(--ht-text-faint);
+            color: var(--gt-text-faint);
             text-align: right;
             font-variant-numeric: tabular-nums;
             line-height: 1;
         }
-        .row.active .num { color: var(--ht-st-active); font-weight: 600; }
-        .row:hover { background: var(--ht-surface-2); }
+        .row.active .num { color: var(--gt-st-active); font-weight: 600; }
+        .row:hover { background: var(--gt-surface-2); }
 
         .row[data-status="no_ai"] { opacity: 0.52; }
         .row[data-status="no_ai"]:hover { opacity: 0.75; }
@@ -331,7 +301,7 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             background: rgba(255, 159, 69, 0.07);
         }
 
-        .row.active { background: var(--ht-st-active-bg); }
+        .row.active { background: var(--gt-st-active-bg); }
         .row.active::before {
             content: "";
             position: absolute;
@@ -340,9 +310,9 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             bottom: 6px;
             width: 2.5px;
             border-radius: 0 3px 3px 0;
-            background: var(--ht-st-active);
+            background: var(--gt-st-active);
         }
-        .row.active .ttl { color: var(--ht-text); font-weight: 600; }
+        .row.active .ttl { color: var(--gt-text); font-weight: 600; }
 
         /* ---- status rail dot ---- */
         .rail {
@@ -358,19 +328,19 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             display: block;
         }
         .dot[data-status="working"] {
-            background: var(--ht-st-working);
-            box-shadow: 0 0 0 0 var(--ht-st-working-glow);
+            background: var(--gt-st-working);
+            box-shadow: 0 0 0 0 var(--gt-st-working-glow);
             animation: ht-pulse 1.7s ease-out infinite;
         }
-        .dot[data-status="idle"]             { background: var(--ht-st-idle); }
+        .dot[data-status="idle"]             { background: var(--gt-st-idle); }
         .dot[data-status="no_ai"] {
             background: transparent;
-            box-shadow: inset 0 0 0 1.5px var(--ht-text-faint);
+            box-shadow: inset 0 0 0 1.5px var(--gt-text-faint);
         }
-        .dot[data-status="needs_permission"] { background: var(--ht-st-perm); }
+        .dot[data-status="needs_permission"] { background: var(--gt-st-perm); }
 
         @keyframes ht-pulse {
-            0%   { box-shadow: 0 0 0 0 var(--ht-st-working-glow); }
+            0%   { box-shadow: 0 0 0 0 var(--gt-st-working-glow); }
             70%  { box-shadow: 0 0 0 6px rgba(76, 175, 80, 0); }
             100% { box-shadow: 0 0 0 0 rgba(76, 175, 80, 0); }
         }
@@ -386,21 +356,35 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
         .ttl {
             font-size: 15px;
             font-weight: 500;
-            color: var(--ht-text);
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            flex: 0 1 auto;
+            color: var(--gt-text);
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            line-height: 1.3;
+            flex: 1 1 auto;
+            min-width: 0;
         }
         .attn {
             width: 6px;
             height: 6px;
             border-radius: 99px;
-            background: var(--ht-st-perm);
+            background: var(--gt-st-perm);
             flex: none;
             animation: ht-attn 1.2s ease-in-out infinite;
         }
         @keyframes ht-attn { 50% { opacity: 0.25; } }
+
+        /* Unread "agent finished" red dot. Distinct from .attn (which means
+           "needs you now" — orange + pulsing): unread is a quieter red,
+           non-animated, larger so it reads as a notification badge rather
+           than a state-change indicator. Cleared when the row is focused. */
+        .unread {
+            width: 8px;
+            height: 8px;
+            border-radius: 99px;
+            background: #FF5252;
+            box-shadow: 0 0 0 1.5px var(--gt-surface-1);
+            flex: none;
+        }
 
         .line2 {
             display: flex;
@@ -415,10 +399,10 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             white-space: nowrap;
             flex: none;
         }
-        .status[data-status="working"]          { color: var(--ht-st-working); }
-        .status[data-status="idle"]             { color: var(--ht-st-ready); }
-        .status[data-status="no_ai"]            { color: var(--ht-text-faint); }
-        .status[data-status="needs_permission"] { color: var(--ht-st-perm); font-weight: 600; }
+        .status[data-status="working"]          { color: var(--gt-st-working); }
+        .status[data-status="idle"]             { color: var(--gt-st-ready); }
+        .status[data-status="no_ai"]            { color: var(--gt-text-faint); }
+        .status[data-status="needs_permission"] { color: var(--gt-st-perm); font-weight: 600; }
 
         .line3 {
             display: flex;
@@ -431,10 +415,10 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
            directory — always stays visible. Hover the row to see the full
            path via the [title] attribute. */
         .cwd {
-            font-family: var(--ht-mono);
+            font-family: var(--gt-mono);
             font-size: 12px;
             line-height: 1.35;
-            color: var(--ht-text-faint);
+            color: var(--gt-text-faint);
             display: -webkit-box;
             -webkit-box-orient: vertical;
             -webkit-line-clamp: 3;
@@ -455,31 +439,14 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             padding-top: 1px;
         }
         .age {
-            font-family: var(--ht-mono);
+            font-family: var(--gt-mono);
             font-size: 12px;
-            color: var(--ht-text-faint);
+            color: var(--gt-text-faint);
         }
-
-        /* ---- sparkline (v0.2-4) ---- */
-        .spark {
-            width: 52px;
-            height: 14px;
-            display: block;
-            opacity: 0.85;
-        }
-        .spark polyline {
-            fill: none;
-            stroke-width: 1.2;
-            stroke-linejoin: round;
-            stroke-linecap: round;
-        }
-        .spark[data-status="working"] polyline          { stroke: var(--ht-st-working); }
-        .spark[data-status="idle"] polyline             { stroke: var(--ht-st-idle); }
-        .spark[data-status="needs_permission"] polyline { stroke: var(--ht-st-perm); }
 
         /* ---- tool tag ---- */
         .tag {
-            font-family: var(--ht-mono);
+            font-family: var(--gt-mono);
             font-size: 11px;
             font-weight: 600;
             letter-spacing: 0.04em;
@@ -503,10 +470,10 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             align-items: center;
             gap: 10px;
             padding: 9px 14px;
-            border-top: 1px solid var(--ht-border);
-            font-family: var(--ht-mono);
+            border-top: 1px solid var(--gt-border);
+            font-family: var(--gt-mono);
             font-size: 10.5px;
-            color: var(--ht-text-dim);
+            color: var(--gt-text-dim);
         }
         .sb-footer .stat {
             display: inline-flex;
@@ -519,12 +486,12 @@ type FilterId = 'all' | 'needs_permission' | 'working' | 'idle'
             border-radius: 99px;
             display: block;
         }
-        .sb-footer .stat.work          { color: var(--ht-st-working); }
-        .sb-footer .stat.work i        { background: var(--ht-st-working); }
-        .sb-footer .stat.idle          { color: var(--ht-text-dim); }
-        .sb-footer .stat.idle i        { background: var(--ht-st-idle); }
-        .sb-footer .stat.attn-stat     { color: var(--ht-st-perm); }
-        .sb-footer .stat.attn-stat i   { background: var(--ht-st-perm); }
+        .sb-footer .stat.work          { color: var(--gt-st-working); }
+        .sb-footer .stat.work i        { background: var(--gt-st-working); }
+        .sb-footer .stat.idle          { color: var(--gt-text-dim); }
+        .sb-footer .stat.idle i        { background: var(--gt-st-idle); }
+        .sb-footer .stat.attn-stat     { color: var(--gt-st-perm); }
+        .sb-footer .stat.attn-stat i   { background: var(--gt-st-perm); }
 
         @media (prefers-reduced-motion: reduce) {
             .dot[data-status="working"],
@@ -549,7 +516,17 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         public app: AppService,
         public monitor: TabMonitor,
         private platform: PlatformService,
+        private unread: UnreadService,
     ) {}
+
+    /**
+     * True when the tab transitioned working→ready and the user hasn't
+     * focused it yet. Drives the red dot. Clearing happens automatically in
+     * UnreadService when the user clicks the row (via activeTabChange$).
+     */
+    isUnread (s: TabState): boolean {
+        return this.unread.isUnread(s.innerTab)
+    }
 
     ngOnInit (): void {
         this.sub = this.monitor.states$.subscribe(s => {
@@ -689,7 +666,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         return `${s.title} — ${a11y[s.status] || s.status}`
     }
 
-    /** 3-letter uppercase tag matching the HiveTerm design language. */
+    /** 3-letter uppercase tag matching the GlanceTerm design language. */
     toolTag (tool: string | null): string {
         if (!tool) return ''
         const tags: Record<string, string> = {
@@ -701,32 +678,6 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
             goose:    'GSE',
         }
         return tags[tool] || tool.slice(0, 3).toUpperCase()
-    }
-
-    /** True when the row has a meaningful byte-rate history to plot. */
-    hasSpark (s: TabState): boolean {
-        return !!s.byteHistory && s.byteHistory.length >= 2
-    }
-
-    /**
-     * Build SVG polyline "x,y x,y …" points for the row's bytes/sec history.
-     * Viewbox is 52×14 (matches CSS). We rescale to the run's own max — every
-     * sparkline ends up readable regardless of whether the tab fires 50 B/s
-     * or 50 KB/s, at the cost of cross-row magnitude comparison (which the
-     * status colour + dot already covers).
-     */
-    sparkPoints (s: TabState): string {
-        const h = s.byteHistory!
-        const max = Math.max(...h, 1)
-        const W = 52
-        const H = 14
-        const pad = 1
-        const n = h.length
-        return h.map((v, i) => {
-            const x = n === 1 ? W / 2 : (i / (n - 1)) * W
-            const y = H - pad - (v / max) * (H - pad * 2)
-            return `${x.toFixed(1)},${y.toFixed(1)}`
-        }).join(' ')
     }
 
     ageStr (ms: number | null): string {

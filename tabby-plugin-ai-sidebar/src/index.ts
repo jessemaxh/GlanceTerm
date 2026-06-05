@@ -17,13 +17,40 @@ import { AiSidebarHotkeyProvider } from './ai-hotkey-provider'
 import { AttentionJumperService } from './attention-jumper.service'
 import { AttentionNotifierService } from './attention-notifier.service'
 import { TabMonitor } from './tab-monitor'
+import { UnreadService } from './unread.service'
+import { HookAdapterRegistry } from './hook-adapters/registry'
+import { HookRuntimeService } from './hook-runtime.service'
+import { HookInstallerService } from './hook-installer.service'
+import { HookWatcherService } from './hook-watcher.service'
 
-const ICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+const BASE_ICON_INNER = `
   <rect x="1" y="2" width="5" height="12" rx="1" fill="currentColor" opacity="0.85"/>
   <rect x="7" y="2" width="8" height="3" rx="1" fill="currentColor" opacity="0.55"/>
   <rect x="7" y="6" width="8" height="3" rx="1" fill="currentColor" opacity="0.55"/>
-  <rect x="7" y="10" width="8" height="4" rx="1" fill="currentColor" opacity="0.55"/>
-</svg>`
+  <rect x="7" y="10" width="8" height="4" rx="1" fill="currentColor" opacity="0.55"/>`
+
+/**
+ * Compose the toolbar icon with an optional count badge baked in. We embed
+ * the badge inside the SVG (rather than as an HTML overlay) so we don't have
+ * to touch tabby-core's toolbar template — the existing `fastHtmlBind` path
+ * already re-renders whenever `Command.icon` changes, and `Command.icon` is
+ * now a getter that reads through to this function on every CD cycle (see
+ * tabby-core/src/api/commands.ts: Command.fromToolbarButton).
+ *
+ * Display rule: 0 → no badge; 1–9 → digit; ≥10 → "9+" so the bubble stays
+ * legible at 16px viewBox.
+ */
+function makeToolbarIcon (count: number): string {
+    let badge = ''
+    if (count > 0) {
+        const label = count > 9 ? '9+' : String(count)
+        // Position at top-right, leave a touch of breathing room from the edge.
+        badge = `
+  <circle cx="13" cy="3" r="3" fill="#FF5252" stroke="var(--bs-body-bg, #1C1F23)" stroke-width="0.8"/>
+  <text x="13" y="4.6" text-anchor="middle" font-family="ui-monospace, monospace" font-size="4.2" font-weight="700" fill="#fff">${label}</text>`
+    }
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">${BASE_ICON_INNER}${badge}\n</svg>`
+}
 
 @Injectable()
 class AiSidebarContribProvider extends SidebarProvider {
@@ -33,9 +60,9 @@ class AiSidebarContribProvider extends SidebarProvider {
             title: 'AI Tabs',
             component: AiSidebarComponent,
             side: 'left',
-            defaultWidth: 300,
+            defaultWidth: 380,
             minWidth: 260,
-            maxWidth: 500,
+            maxWidth: 720,
             defaultVisible: true,
         }]
     }
@@ -43,12 +70,17 @@ class AiSidebarContribProvider extends SidebarProvider {
 
 @Injectable()
 class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
-    constructor (private sidebar: SidebarService) {
+    constructor (private sidebar: SidebarService, private unread: UnreadService) {
         super()
     }
     provide (): ToolbarButton[] {
+        // `icon` is a getter so the badge updates without re-running provide().
+        // Command.fromToolbarButton (in our fork of tabby-core) defines its
+        // own `icon` as a getter that reads through to this one — change
+        // detection naturally re-evaluates the binding on every CD cycle.
+        const unread = this.unread
         return [{
-            icon: ICON_SVG,
+            get icon () { return makeToolbarIcon(unread.count) },
             title: 'Toggle AI Tabs sidebar',
             weight: 5,
             click: () => this.sidebar.toggle('ai-sidebar'),
@@ -60,7 +92,12 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
     imports: [CommonModule],
     declarations: [AiSidebarComponent],
     providers: [
+        HookAdapterRegistry,
+        HookRuntimeService,
+        HookWatcherService,
+        HookInstallerService,
         TabMonitor,
+        UnreadService,
         AttentionJumperService,
         AttentionNotifierService,
         { provide: SidebarProvider,       useClass: AiSidebarContribProvider,      multi: true },
@@ -70,9 +107,20 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
     ],
 })
 export default class AiSidebarModule {
-    /** Eagerly inject the jumper + notifier services so they subscribe at startup. */
-    constructor (_j: AttentionJumperService, _n: AttentionNotifierService) {
+    /**
+     * Eagerly inject every long-lived service so they subscribe at startup,
+     * even before any UI consumer reads them. The hook installer kicks off
+     * the settings.json install in its constructor; the watcher starts its
+     * fs.watch the same way.
+     */
+    constructor (
+        _j: AttentionJumperService,
+        _n: AttentionNotifierService,
+        _u: UnreadService,
+        _i: HookInstallerService,
+        _w: HookWatcherService,
+    ) {
         // eslint-disable-next-line no-console
-        console.log('[ai-sidebar] plugin loaded')
+        console.log('[glanceterm] plugin loaded')
     }
 }

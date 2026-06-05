@@ -1,5 +1,6 @@
 import * as fs from 'mz/fs'
 import * as fsSync from 'fs'
+import { randomUUID } from 'crypto'
 import { Injector } from '@angular/core'
 import { HostAppService, ConfigService, WIN_BUILD_CONPTY_SUPPORTED, isWindowsBuild, Platform, BootstrapData, BOOTSTRAP_DATA, LogService } from 'tabby-core'
 import { BaseSession } from 'tabby-terminal'
@@ -47,6 +48,15 @@ export class Session extends BaseSession {
     private hostApp: HostAppService
     private bootstrapData: BootstrapData
     private ptyInterface: PTYInterface
+    /**
+     * Stable UUID injected into the PTY's environment as `GLANCETERM_TAB_ID`.
+     * Any process spawned from this shell (including `claude`, `codex`, etc.)
+     * inherits it, and any GlanceTerm hook handler reads it back to attribute
+     * status events to the right tab. Generated once per fresh session;
+     * restored sessions don't get a new one (their original env is fixed at
+     * the original spawn — we can't change a live process's env vars).
+     */
+    public readonly glancetermTabId: string = randomUUID()
 
     constructor (
         injector: Injector,
@@ -73,6 +83,11 @@ export class Session extends BaseSession {
                     COLORTERM: 'truecolor',
                     TERM: 'xterm-256color',
                     TERM_PROGRAM: 'Tabby',
+                    // Inject a tab-stable UUID so AI agents (claude, codex…)
+                    // running inside this shell can have their hook events
+                    // routed back to the right Tabby tab by GlanceTerm's
+                    // hook handler. See ~/.glanceterm/hooks/<tab-id>.json.
+                    GLANCETERM_TAB_ID: this.glancetermTabId,
                 },
                 substituteEnv(options.env),
                 this.config.store.terminal.environment || {},

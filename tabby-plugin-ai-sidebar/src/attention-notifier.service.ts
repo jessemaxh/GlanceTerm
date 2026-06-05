@@ -4,6 +4,7 @@ import { Subscription } from 'rxjs'
 import { AppService } from 'tabby-core'
 
 import { TabMonitor, TabState, TabStatus } from './tab-monitor'
+import { UnreadService } from './unread.service'
 
 type NotifyKind = 'permission' | 'ready'
 
@@ -67,6 +68,7 @@ export class AttentionNotifierService implements OnDestroy {
 
     constructor (
         private app: AppService,
+        private unread: UnreadService,
         monitor: TabMonitor,
     ) {
         this.requestPermissionOnce()
@@ -162,9 +164,6 @@ export class AttentionNotifierService implements OnDestroy {
     }
 
     private fire (s: TabState, kind: NotifyKind): void {
-        if (typeof Notification === 'undefined') return
-        if ((Notification as any).permission === 'denied') return
-
         // Tab might have been closed between schedule() and fire() — the
         // 3-second ready debounce is the longest window. Notifying about a
         // dead tab is just misleading (click → selectTab no-op) so drop it.
@@ -177,6 +176,17 @@ export class AttentionNotifierService implements OnDestroy {
             document.hasFocus()
         if (isLookingHere) return
 
+        // Persistent badge for ready transitions runs BEFORE the OS-notification
+        // guards (Notification API gating, cooldown) — those gate audible/
+        // visible system pings, but the in-app badge should appear even when
+        // a transient ping is suppressed. Idempotent on repeat calls.
+        if (kind === 'ready') {
+            this.unread.markReady(s.innerTab)
+        }
+
+        if (typeof Notification === 'undefined') return
+        if ((Notification as any).permission === 'denied') return
+
         // Cooldown — see field doc on `lastFiredAt`.
         const key = s.innerTab as unknown as object
         const last = this.lastFiredAt.get(key) ?? 0
@@ -185,8 +195,8 @@ export class AttentionNotifierService implements OnDestroy {
         this.lastFiredAt.set(key, now)
 
         const title = kind === 'permission'
-            ? 'HiveTerm — agent needs you'
-            : 'HiveTerm — agent ready'
+            ? 'GlanceTerm — agent needs you'
+            : 'GlanceTerm — agent ready'
         const subline = kind === 'permission'
             ? 'permission required'
             : 'ready for next prompt'
@@ -195,7 +205,7 @@ export class AttentionNotifierService implements OnDestroy {
             const n = new Notification(title, {
                 body: `${s.title}${s.aiTool ? ' · ' + s.aiTool : ''} — ${subline}`,
                 silent: false,
-                tag: `hiveterm-attn-${(s.innerTab as any).id ?? Math.random()}`,
+                tag: `glanceterm-attn-${(s.innerTab as any).id ?? Math.random()}`,
             })
             n.onclick = () => {
                 this.app.selectTab(s.outerTab)

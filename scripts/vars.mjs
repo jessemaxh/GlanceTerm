@@ -32,7 +32,7 @@ export const builtinPlugins = [
     'tabby-plugin-manager',
     'tabby-linkifier',
     'tabby-auto-sudo-password',
-    'tabby-plugin-ai-sidebar',  // HiveTerm AI sidebar — bundled by default
+    'tabby-plugin-ai-sidebar',  // GlanceTerm AI sidebar — bundled by default
 ]
 
 export const packagesWithDocs = [

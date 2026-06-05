@@ -2,7 +2,7 @@ import { Injectable } from '@angular/core'
 import { HotkeyDescription, HotkeyProvider } from 'tabby-core'
 
 /**
- * Hotkey ids HiveTerm contributes to Tabby's hotkey registry. The default key
+ * Hotkey ids GlanceTerm contributes to Tabby's hotkey registry. The default key
  * bindings for these ids live in `ai-config-provider.ts`; the user can rebind
  * any of them from Settings → Hotkeys like any other Tabby hotkey.
  */

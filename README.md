@@ -1,39 +1,37 @@
-# HiveTerm
+# GlanceTerm
 
-**A terminal with a side panel for managing many AI coding agents at once.**
+**See every AI agent at a glance. Never miss the one that needs you.**
 
 If you have 5+ Claude Code / Codex / opencode / aider sessions running in
 different tabs, you've probably done this dance: Cmd-Tab through them all,
 squinting at the title bar, trying to figure out which one is done and ready
 for the next task.
 
-HiveTerm fixes that. It puts every tab in a side panel with a live status dot
-— green when the AI is working, blue when it's done and waiting for you.
-Click a row → jump straight to that tab.
+GlanceTerm fixes that. It puts every tab in a side panel with a live status
+dot — green when the AI is working, blue when it's done and waiting for you,
+amber when it's asking permission. Click a row → jump straight to that tab.
 
 ```
 ┌────────────────┬──────────────────────────────────┐
-│  AI TABS    3  │                                  │
+│  AI TABS       │                                  │
 │                │   you@host ~/work/api $   │
 │ ● ai-backend   │   > what does this function do?  │
 │   working      │                                  │
 │   CLAUDE  3s   │   ⏺ Reading src/handler.ts…      │
 │ ○ ai-frontend  │                                  │
-│   idle         │                                  │
+│   ready  •     │                                  │
 │   CLAUDE  2m   │                                  │
-│ ○ ai-tests     │                                  │
-│   idle         │                                  │
-│   AIDER   12s  │                                  │
+│ ◐ ai-tests     │                                  │
+│   needs you    │                                  │
+│   CLAUDE  4s   │                                  │
 └────────────────┴──────────────────────────────────┘
 ```
 
 ## Status of this repo
 
-**v0.1 — works, dogfooding.** Built on top of [Tabby](https://github.com/Eugeny/tabby)
-with a minimal `SidebarProvider` extension point added to the core. The actual
-AI detection lives in a separate plugin.
-
-Architecture:
+**v0.2 — hook-based architecture, dogfooding.** Built on top of
+[Tabby](https://github.com/Eugeny/tabby) with a minimal `SidebarProvider`
+extension point added to the core. The sidebar lives in a plugin.
 
 ```
 ai-terminal/
@@ -45,24 +43,45 @@ ai-terminal/
 │
 └── tabby-plugin-ai-sidebar/    the actual sidebar
     └── src/
-        ├── tab-monitor.ts      detects AI processes & their state
+        ├── hook-adapters/      pluggable per-agent hook integrations
+        │   ├── adapter.ts      HookAdapter interface
+        │   └── claude.ts       Claude Code adapter (v0.2)
+        ├── hook-watcher.ts     fs.watch on ~/.glanceterm/hooks/
+        ├── tab-monitor.ts      ties tabs ↔ hook events ↔ status
         ├── sidebar.component.ts the rendered UI
         └── index.ts            NgModule + SidebarProvider impl
 ```
 
-## How it works (zero config)
+## How it works
 
-1. Once per second, the plugin lists every Tabby tab and asks Tabby's
-   `session.getChildProcesses()` for its shell descendants.
-2. If a descendant matches a known AI CLI (`claude`, `codex`, `opencode`,
-   `aider`), the tab is "AI-active".
-3. For Claude: look at `~/.claude/projects/<encoded-cwd>/*.jsonl` mtime —
-   freshly touched = working, otherwise idle.
-4. For others: take two CPU-time samples 1 second apart. >2% CPU = working.
-5. Click a row → `AppService.selectTab()`.
+Every Tabby tab gets a unique `GLANCETERM_TAB_ID` env var injected at PTY
+spawn time. Any process spawned from that shell — including `claude`,
+`codex`, `aider` — inherits it.
 
-No global config changes. No `~/.claude/settings.json` edits. No hooks. The
-plugin just observes.
+For supported agents (currently **Claude Code**), GlanceTerm installs a hook
+in the agent's settings file on first launch. The hook fires on lifecycle
+events (`UserPromptSubmit`, `Stop`, `PermissionRequest`, `SessionEnd`) and
+writes a tiny JSON status file under `~/.glanceterm/hooks/<tab-id>.json`.
+
+The sidebar watches that directory and updates each tab's status in
+real-time. Multiple Claude sessions in the same project? Each has its own
+`GLANCETERM_TAB_ID`, so they show independent status. Zero polling, zero
+screen-scraping, zero false positives.
+
+**Roadmap:**
+- v0.2 — Claude Code (this release)
+- v0.3 — Codex, Gemini CLI (same HookAdapter pattern, ~1 day each)
+- v0.4 — opencode, aider (no native hooks; fall back to process-state)
+
+## Compared to other multi-agent terminals
+
+| | GlanceTerm | hiveterm.com | Agent Deck |
+|--|--|--|--|
+| Form factor | GUI terminal w/ sidebar | GUI terminal w/ split panes | tmux + TUI |
+| Setup | Open app, allow hook install | Install app + write `hive.yml` | Install binary + `agent-deck add` per session |
+| Habit change | None — keep typing `claude` | New layout to learn | Must launch every session via `agent-deck` |
+| AI config files modified | Only the agent's hook entry | None | Yes — each tool's hook entry |
+| Cost | Free, MIT | $99/yr Pro | Free (binary) |
 
 ## Dev / Build
 
@@ -75,35 +94,26 @@ yarn
 npm run build
 
 # 2. plugin
-cd ../tabby-plugin-ai-sidebar
+cd tabby-plugin-ai-sidebar
 npm install
 npm run build
 
 # 3. launch
 cd ..
-./dev-fork.sh
+./dev.sh
 ```
 
-`dev-fork.sh` rebuilds the plugin, then launches the fork with
-`TABBY_PLUGINS=` pointed at it and remote debugging on port 9222 (handy for
-CDP-based UI testing — see `/tmp/cdp/` after first run).
+`dev.sh` rebuilds the plugin, then launches the fork with
+`TABBY_PLUGINS=` pointed at it and remote debugging on port 9222 — handy
+for CDP-driven UI testing.
 
-## Known limitations (v0.1)
+## Known limitations (v0.2)
 
 - macOS only, tested on Sequoia. Linux/Windows likely works since Tabby does
-  but I haven't validated.
-- "AI is working" detection for non-Claude tools uses CPU-time delta — a
-  reasonable proxy but not perfect for AIs that idle on the network.
-- No persistence yet for sidebar width or visibility — defaults restore on
-  relaunch. Coming soon.
-- No `.dmg` distribution yet — has to be built from source.
-
-## Roadmap
-
-- v0.2: persist sidebar state, settings panel, codex/opencode activity polish
-- v0.3: per-tool icons, notification on "AI needs your input"
-- v0.4: signed `.dmg` releases, optional sign-in, opt-in telemetry
-- v1.0: pricing decision
+  but I haven't validated. Hook script ships as POSIX sh; Windows .cmd to come.
+- Only Claude Code is hooked in v0.2. Other tools show as "running" if a
+  process is alive but lack working/idle granularity until their adapters land.
+- No `.dmg` distribution yet — must be built from source.
 
 ## Credits
 
