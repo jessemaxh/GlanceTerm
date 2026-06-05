@@ -2,6 +2,7 @@
 /* eslint-disable @typescript-eslint/prefer-nullish-coalescing */
 import { build as builder } from 'electron-builder'
 import { execFileSync } from 'node:child_process'
+import * as fs from 'node:fs'
 import path from 'node:path'
 import * as vars from './vars.mjs'
 
@@ -44,12 +45,8 @@ builder({
                 context.appOutDir,
                 `${context.packager.appInfo.productFilename}.app`,
             )
-            console.log(`  • ad-hoc signing  appPath=${appPath}`)
-            execFileSync(
-                'codesign',
-                ['--force', '--deep', '--sign', '-', appPath],
-                { stdio: 'inherit' },
-            )
+            console.log(`  • ad-hoc signing (bottom-up) ${appPath}`)
+            adHocSignBundle(appPath)
         },
         mac: {
             // null disables electron-builder's own signing pass; `afterPack`
@@ -72,3 +69,70 @@ builder({
     console.error(e)
     process.exit(1)
 })
+
+// `codesign --deep` cannot reliably re-sign Electron's nested
+// frameworks (Apple deprecated it and it silently leaves the inner
+// `Electron Framework.framework` mis-hashed → macOS kills the process at
+// dyld load with `Code Signature Invalid` / `Invalid Page`). We instead walk
+// the bundle bottom-up: deepest Mach-O binaries first, then frameworks, then
+// the wrapping .app bundles.
+function codesignAdHoc (target) {
+    execFileSync('codesign', ['--force', '--sign', '-', '--timestamp=none', target], {
+        stdio: ['ignore', 'ignore', 'inherit'],
+    })
+}
+
+function isMachO (filePath) {
+    try {
+        const fd = fs.openSync(filePath, 'r')
+        const buf = Buffer.alloc(4)
+        fs.readSync(fd, buf, 0, 4, 0)
+        fs.closeSync(fd)
+        const magic = buf.readUInt32BE(0)
+        // 0xfeedface / 0xfeedfacf  + LE swapped variants  + fat magics
+        return magic === 0xfeedface || magic === 0xfeedfacf
+            || magic === 0xcefaedfe || magic === 0xcffaedfe
+            || magic === 0xcafebabe || magic === 0xbebafeca
+    } catch {
+        return false
+    }
+}
+
+// Sign every Mach-O dylib / executable directly inside a directory (no
+// recursion into sub-bundles — those are handled by adHocSignBundle).
+function signLooseMachOsIn (dir) {
+    if (!fs.existsSync(dir)) return
+    for (const name of fs.readdirSync(dir)) {
+        const full = path.join(dir, name)
+        const st = fs.lstatSync(full)
+        if (st.isSymbolicLink()) continue
+        if (st.isFile() && isMachO(full)) {
+            codesignAdHoc(full)
+        }
+    }
+}
+
+function adHocSignBundle (bundlePath) {
+    // 1. Recurse into ALL nested .app and .framework bundles first.
+    const frameworksDir = path.join(bundlePath, 'Contents', 'Frameworks')
+    if (fs.existsSync(frameworksDir)) {
+        for (const name of fs.readdirSync(frameworksDir)) {
+            const child = path.join(frameworksDir, name)
+            if (name.endsWith('.app') || name.endsWith('.framework')) {
+                adHocSignBundle(child)
+            }
+        }
+    }
+
+    // 2. Inside a .framework, sign loose dylibs + helpers under Versions/A/.
+    if (bundlePath.endsWith('.framework')) {
+        const versionsA = path.join(bundlePath, 'Versions', 'A')
+        if (fs.existsSync(versionsA)) {
+            signLooseMachOsIn(path.join(versionsA, 'Libraries'))
+            signLooseMachOsIn(path.join(versionsA, 'Helpers'))
+        }
+    }
+
+    // 3. Finally seal this bundle itself.
+    codesignAdHoc(bundlePath)
+}
