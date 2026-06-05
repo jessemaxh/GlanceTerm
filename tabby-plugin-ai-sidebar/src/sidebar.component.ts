@@ -377,6 +377,11 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             position: relative;
             display: block;
             transform-origin: center;
+            /* Soften the done → idle (red → grey) and idle → done (grey → red)
+               transitions so that, paired with the click-sort-pin, the row
+               *fades* between buckets instead of teleporting. Working's
+               pulse animation overrides background-color and isn't affected. */
+            transition: background-color 0.25s ease, box-shadow 0.25s ease;
         }
         /* Working — "breathing" dot. Three layers:
              1. The dot itself scales 1 → 1.22 → 1 each cycle.
@@ -672,6 +677,38 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     private home = os.homedir()
     capturing = false
 
+    /**
+     * Sort-position pin for the just-clicked row. When you click a `done` row,
+     * the unread flag clears (focus → markRead) and effStatus flips done →
+     * idle in the same tick — that demotes the row from sort-rank 0 to 3, so
+     * the row teleports out from under your cursor while its dot recolours.
+     * Disorienting: you can't tell what you just clicked.
+     *
+     * The fix: hold the row's pre-click sort rank for PIN_MS so the row
+     * doesn't move; the dot still recolours (with a CSS transition) so the
+     * "ack, I saw your click" feedback survives. After PIN_MS the natural
+     * sort takes over and the row slides to its new bucket.
+     *
+     * The pin is dropped early when the row's raw `TabState.status` changes
+     * (a real external event from the monitor) so genuinely new state is
+     * always immediately visible. Only the done→idle flip-on-focus, which
+     * leaves raw status as `'idle'`, gets suppressed.
+     *
+     * Keyed by innerTab (same key visibleStates groups by) so split panes
+     * stay independent.
+     */
+    private pinnedRank = new Map<BaseTabComponent, number>()
+    private pinnedRawStatusAtPin = new Map<BaseTabComponent, TabState['status']>()
+    private readonly PIN_MS = 2000
+
+    private static readonly STATUS_RANK: Record<TabState['status'], number> = {
+        done:             0,
+        needs_permission: 1,
+        working:          2,
+        idle:             3,
+        no_ai:            4,
+    }
+
     constructor (
         public app: AppService,
         public monitor: TabMonitor,
@@ -708,6 +745,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     ngOnInit (): void {
         this.sub = this.monitor.states$.subscribe(s => {
             this.states = s
+            this.dropStalePins(s)
             this.recomputeActiveIsAi()
         })
         // Tab switches don't change `states`, but they do change which row is
@@ -788,24 +826,45 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      * derived from raw `idle + isUnread`.
      */
     get visibleStates (): TabState[] {
-        const rank: Record<TabState['status'], number> = {
-            done:             0,
-            needs_permission: 1,
-            working:          2,
-            idle:             3,
-            no_ai:            4,
-        }
+        const rank = AiSidebarComponent.STATUS_RANK
         const tabIdx = (s: TabState): number => {
             const i = this.app.tabs.indexOf(s.outerTab)
             return i < 0 ? Number.MAX_SAFE_INTEGER : i
         }
+        // Pinned rank (see pinnedRank doc) overrides the live effStatus rank,
+        // so a just-clicked row holds its position while its dot recolours.
+        const rankOf = (s: TabState): number =>
+            this.pinnedRank.get(s.innerTab) ?? rank[this.effStatus(s)] ?? 99
         const filtered = this.filterMode === 'all'
             ? this.states
             : this.states.filter(s => this.effStatus(s) === this.filterMode)
         return [...filtered].sort((a, b) => {
-            const dr = (rank[this.effStatus(a)] ?? 99) - (rank[this.effStatus(b)] ?? 99)
+            const dr = rankOf(a) - rankOf(b)
             return dr !== 0 ? dr : tabIdx(a) - tabIdx(b)
         })
+    }
+
+    /**
+     * Drop any sort-pin whose underlying row has a different raw status from
+     * what it had at pin time. That's our signal that the change isn't just
+     * "click cleared unread" — it's a real new event from the monitor (AI
+     * started working, requested permission, etc.) — and the row should be
+     * allowed to jump to its new bucket immediately.
+     *
+     * Pins on rows that have disappeared from the state list (tab closed)
+     * also get cleared.
+     */
+    private dropStalePins (states: TabState[]): void {
+        if (this.pinnedRank.size === 0) return
+        const byInner = new Map(states.map(s => [s.innerTab, s.status]))
+        for (const innerTab of [...this.pinnedRank.keys()]) {
+            const nowStatus = byInner.get(innerTab)
+            const pinStatus = this.pinnedRawStatusAtPin.get(innerTab)
+            if (nowStatus === undefined || nowStatus !== pinStatus) {
+                this.pinnedRank.delete(innerTab)
+                this.pinnedRawStatusAtPin.delete(innerTab)
+            }
+        }
     }
 
     /** Set or toggle the filter. Clicking the active pill resets to 'all'. */
@@ -860,6 +919,18 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     }
 
     onSelect (s: TabState): void {
+        // Freeze this row's sort position BEFORE focus runs, so the unread
+        // flip triggered by selectTab doesn't yank the row out from under
+        // the click. See `pinnedRank` doc for the full rationale.
+        const preClickRank = AiSidebarComponent.STATUS_RANK[this.effStatus(s)] ?? 99
+        this.pinnedRank.set(s.innerTab, preClickRank)
+        this.pinnedRawStatusAtPin.set(s.innerTab, s.status)
+        setTimeout(() => {
+            this.pinnedRank.delete(s.innerTab)
+            this.pinnedRawStatusAtPin.delete(s.innerTab)
+            // setTimeout is zone-patched → CD picks this up automatically.
+        }, this.PIN_MS)
+
         this.app.selectTab(s.outerTab)
         // If the matched leaf is inside a split, also focus that specific pane.
         if (s.outerTab !== s.innerTab && typeof (s.outerTab as any).focus === 'function') {
