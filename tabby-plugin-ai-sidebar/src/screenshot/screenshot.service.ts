@@ -70,6 +70,29 @@ export class ScreenshotService {
         }
 
         const ourWindow: any = remote.getCurrentWindow()
+
+        // macOS Screen Recording permission gate.
+        //
+        // Why we don't just let `desktopCapturer.getSources()` trigger the
+        // OS prompt itself: calling getSources while the TCC status is
+        // `not-determined` or `denied` makes macOS engrave that rejection
+        // into the process's TCC cache. After the user grants the
+        // permission in System Settings, the next capture call hits the
+        // cached "denied" and macOS pops the "Quit & Reopen" sheet — there
+        // is no way to flush that cache short of restart.
+        //
+        // By intercepting BEFORE we call getSources and steering the user
+        // to System Settings ourselves, no TCC cache entry gets written.
+        // The next Screenshot click finds status === 'granted' and the
+        // very first getSources is a fresh call: no restart required.
+        if (process.platform === 'darwin') {
+            const blocked = await this.checkMacScreenPermission(remote, ourWindow)
+            if (blocked) {
+                this.inProgress = false
+                return null
+            }
+        }
+
         const target = this.pickDisplay(screen, ourWindow)
 
         // Defensive: macOS's NSApplicationPresentation flags (Dock visibility,
@@ -131,6 +154,90 @@ export class ScreenshotService {
             ensureDockVisible(remote)
             this.inProgress = false
         }
+    }
+
+    /**
+     * Pre-flight macOS Screen Recording permission check.
+     *
+     * Returns `true` when capture should be aborted (no permission, user was
+     * shown a "go to System Settings" dialog) and `false` when capture can
+     * proceed (status === 'granted'). The TCC cache caveat in the caller's
+     * comment is the reason this lives upstream of any `desktopCapturer`
+     * call — we MUST NOT touch getSources() until the OS-level status is
+     * 'granted', otherwise the user falls into the restart trap.
+     *
+     * Defensive against missing API surface: `getMediaAccessStatus('screen')`
+     * is supported in Electron 25+; older Electrons return undefined for
+     * unknown media types. If the call throws or returns undefined we fall
+     * through and let getSources do whatever it does — degraded to the old
+     * (sometimes-restart-needed) flow, which is still better than blocking
+     * the button outright.
+     */
+    private async checkMacScreenPermission (remote: any, win: any): Promise<boolean> {
+        let status: string | undefined
+        try {
+            const systemPreferences = remote.getBuiltin('systemPreferences')
+            status = systemPreferences?.getMediaAccessStatus?.('screen')
+        } catch {
+            return false
+        }
+        if (!status || status === 'granted') return false
+
+        // status is 'not-determined' | 'denied' | 'restricted' | 'unknown'.
+        // 'restricted' is MDM-locked — opening Settings won't help, but the
+        // language we use is still accurate ("doesn't have permission"). We
+        // collapse all three non-granted cases into one dialog.
+        let dialog: any
+        try {
+            dialog = remote.getBuiltin('dialog')
+        } catch {
+            return true   // can't dialog — silently abort capture
+        }
+
+        const message = status === 'not-determined'
+            ? 'GlanceTerm needs Screen Recording permission to capture screenshots.'
+            : 'GlanceTerm doesn\'t have Screen Recording permission yet.'
+
+        const detail =
+            'Open System Settings → Privacy & Security → Screen Recording, ' +
+            'then enable GlanceTerm. You do NOT need to restart — just click ' +
+            'Screenshot again once the toggle is on.'
+
+        let response = 1
+        try {
+            const result = await dialog.showMessageBox(win, {
+                type: 'info',
+                buttons: ['Open System Settings', 'Cancel'],
+                defaultId: 0,
+                cancelId: 1,
+                title: 'Screen Recording permission needed',
+                message,
+                detail,
+            })
+            response = result?.response ?? 1
+        } catch {
+            return true
+        }
+        if (response !== 0) return true
+
+        // Try the modern URL scheme (macOS 13+ Privacy_ScreenCapture). If
+        // shell.openExternal fails or the URL isn't recognised, fall back
+        // to the bare Security pane — better than dropping the user in
+        // System Settings root.
+        try {
+            const shell = remote.getBuiltin('shell')
+            await shell.openExternal(
+                'x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture',
+            )
+        } catch {
+            try {
+                const shell = remote.getBuiltin('shell')
+                await shell.openExternal(
+                    'x-apple.systempreferences:com.apple.preference.security',
+                )
+            } catch { /* swallow — user can navigate manually */ }
+        }
+        return true
     }
 
     private pickDisplay (screen: any, win: any): any {
