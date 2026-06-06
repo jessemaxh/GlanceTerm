@@ -101,24 +101,69 @@ export class AutoApproveService implements OnDestroy {
             cancelId: 1,
         })
         if (r.response !== 0) return false
-        this.config.store.ai.autoApprovePermissions = true
-        await this.config.save()
-        // changed$ fires synchronously inside save() and schedules a flag
-        // write on `this.writing`. Awaiting sync() chains onto the same
-        // promise so this call doesn't return until the byte is on disk —
-        // otherwise a PermissionRequest firing in the next event-loop tick
-        // would read the stale flag and (correctly, but surprisingly) fall
-        // back to interactive approval.
-        await this.sync()
-        return true
+        return this.commit(true)
     }
 
     async disable (): Promise<void> {
         if (!this.enabled) return
-        this.config.store.ai.autoApprovePermissions = false
-        await this.config.save()
-        // See enable() for the rationale on awaiting sync().
-        await this.sync()
+        await this.commit(false)
+    }
+
+    /**
+     * Atomically flip the toggle to `desired` across all three sources of
+     * truth (in-memory store, on-disk yaml, on-disk flag file). If any step
+     * fails we roll the store back to its previous value and surface the
+     * error — without this, an earlier non-transactional enable() could
+     * leave `store=true` (UI shows ON) while `yaml`/`flag` stayed unwritten,
+     * which is the exact drift we hit in prod: the shield button looked
+     * lit but Claude still hit the `Bash(rm *)` ask rule because the hook
+     * handler read flag="0".
+     *
+     * Why store-then-save-then-sync (not save-first):
+     *   ConfigService.save() serializes `this.config.store` to disk — it
+     *   has no separate "what to write" argument. We have to mutate the
+     *   store first, then save, then revert on throw. The window where the
+     *   store transiently holds the not-yet-persisted value is bounded by
+     *   the catch.
+     */
+    private async commit (desired: boolean): Promise<boolean> {
+        const prev = this.config.store?.ai?.autoApprovePermissions
+        this.config.store.ai.autoApprovePermissions = desired
+        try {
+            await this.config.save()
+            // changed$ fires synchronously inside save() and schedules a
+            // flag write on `this.writing`. Awaiting sync() chains onto
+            // the same promise so this call doesn't return until the byte
+            // is on disk — otherwise a PermissionRequest firing in the
+            // next event-loop tick would read the stale flag and
+            // (correctly, but surprisingly) fall back to interactive
+            // approval.
+            await this.sync()
+            return true
+        } catch (e: any) {
+            // Roll the in-memory store back so the UI reflects reality —
+            // otherwise the user sees the shield "on" while the handler
+            // keeps reading flag="0".
+            this.config.store.ai.autoApprovePermissions = prev
+            // Best-effort: surface what broke. Don't await — if showMessageBox
+            // itself throws we still want the caller to see the original
+            // failure, not a dialog error.
+            void this.platform.showMessageBox({
+                type: 'error',
+                message: desired
+                    ? 'Failed to enable auto-approve'
+                    : 'Failed to disable auto-approve',
+                detail:
+                    `GlanceTerm could not persist the change:\n\n${e?.message ?? e}\n\n` +
+                    'The toggle has been reverted. Check ~/.glanceterm/ and your config ' +
+                    'file for permission or disk issues, then try again.',
+                buttons: ['OK'],
+                defaultId: 0,
+            }).catch(() => { /* swallow — original error is what matters */ })
+            // eslint-disable-next-line no-console
+            console.error('[glanceterm] auto-approve commit failed:', e)
+            return false
+        }
     }
 
     /** Reconcile the flag file with the current config value. Idempotent. */
