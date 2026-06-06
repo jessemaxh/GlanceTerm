@@ -61,127 +61,131 @@ export class ScreenshotService {
     async capture (): Promise<{ buffer: Buffer; ext: 'png' } | null> {
         if (this.inProgress) return null
         this.inProgress = true
-
-        // Grab Electron pieces via the renderer's `@electron/remote` bridge —
-        // same pattern tabby-electron's ElectronService uses. We resolve here
-        // (rather than in module init) so the plugin still loads cleanly in
-        // hypothetical non-Electron hosts (tabby-web), where the button just
-        // ends up no-oping with a console warning instead of crashing import.
-        //
-        // IMPORTANT: don't use `remote.require('electron')` — Electron 38
-        // dropped `process.mainModule`, so that path throws
-        // "process.mainModule.require is not a function". Pull each builtin
-        // we need via `remote.getBuiltin(name)` instead, which routes through
-        // the main process's `require` directly.
-        let remote: any
+        // Outer try/finally guarantees `inProgress = false` on EVERY exit
+        // path, including throws from the bare `@electron/remote` calls
+        // below — `remote.getCurrentWindow()`, `ourWindow.isMinimized()`,
+        // `ourWindow.isVisible()`, `pickDisplay`, `checkMacScreenPermission`.
+        // Pre-fix those sat outside any try/finally, so a renderer-window
+        // teardown race (or any other thrown error) left `inProgress = true`
+        // forever and the screenshot button silently dead until app restart.
         try {
-            remote = require('@electron/remote')
-        } catch (e) {
-            // eslint-disable-next-line no-console
-            console.warn('[glanceterm] screenshot not supported (not running under Electron)')
-            this.inProgress = false
-            return null
-        }
-
-        let screen: any
-        let desktopCapturer: any
-        try {
-            screen = remote.getBuiltin('screen')
-            desktopCapturer = remote.getBuiltin('desktopCapturer')
-        } catch (e: any) {
-            // eslint-disable-next-line no-console
-            console.error('[glanceterm] screenshot init failed:', e)
-            this.notifications.error(`Screenshot unavailable: ${e?.message ?? e}`)
-            this.inProgress = false
-            return null
-        }
-
-        const ourWindow: any = remote.getCurrentWindow()
-
-        // macOS Screen Recording permission gate.
-        //
-        // Why we don't just let `desktopCapturer.getSources()` trigger the
-        // OS prompt itself: calling getSources while the TCC status is
-        // `not-determined` or `denied` makes macOS engrave that rejection
-        // into the process's TCC cache. After the user grants the
-        // permission in System Settings, the next capture call hits the
-        // cached "denied" and macOS pops the "Quit & Reopen" sheet — there
-        // is no way to flush that cache short of restart.
-        //
-        // By intercepting BEFORE we call getSources and steering the user
-        // to System Settings ourselves, no TCC cache entry gets written.
-        // The next Screenshot click finds status === 'granted' and the
-        // very first getSources is a fresh call: no restart required.
-        if (process.platform === 'darwin' && !this.preflightBypassed) {
-            const blocked = await this.checkMacScreenPermission(remote, ourWindow)
-            if (blocked) {
-                this.inProgress = false
-                return null
-            }
-        }
-
-        const target = this.pickDisplay(screen, ourWindow)
-
-        // Defensive: macOS's NSApplicationPresentation flags (Dock visibility,
-        // Dock icon presentation policy) sometimes get left in a "hidden"
-        // state by a prior crashed/aborted overlay session — kiosk mode is
-        // the historical offender, but other paths can leak too. Re-asserting
-        // dock.show() before every capture costs nothing and recovers the
-        // user's Dock + Dock icon if they were stuck hidden from a previous
-        // bad run.
-        ensureDockVisible(remote)
-
-        const hideWindow = this.config.store?.ai?.screenshotHideWindow !== false
-        const wasVisible = !ourWindow.isMinimized() && ourWindow.isVisible()
-        try {
-            if (hideWindow) {
-                // Hide so the GlanceTerm UI isn't in the screenshot. minimize()
-                // on macOS triggers a Genie animation; hide() is instant + invisible.
-                ourWindow.hide()
-                // Tiny breather lets the compositor catch up before the capture
-                // call — without it the screenshot can still include the window
-                // frame on slow machines.
-                await new Promise(r => setTimeout(r, 120))
-            }
-
-            const screenDataURL = await this.captureDisplay(desktopCapturer, target)
-            if (!screenDataURL) {
-                this.notifications.error('Screenshot failed: could not capture display.')
-                return null
-            }
-
-            const result: CaptureResult = await openCaptureWindow({
-                displayBounds: target.bounds,
-                scaleFactor: target.scaleFactor,
-                screenDataURL,
-                BrowserWindow: remote.BrowserWindow,
-            })
-
-            if (!result.dataURL) return null
-
-            // Strip the data: prefix and decode.
-            const m = /^data:image\/png;base64,(.*)$/.exec(result.dataURL)
-            if (!m) {
-                this.notifications.error('Screenshot failed: invalid image data returned.')
-                return null
-            }
-            return { buffer: Buffer.from(m[1], 'base64'), ext: 'png' }
-        } catch (e: any) {
-            // eslint-disable-next-line no-console
-            console.error('[glanceterm] screenshot failed:', e)
-            this.notifications.error(`Screenshot failed: ${e?.message ?? e}`)
-            return null
-        } finally {
+            // Grab Electron pieces via the renderer's `@electron/remote` bridge —
+            // same pattern tabby-electron's ElectronService uses. We resolve here
+            // (rather than in module init) so the plugin still loads cleanly in
+            // hypothetical non-Electron hosts (tabby-web), where the button just
+            // ends up no-oping with a console warning instead of crashing import.
+            //
+            // IMPORTANT: don't use `remote.require('electron')` — Electron 38
+            // dropped `process.mainModule`, so that path throws
+            // "process.mainModule.require is not a function". Pull each builtin
+            // we need via `remote.getBuiltin(name)` instead, which routes through
+            // the main process's `require` directly.
+            let remote: any
             try {
-                if (hideWindow && wasVisible) {
-                    ourWindow.show()
-                    ourWindow.focus()
-                }
-            } catch { /* */ }
-            // Always re-assert dock visibility — covers the case where the
-            // overlay window or main-window hide somehow flipped a
-            // presentation flag we didn't expect.
+                remote = require('@electron/remote')
+            } catch (e) {
+                // eslint-disable-next-line no-console
+                console.warn('[glanceterm] screenshot not supported (not running under Electron)')
+                return null
+            }
+
+            let screen: any
+            let desktopCapturer: any
+            try {
+                screen = remote.getBuiltin('screen')
+                desktopCapturer = remote.getBuiltin('desktopCapturer')
+            } catch (e: any) {
+                // eslint-disable-next-line no-console
+                console.error('[glanceterm] screenshot init failed:', e)
+                this.notifications.error(`Screenshot unavailable: ${e?.message ?? e}`)
+                return null
+            }
+
+            const ourWindow: any = remote.getCurrentWindow()
+
+            // macOS Screen Recording permission gate.
+            //
+            // Why we don't just let `desktopCapturer.getSources()` trigger the
+            // OS prompt itself: calling getSources while the TCC status is
+            // `not-determined` or `denied` makes macOS engrave that rejection
+            // into the process's TCC cache. After the user grants the
+            // permission in System Settings, the next capture call hits the
+            // cached "denied" and macOS pops the "Quit & Reopen" sheet — there
+            // is no way to flush that cache short of restart.
+            //
+            // By intercepting BEFORE we call getSources and steering the user
+            // to System Settings ourselves, no TCC cache entry gets written.
+            // The next Screenshot click finds status === 'granted' and the
+            // very first getSources is a fresh call: no restart required.
+            if (process.platform === 'darwin' && !this.preflightBypassed) {
+                const blocked = await this.checkMacScreenPermission(remote, ourWindow)
+                if (blocked) return null
+            }
+
+            const target = this.pickDisplay(screen, ourWindow)
+
+            // Defensive: macOS's NSApplicationPresentation flags (Dock visibility,
+            // Dock icon presentation policy) sometimes get left in a "hidden"
+            // state by a prior crashed/aborted overlay session — kiosk mode is
+            // the historical offender, but other paths can leak too. Re-asserting
+            // dock.show() before every capture costs nothing and recovers the
+            // user's Dock + Dock icon if they were stuck hidden from a previous
+            // bad run.
             ensureDockVisible(remote)
+
+            const hideWindow = this.config.store?.ai?.screenshotHideWindow !== false
+            const wasVisible = !ourWindow.isMinimized() && ourWindow.isVisible()
+            try {
+                if (hideWindow) {
+                    // Hide so the GlanceTerm UI isn't in the screenshot. minimize()
+                    // on macOS triggers a Genie animation; hide() is instant + invisible.
+                    ourWindow.hide()
+                    // Tiny breather lets the compositor catch up before the capture
+                    // call — without it the screenshot can still include the window
+                    // frame on slow machines.
+                    await new Promise(r => setTimeout(r, 120))
+                }
+
+                const screenDataURL = await this.captureDisplay(desktopCapturer, target)
+                if (!screenDataURL) {
+                    this.notifications.error('Screenshot failed: could not capture display.')
+                    return null
+                }
+
+                const result: CaptureResult = await openCaptureWindow({
+                    displayBounds: target.bounds,
+                    scaleFactor: target.scaleFactor,
+                    screenDataURL,
+                    BrowserWindow: remote.BrowserWindow,
+                })
+
+                if (!result.dataURL) return null
+
+                // Strip the data: prefix and decode.
+                const m = /^data:image\/png;base64,(.*)$/.exec(result.dataURL)
+                if (!m) {
+                    this.notifications.error('Screenshot failed: invalid image data returned.')
+                    return null
+                }
+                return { buffer: Buffer.from(m[1], 'base64'), ext: 'png' }
+            } catch (e: any) {
+                // eslint-disable-next-line no-console
+                console.error('[glanceterm] screenshot failed:', e)
+                this.notifications.error(`Screenshot failed: ${e?.message ?? e}`)
+                return null
+            } finally {
+                try {
+                    if (hideWindow && wasVisible) {
+                        ourWindow.show()
+                        ourWindow.focus()
+                    }
+                } catch { /* */ }
+                // Always re-assert dock visibility — covers the case where the
+                // overlay window or main-window hide somehow flipped a
+                // presentation flag we didn't expect.
+                ensureDockVisible(remote)
+            }
+        } finally {
             this.inProgress = false
         }
     }
