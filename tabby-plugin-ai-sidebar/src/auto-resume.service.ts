@@ -7,52 +7,61 @@ import { TabMonitor, TabState, AiTool } from './tab-monitor'
 
 /**
  * "When I restart GlanceTerm, the tab comes back but my Claude session is
- *  gone — re-run it for me."
+ *  gone — re-run it for me, with the same flags I had."
  *
- * Two-side feature:
+ * Three-phase loop driven by TabMonitor.states$:
  *
- *   1. CAPTURE — every TabMonitor tick, for each tab where (aiTool, cwd)
- *      are both known, persist `ai.autoResumeAgentByCwd[cwd] = aiTool`.
- *      Cwd is the only identifier stable across an app restart (PTYs die,
- *      GLANCETERM_TAB_ID regenerates). When the same tab subsequently
- *      transitions had-agent → no-agent (user typed `exit` / `/quit` /
- *      Ctrl+C'd out), the entry is deleted — that's the user signalling
- *      "next time, don't auto-launch here." If the user just quits the
- *      whole app without exiting the agent first, the entry sits in
- *      config and triggers the replay path next launch.
+ *   1. CAPTURE — every tick, for each tab with (aiTool, cwd, aiCommandLine)
+ *      all known, distil the raw `ps` command line into a re-runnable
+ *      invocation (via toRunnableCommand) and persist it as
+ *      `ai.autoResumeCommandByCwd[cwd] = command`. Cwd is the only
+ *      identifier stable across an app restart — PTYs die, GLANCETERM_TAB_ID
+ *      regenerates, tab indices shuffle.
  *
- *   2. REPLAY — for the first RESUME_WINDOW_MS after this service starts,
+ *   2. CLEANUP — same tab subsequently transitioning had-agent →
+ *      no-agent (user typed exit / quit / Ctrl-D out of the agent)
+ *      deletes the entry. That's the user signalling "next time, don't
+ *      auto-launch here." If the user just quits the whole app without
+ *      exiting the agent first, the entry sits in config and triggers
+ *      the replay path next launch.
+ *
+ *   3. REPLAY — for the first RESUME_WINDOW_MS after this service starts,
  *      any TabState we see with (cwd ∈ map, !aiTool) is a freshly-
- *      restored tab whose previous agent we should respawn. We
- *      sendInput(`${tool}\r`) into the tab after RESUME_DELAY_MS so the
- *      restored shell has time to render its prompt; running before the
- *      prompt would still work (most shells buffer typed-but-unread
- *      bytes) but looks ugly because the `claude` keystrokes echo before
- *      the prompt does. Each outerTab is resumed at most once per
- *      service lifetime — the WeakSet guard prevents re-firing if the
- *      agent quits and we then see (cwd ∈ map, !aiTool) again.
+ *      restored tab whose previous command we should respawn. We
+ *      sendInput(`${command}\r`) into the tab after RESUME_DELAY_MS so
+ *      the restored shell has time to render its prompt. Each outerTab
+ *      is resumed at most once per service lifetime — the WeakSet guard
+ *      prevents re-firing if the agent quits and we then see
+ *      (cwd ∈ map, !aiTool) again.
  *
  * Master toggle: `ai.autoResumeAgents` (default true). When off, no
  * capture, no replay, no cleanup — config is untouched.
  *
+ * Why we persist the COMMAND and not just the tool name:
+ *
+ *   v1 of this feature persisted just `cwd → 'claude'` and replayed
+ *   bare `claude`, losing flags the user originally typed
+ *   (`claude --resume`, `codex --model gpt-5`). Capturing the cmdline
+ *   that TabMonitor already runs through `ps` is essentially free, and
+ *   toRunnableCommand handles the awkward node-launched case
+ *   (`node /Users/me/.../@anthropic-ai/claude-code/cli.js --resume foo`
+ *   → `claude --resume foo`).
+ *
  * Known limitations:
  *
- *   - Only the tool NAME is replayed (`claude`, `codex`, …). Flags the
- *     user originally typed (`claude --model sonnet --resume`) are lost.
- *     If a user complains, we can persist the full `ps`-observed
- *     command line instead — but absolute paths like
- *     `node /Users/me/.nvm/.../claude` aren't shell-portable, so we'd
- *     also need a basename heuristic. Out of scope for v1.
- *   - The replay window is wall-clock based (30 s). Tabby's session
- *     restore normally completes well inside that, but on a very
- *     slow boot the late-arriving tabs would miss the window. Tradeoff
- *     against the alternative (no window, fire on every new tab open)
- *     which would surprise users who manually `cd` into a previously-
- *     pinned cwd and don't want a Claude landing on them.
- *   - If the user is actively typing in the restored tab in the brief
- *     2-second delay before sendInput fires, our `claude\r` appends to
- *     their input. Unlikely in practice (the tab is just-restored, the
- *     user hasn't switched to it yet) but worth flagging.
+ *   - Args with spaces or special chars (e.g. `--prompt "hello world"`)
+ *     get re-quoted as plain space-separated tokens because we lose the
+ *     quoting after argv-joining in `ps`. AI CLIs rarely take such
+ *     args; if a user hits this, the worst case is the replayed
+ *     command parses the args differently than intended and the user
+ *     re-types it once.
+ *   - 30 s wall-clock replay window. Slow boots that take longer to
+ *     finish session restore would miss it. Alternative (no window,
+ *     fire on every new tab open) would surprise users who manually
+ *     `cd` into a previously-pinned cwd.
+ *   - If the user is actively typing in the just-restored tab in the
+ *     2-second delay window, our `claude\r` appends to their input.
+ *     Narrow race; flagging for v1.1 fix if anyone notices.
  */
 @Injectable()
 export class AutoResumeService implements OnDestroy {
@@ -63,14 +72,12 @@ export class AutoResumeService implements OnDestroy {
     private static readonly RESUME_WINDOW_MS = 30_000
     /** Delay between detecting a restorable tab and actually typing the
      *  launch command, so the shell has time to render its prompt and the
-     *  echoed `claude` doesn't appear before the `$ `. */
+     *  echoed command doesn't appear before the `$ `. */
     private static readonly RESUME_DELAY_MS = 2_000
 
     private readonly startupTs = Date.now()
     /** Outer tabs we've already auto-resumed this service lifetime. WeakSet
-     *  so closed tabs drop out automatically — if the user closes a
-     *  restored tab and reopens the same cwd later (outside the window),
-     *  we wouldn't re-fire anyway, but the WeakSet keeps things tidy. */
+     *  so closed tabs drop out automatically. */
     private readonly attempted = new WeakSet<BaseTabComponent>()
     /** Per-tab "we observed an agent running here at some point during
      *  this service's lifetime" — gate for the cleanup path. Without it,
@@ -79,8 +86,7 @@ export class AutoResumeService implements OnDestroy {
      *  the replay timer fired. */
     private readonly hadAgentThisSession = new WeakMap<BaseTabComponent, AiTool>()
     /** Pending replay timers, keyed by outer tab so we can cancel cleanly
-     *  on tab close (the timer's tab reference would otherwise hold the
-     *  closed tab alive until it fires). */
+     *  on tab close. */
     private readonly pendingTimers = new WeakMap<BaseTabComponent, ReturnType<typeof setTimeout>>()
 
     private sub: Subscription | null = null
@@ -106,23 +112,22 @@ export class AutoResumeService implements OnDestroy {
     }
 
     private get persistedMap (): Record<string, string> {
-        return this.config.store?.ai?.autoResumeAgentByCwd ?? {}
+        return this.config.store?.ai?.autoResumeCommandByCwd ?? {}
     }
 
-    /** Persist a single entry, or delete if `tool === null`. No-op when
+    /** Persist a single entry, or delete if `command === null`. No-op when
      *  nothing actually changes — avoids spurious ConfigService.changed$
-     *  emits on every poll (AutoApproveService's flag sync, sound chime
-     *  reader, etc. all subscribe to that). */
-    private async setPersisted (cwd: string, tool: AiTool | null): Promise<void> {
+     *  emits on every poll. */
+    private async setPersisted (cwd: string, command: string | null): Promise<void> {
         const current = { ...this.persistedMap }
-        if (tool === null) {
+        if (command === null) {
             if (!(cwd in current)) return
             delete current[cwd]
         } else {
-            if (current[cwd] === tool) return
-            current[cwd] = tool
+            if (current[cwd] === command) return
+            current[cwd] = command
         }
-        this.config.store.ai.autoResumeAgentByCwd = current
+        this.config.store.ai.autoResumeCommandByCwd = current
         await this.config.save()
     }
 
@@ -132,10 +137,11 @@ export class AutoResumeService implements OnDestroy {
         const persisted = this.persistedMap
 
         for (const s of states) {
-            // CAPTURE: agent is alive here, remember the (cwd → tool) for
-            // next restart. Also arm the cleanup gate for this tab.
-            if (s.aiTool && s.cwd) {
-                void this.setPersisted(s.cwd, s.aiTool)
+            // CAPTURE: agent is alive here, remember the (cwd → command)
+            // for next restart. Also arm the cleanup gate for this tab.
+            if (s.aiTool && s.cwd && s.aiCommandLine) {
+                const command = toRunnableCommand(s.aiCommandLine, s.aiTool)
+                void this.setPersisted(s.cwd, command)
                 this.hadAgentThisSession.set(s.outerTab, s.aiTool)
                 continue
             }
@@ -158,20 +164,17 @@ export class AutoResumeService implements OnDestroy {
                 && s.cwd && !s.aiTool
                 && !this.attempted.has(s.outerTab)
             ) {
-                const tool = persisted[s.cwd]
-                if (tool) {
+                const command = persisted[s.cwd]
+                if (command) {
                     this.attempted.add(s.outerTab)
-                    this.scheduleResume(s, tool)
+                    this.scheduleResume(s, command)
                 }
             }
         }
     }
 
-    private scheduleResume (s: TabState, tool: string): void {
-        // Cancel any previous pending timer for the same outer tab. Tabby
-        // can emit `tabOpened$` twice in rare race paths (split-tab
-        // recovery, dev hot-reload re-attach) and a stale timer racing a
-        // fresh one would type the command twice.
+    private scheduleResume (s: TabState, command: string): void {
+        // Cancel any previous pending timer for the same outer tab.
         const existing = this.pendingTimers.get(s.outerTab)
         if (existing) clearTimeout(existing)
 
@@ -179,7 +182,7 @@ export class AutoResumeService implements OnDestroy {
         const t = setTimeout(() => {
             this.pendingTimers.delete(s.outerTab)
             try {
-                tab.sendInput?.(`${tool}\r`)
+                tab.sendInput?.(`${command}\r`)
             } catch (e: any) {
                 // eslint-disable-next-line no-console
                 console.error('[glanceterm] auto-resume sendInput failed:', e?.message ?? e)
@@ -187,4 +190,54 @@ export class AutoResumeService implements OnDestroy {
         }, AutoResumeService.RESUME_DELAY_MS)
         this.pendingTimers.set(s.outerTab, t)
     }
+}
+
+/**
+ * Reduce a raw `ps`-observed command line to a re-runnable invocation by
+ * stripping interpreter prefixes and absolute paths down to the bare tool
+ * name, while preserving every argument that came after it.
+ *
+ * Two-pass match against the cmdline tokens:
+ *
+ *   Pass 1: exact basename match. `claude`, `/usr/local/bin/claude`,
+ *           `node /path/to/claude.js` all surface a token whose
+ *           basename is `claude` or starts with `claude.` — easy win.
+ *   Pass 2: path-segment match. The node-launched Claude CLI shows up
+ *           as `node /Users/me/.../@anthropic-ai/claude-code/cli.js …`
+ *           — none of the tokens have `claude` as their basename, but
+ *           one of them contains `/claude-` or `/claude/` as a path
+ *           segment. Codex's `/codex-cli/` shape matches the same way.
+ *
+ * Args after the matched token are joined back with single spaces. This
+ * loses quoting on args that originally contained whitespace (`ps`
+ * already lost them), but AI CLI flags are almost always
+ * `--key value` or `--key=value` shapes that survive the round-trip.
+ *
+ * Fallback: no token recognised → return the bare tool name. The user
+ * loses their original flags but a fresh launch still happens.
+ *
+ * Exported for unit-testability if we add tests later — for now it's
+ * only consumed inside this module.
+ */
+export function toRunnableCommand (cmdline: string, tool: string): string {
+    const tokens = cmdline.split(/\s+/).filter(Boolean)
+    const argsFrom = (i: number): string => {
+        const args = tokens.slice(i + 1).join(' ')
+        return args ? `${tool} ${args}` : tool
+    }
+    // Pass 1: exact basename match (claude / claude.js / claude.mjs / …).
+    for (let i = 0; i < tokens.length; i++) {
+        const basename = tokens[i].split('/').pop() ?? ''
+        if (basename === tool || basename.startsWith(`${tool}.`)) {
+            return argsFrom(i)
+        }
+    }
+    // Pass 2: token whose absolute path contains the tool name as a
+    // segment — `/path/to/claude-code/cli.js`, `/path/to/codex-cli/...`.
+    for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].includes(`/${tool}-`) || tokens[i].includes(`/${tool}/`)) {
+            return argsFrom(i)
+        }
+    }
+    return tool
 }

@@ -125,6 +125,17 @@ export interface TabState {
     aiPid: number | null
     /** Which AI tool we detected running, if any. */
     aiTool: AiTool | null
+    /**
+     * Raw command line of the AI process exactly as `ps -p <aiPid> -o command=`
+     * reported it — the argv-joined string we matched against AI_PATTERNS.
+     * Includes the interpreter for node-launched CLIs ("node /Users/me/.claude/
+     * .../claude --resume foo") and absolute paths for shell-launched ones
+     * ("/usr/local/bin/claude --resume foo"). AutoResumeService strips the
+     * interpreter / path down to a re-runnable invocation before persisting
+     * so flags survive a restart even though absolute paths might not be
+     * portable across the user's PATH at restart time.
+     */
+    aiCommandLine: string | null
     /** Final state for the UI to render. */
     status: TabStatus
     /** Best-effort cwd of the shell session. Display only. */
@@ -425,11 +436,12 @@ export class TabMonitor implements OnDestroy {
 
         let aiTool: AiTool | null = null
         let aiPid: number | null = null
+        let aiCommandLine: string | null = null
         for (const c of candidates) {
             const real = realCmds.get(c.pid) ?? c.command
             if (!real) continue
             const match = AI_PATTERNS.find(p => p.regexes.some(r => r.test(real)))
-            if (match) { aiTool = match.tool; aiPid = c.pid; break }
+            if (match) { aiTool = match.tool; aiPid = c.pid; aiCommandLine = real; break }
         }
 
         // First-detection trigger for late hook install — if Claude (etc.)
@@ -548,6 +560,7 @@ export class TabMonitor implements OnDestroy {
             title: t.outer.customTitle || t.outer.title || `(tab ${this.shellPidCache.get(t.inner) ?? '?'})`,
             aiTool,
             aiPid,
+            aiCommandLine,
             cwd,
             status,
             lastActiveMs,
@@ -747,6 +760,7 @@ export class TabMonitor implements OnDestroy {
             title: t.outer.customTitle || t.outer.title || '(tab)',
             aiTool: null,
             aiPid: null,
+            aiCommandLine: null,
             cwd: null,
             status: 'no_ai',
             lastActiveMs: null,

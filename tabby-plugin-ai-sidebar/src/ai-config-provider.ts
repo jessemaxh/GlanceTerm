@@ -44,14 +44,19 @@ export class AiSidebarConfigProvider extends ConfigProvider {
             // re-type `claude` everywhere") is what users were complaining
             // about. See AutoResumeService.
             autoResumeAgents: true,
-            // Per-cwd record of which AI tool was running there at quit time
-            // (or, more precisely, "last observed alive there during the
-            // last session"). Captured every TabMonitor tick that sees an
-            // aiTool, deleted when the user is observed quitting the agent
+            // Per-cwd record of the re-runnable command to launch the AI
+            // tool that was running there at quit time (or, more precisely,
+            // "last observed alive there during the last session"). Value
+            // is the command to type into the restored shell, with flags
+            // preserved — e.g. `claude --resume`, `codex --model gpt-5`.
+            // Captured every TabMonitor tick that sees an aiTool by
+            // reducing the raw `ps` cmdline (which may include the node
+            // interpreter and absolute paths) to a portable invocation.
+            // Deleted when the user is observed quitting the agent
             // (had-agent → no-agent transition on the same outer tab).
-            // Map shape, not a per-tab list, because cwd is the only stable
-            // identifier across restarts.
-            autoResumeAgentByCwd: {} as Record<string, string>,
+            // Map shape, not a per-tab list, because cwd is the only
+            // stable identifier across restarts.
+            autoResumeCommandByCwd: {} as Record<string, string>,
         },
     }
 
