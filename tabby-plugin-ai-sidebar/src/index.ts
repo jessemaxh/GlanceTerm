@@ -24,6 +24,7 @@ import { HookRuntimeService } from './hook-runtime.service'
 import { HookInstallerService } from './hook-installer.service'
 import { HookWatcherService } from './hook-watcher.service'
 import { AutoApproveService } from './auto-approve.service'
+import { AutoResumeService } from './auto-resume.service'
 import { ScreenshotService } from './screenshot/screenshot.service'
 import { ScreenshotPasteService } from './screenshot/paste.service'
 import { ImagePasteHookService } from './image-paste-hook.service'
@@ -103,6 +104,7 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
         HookWatcherService,
         HookInstallerService,
         AutoApproveService,
+        AutoResumeService,
         TabMonitor,
         UnreadService,
         AttentionJumperService,
@@ -141,6 +143,11 @@ export default class AiSidebarModule {
         // startup — otherwise the file would only appear the first time the
         // sidebar component reaches the service via the toolbar button.
         _a: AutoApproveService,
+        // Eager-inject so the replay window starts ticking at app launch,
+        // not the first time the sidebar component is rendered. Without
+        // this, opening GlanceTerm with the sidebar hidden would skip
+        // auto-resume entirely.
+        _r: AutoResumeService,
     ) {
         // eslint-disable-next-line no-console
         console.log('[glanceterm] plugin loaded')

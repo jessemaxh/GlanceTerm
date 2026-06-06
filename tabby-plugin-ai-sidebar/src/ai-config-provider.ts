@@ -38,6 +38,20 @@ export class AiSidebarConfigProvider extends ConfigProvider {
             // tab list (the "tab close removes pin" rule). See sidebar
             // component's prunePinnedCwds for the prune contract.
             pinnedCwds: [] as string[],
+            // Master switch for "tab is restored → re-launch the AI agent
+            // that was running in it at quit time". Default on because the
+            // alternative ("restored tab is a bare shell, user has to
+            // re-type `claude` everywhere") is what users were complaining
+            // about. See AutoResumeService.
+            autoResumeAgents: true,
+            // Per-cwd record of which AI tool was running there at quit time
+            // (or, more precisely, "last observed alive there during the
+            // last session"). Captured every TabMonitor tick that sees an
+            // aiTool, deleted when the user is observed quitting the agent
+            // (had-agent → no-agent transition on the same outer tab).
+            // Map shape, not a per-tab list, because cwd is the only stable
+            // identifier across restarts.
+            autoResumeAgentByCwd: {} as Record<string, string>,
         },
     }
 
