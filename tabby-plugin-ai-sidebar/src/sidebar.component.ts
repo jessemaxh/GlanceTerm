@@ -125,7 +125,11 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
                  is still open leaves the user with no way to close it (agent
                  exited, or focus moved to the shell side of the split → no
                  focused AI agent → button gone, split orphaned). Right cluster
-                 is global settings (sound toggle). -->
+                 is a single gear button that opens a settings popover with
+                 every global toggle (chime, auto-approve, …). The two earlier
+                 standalone toggles got noisy as a cluster and competed with
+                 the per-tab actions for attention; folding them into a popover
+                 puts focus back on the per-tab buttons. -->
             <div class="sb-actions" role="toolbar" aria-label="AI tab actions">
                 <div class="split-action" #screenshotSplit>
                     <button type="button"
@@ -184,50 +188,57 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
                         <rect x="8.5" y="2.5" width="6" height="11" rx="1"/>
                     </svg>
                 </button>
-                <button type="button"
-                        class="action-btn settings-btn"
-                        [class.muted]="!soundOnReady"
-                        (click)="toggleSoundOnReady()"
-                        [title]="soundOnReady ? 'Mute the ready chime (working → done)' : 'Unmute the ready chime (working → done)'"
-                        [attr.aria-label]="soundOnReady ? 'Mute the ready chime' : 'Unmute the ready chime'"
-                        [attr.aria-pressed]="!soundOnReady">
-                    <svg *ngIf="soundOnReady" width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                        <path d="M2.5 6 H5 L9 3 V13 L5 10 H2.5 Z"
-                              fill="currentColor" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/>
-                        <path d="M11 5.5 Q12.7 8 11 10.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" fill="none"/>
-                        <path d="M12.8 4 Q15.6 8 12.8 12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" fill="none" opacity="0.75"/>
-                    </svg>
-                    <svg *ngIf="!soundOnReady" width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                        <path d="M2.5 6 H5 L9 3 V13 L5 10 H2.5 Z"
-                              fill="currentColor" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/>
-                        <line x1="10.6" y1="5.6" x2="15.2" y2="10.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-                        <line x1="15.2" y1="5.6" x2="10.6" y2="10.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
-                    </svg>
-                </button>
-                <!-- Auto-approve permission prompts toggle. The .active state
-                     paints the existing orange accent (same hue as
-                     needs_permission rows / 'danger') to signal "this is on,
-                     watch out". Off state uses the same .muted opacity as the
-                     mute-chime button so the whole toolbar reads uniformly. -->
-                <button type="button"
-                        class="action-btn settings-btn"
-                        [class.muted]="!autoApprovePermissions"
-                        [class.active]="autoApprovePermissions"
-                        (click)="toggleAutoApprove()"
-                        [title]="autoApprovePermissions ? 'Auto-approve is ON — the agent can run any command without asking. Click to disable.' : 'Auto-approve permission prompts (OFF). Click to enable; needs confirmation.'"
-                        [attr.aria-label]="autoApprovePermissions ? 'Disable auto-approve permission prompts' : 'Enable auto-approve permission prompts'"
-                        [attr.aria-pressed]="autoApprovePermissions">
-                    <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                        <!-- Shield outline; filled translucent when on, hollow when off. -->
-                        <path d="M8 1.5 L13 3.2 V8 C13 11 10.7 13.3 8 14.5 C5.3 13.3 3 11 3 8 V3.2 Z"
-                              stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"
-                              [attr.fill]="autoApprovePermissions ? 'currentColor' : 'none'"
-                              [attr.fill-opacity]="autoApprovePermissions ? 0.18 : 0"/>
-                        <!-- Lightning bolt inside the shield = "auto-pass". -->
-                        <path d="M8.7 5 L6.2 8.7 H7.9 L7.3 11.2 L9.9 7.3 H8.2 Z"
-                              fill="currentColor" stroke="currentColor" stroke-width="0.4" stroke-linejoin="round"/>
-                    </svg>
-                </button>
+                <!-- Settings cluster — collapsed from the previous two icon
+                     toggles into a single gear button + popover. Pattern mirrors
+                     the screenshot-options split: a .action-menu opens upward
+                     above the toolbar so it never clips behind the sidebar
+                     footer. .right-anchored flips the menu anchor edge so it
+                     doesn't overflow the sidebar's right boundary. -->
+                <div class="split-action settings-action" #settingsSplit>
+                    <button type="button"
+                            class="action-btn settings-btn"
+                            [class.open]="settingsMenuOpen"
+                            (click)="toggleSettingsMenu($event)"
+                            title="AI sidebar settings"
+                            aria-label="Open AI sidebar settings"
+                            [attr.aria-expanded]="settingsMenuOpen"
+                            aria-haspopup="menu">
+                        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                            <!-- Cog: center bearing + 8 evenly-spaced teeth pairs
+                                 drawn as short radial strokes. Pure-stroke render
+                                 reads as "settings" on dark + light backgrounds
+                                 alike, and the inner circle doubles as a focus
+                                 anchor for hover state. -->
+                            <circle cx="8" cy="8" r="2.4" stroke="currentColor" stroke-width="1.2" fill="none"/>
+                            <path d="M8 1.5 V3.4 M8 12.6 V14.5 M1.5 8 H3.4 M12.6 8 H14.5
+                                     M3.4 3.4 L4.7 4.7 M11.3 11.3 L12.6 12.6
+                                     M3.4 12.6 L4.7 11.3 M11.3 4.7 L12.6 3.4"
+                                  stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
+                        </svg>
+                    </button>
+                    <div *ngIf="settingsMenuOpen" class="action-menu right-anchored" role="menu">
+                        <button type="button"
+                                class="action-menu-item"
+                                role="menuitemcheckbox"
+                                [attr.aria-checked]="soundOnReady"
+                                (click)="toggleSoundOnReady()">
+                            <svg class="check" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                                <path *ngIf="soundOnReady" d="M3 8.5 L6.5 12 L13 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                            <span class="lbl">Chime on agent done</span>
+                        </button>
+                        <button type="button"
+                                class="action-menu-item"
+                                role="menuitemcheckbox"
+                                [attr.aria-checked]="autoApprovePermissions"
+                                (click)="toggleAutoApprove()">
+                            <svg class="check" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                                <path *ngIf="autoApprovePermissions" d="M3 8.5 L6.5 12 L13 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                            <span class="lbl">Auto-approve permission prompts</span>
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
     `,
@@ -907,7 +918,11 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
         }
 
         /* Popover menu — anchored to the split-action group, opens upward so
-           it doesn't clip below the sidebar footer. */
+           it doesn't clip below the sidebar footer. Default anchors to the
+           left edge of the group (screenshot menu lives at left side of the
+           toolbar). The .right-anchored modifier flips for groups that live
+           at the right edge of the sidebar (settings cluster), so the menu
+           doesn't run off the right boundary. */
         .action-menu {
             position: absolute;
             bottom: calc(100% + 6px);
@@ -919,6 +934,10 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             border-radius: 8px;
             box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
             z-index: 50;
+        }
+        .action-menu.right-anchored {
+            left: auto;
+            right: 0;
         }
         .action-menu-item {
             display: flex;
@@ -947,22 +966,17 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             white-space: nowrap;
         }
 
-        /* Settings cluster lives at the right end of the action row — a quiet
-           separator margin distinguishes it from the per-tab AI actions on
-           the left, and it's always visible regardless of which tab is focused.
-           margin-left:auto only on the FIRST settings-btn so the cluster is
-           pushed right as a group; subsequent settings-btns sit flush next to
-           it (otherwise each one pushes itself, spreading them across the row). */
-        .action-btn.settings-btn { margin-left: auto; }
-        .action-btn.settings-btn + .action-btn.settings-btn { margin-left: 0; }
-        /* Muted speaker reads as "off": dim icon, no accent. Still hover-active
-           so the user has feedback when re-enabling. */
-        .action-btn.settings-btn.muted {
-            color: var(--gt-text-faint);
-            opacity: 0.8;
-        }
-        .action-btn.settings-btn.muted:hover {
-            opacity: 1;
+        /* Settings cluster lives at the right end of the action row, pushed
+           right via margin-left:auto on its split-action wrapper. Wrapping in
+           a .split-action keeps the gear button + popover positioning
+           identical to the screenshot menu pattern. */
+        .split-action.settings-action { margin-left: auto; }
+        /* Open state mirrors the screenshot caret's open style: accent wash
+           + accent border + accent color, so it visibly reads as "menu is up"
+           the same way across the toolbar. */
+        .action-btn.settings-btn.open {
+            background: var(--gt-accent-soft);
+            border-color: rgba(255, 170, 85, 0.55);
             color: var(--gt-accent);
         }
 
@@ -1002,7 +1016,9 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     private home = os.homedir()
     capturing = false
     screenshotMenuOpen = false
+    settingsMenuOpen = false
     @ViewChild('screenshotSplit', { static: false }) private screenshotSplitEl?: ElementRef<HTMLElement>
+    @ViewChild('settingsSplit',   { static: false }) private settingsSplitEl?:   ElementRef<HTMLElement>
 
     /**
      * Sort-position pin for the just-clicked row. When you click a `done` row,
@@ -1156,6 +1172,19 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         // (e.g. a row-click handler on `.sb-actions`) intercepting the event.
         ev.stopPropagation()
         this.screenshotMenuOpen = !this.screenshotMenuOpen
+        if (this.screenshotMenuOpen) this.settingsMenuOpen = false
+    }
+
+    /**
+     * Toggle the global-settings popover. Mutual-exclusion: opening this
+     * closes the screenshot menu (and vice versa) — two popovers stacked
+     * upward in the same row of the sidebar would overlap. stopPropagation
+     * for the same reason as toggleScreenshotMenu.
+     */
+    toggleSettingsMenu (ev: MouseEvent): void {
+        ev.stopPropagation()
+        this.settingsMenuOpen = !this.settingsMenuOpen
+        if (this.settingsMenuOpen) this.screenshotMenuOpen = false
     }
 
     /**
@@ -1167,16 +1196,25 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      */
     @HostListener('document:click', ['$event'])
     onDocumentClick (ev: MouseEvent): void {
-        if (!this.screenshotMenuOpen) return
-        const host = this.screenshotSplitEl?.nativeElement
-        if (host && ev.target instanceof Node && host.contains(ev.target)) return
-        this.zone.run(() => { this.screenshotMenuOpen = false })
+        if (this.screenshotMenuOpen) {
+            const host = this.screenshotSplitEl?.nativeElement
+            const inside = host && ev.target instanceof Node && host.contains(ev.target)
+            if (!inside) this.zone.run(() => { this.screenshotMenuOpen = false })
+        }
+        if (this.settingsMenuOpen) {
+            const host = this.settingsSplitEl?.nativeElement
+            const inside = host && ev.target instanceof Node && host.contains(ev.target)
+            if (!inside) this.zone.run(() => { this.settingsMenuOpen = false })
+        }
     }
 
     @HostListener('document:keydown.escape')
     onEscape (): void {
         if (this.screenshotMenuOpen) {
             this.zone.run(() => { this.screenshotMenuOpen = false })
+        }
+        if (this.settingsMenuOpen) {
+            this.zone.run(() => { this.settingsMenuOpen = false })
         }
     }
 
