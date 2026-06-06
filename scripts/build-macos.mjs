@@ -20,6 +20,47 @@ if (!process.env.SKIP_PREPACKAGE) {
     execFileSync('node', ['scripts/prepackage-plugins.mjs'], { stdio: 'inherit' })
 }
 
+// CI does these two steps in .github/workflows/build.yml; for local
+// `npm run dmg:mac` we have to do them too or electron-builder packages
+// a broken .app. Both are idempotent — safe to run on every build.
+//
+// 1. `yarn` in app/ runs patch-package against app/node_modules. Several
+//    packages (notably @serialport/bindings-cpp and glasstron) need patches
+//    applied at install time; without them the runtime crashes are
+//    obscure ("native module unable to load" deep in xterm). The yarn
+//    invocation also writes the `.yarn-integrity` file electron-builder
+//    uses as a hint that "this is a real production node_modules tree."
+// 2. The electron symlink at app/node_modules/electron is a workaround
+//    for an electron-builder beta bug — without it, electron-builder's
+//    production-dep walker finds no `electron` in the app's node_modules
+//    and silently bails on collecting ANY other deps. The visible
+//    symptom is a 9 MB asar with only app/ source files and no
+//    node_modules at all, and a .app that crashes at launch with
+//    `Cannot find module 'v8-compile-cache'`. Symlinking electron from
+//    root/node_modules makes the walker happy.
+const appDir = path.resolve('app')
+if (fs.existsSync(appDir)) {
+    execFileSync('yarn', [], { cwd: appDir, stdio: 'inherit' })
+    const electronLink = path.join(appDir, 'node_modules', 'electron')
+    const electronTarget = path.join('..', '..', 'node_modules', 'electron')
+    try {
+        const existing = fs.lstatSync(electronLink)
+        if (existing.isSymbolicLink()) {
+            // Already symlinked — leave it. fs.symlinkSync would EEXIST.
+        } else {
+            // Real directory or file shadowing the symlink target — replace.
+            fs.rmSync(electronLink, { recursive: true, force: true })
+            fs.symlinkSync(electronTarget, electronLink)
+        }
+    } catch (e) {
+        if (e?.code === 'ENOENT') {
+            fs.symlinkSync(electronTarget, electronLink)
+        } else {
+            throw e
+        }
+    }
+}
+
 const isTag = (process.env.GITHUB_REF || '').startsWith('refs/tags/')
 
 process.env.ARCH = process.env.ARCH || process.arch
