@@ -6,7 +6,7 @@ import { defineConfig } from 'vitest/config'
  * Scope: pure functions only. We don't construct Angular services in tests
  * — the DI graph reaches deep into Tabby internals and the bundle isn't
  * test-friendly. Instead we extract the testable logic into exported pure
- * functions (e.g. `toRunnableCommand`, `isShellSafe`, `processSubagentTransition`)
+ * functions (e.g. `toRunnableCommand`, `isShellSafe`, `reduceSubagentQueue`)
  * and unit-test those. Whole-component tests would need an Angular TestBed
  * setup that's out of scope for this first pass — see engineering review.
  *

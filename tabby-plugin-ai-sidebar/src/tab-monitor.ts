@@ -2,6 +2,7 @@ import { Injectable, OnDestroy } from '@angular/core'
 import { BehaviorSubject, Observable } from 'rxjs'
 import { execFile } from 'child_process'
 import * as fsSync from 'fs'
+import * as fs from 'fs/promises'
 import { promisify } from 'util'
 
 import { AppService, BaseTabComponent } from 'tabby-core'
@@ -1001,20 +1002,35 @@ async function buildProcessTreeSnapshot (): Promise<ProcessTreeSnapshot> {
             }
         }
     } else if (process.platform === 'linux') {
-        // Read /proc directly — no exec, very fast.
+        // Read /proc via async fs.promises + Promise.all so a 500-pid host
+        // doesn't serialize 500 blocking readFileSync into the renderer
+        // thread — that would have re-created the very "blocks the
+        // renderer" problem this refactor is supposed to fix.
+        //
+        // Wall-clock budget: 800ms matches the macOS `ps -A` runProbe
+        // cap. We track via `Date.now()` rather than Promise.race because
+        // bailing on the race still leaves the in-flight reads pending; the
+        // budget short-circuit at the top of each file's async closure is
+        // cheap enough to let already-launched reads finish to completion
+        // without polluting the snapshot map. If /proc itself is wedged
+        // (NFS overlay), the readdir() awaits forever — we'd want a hard
+        // timeout there, but Node has no built-in. Acceptable: pathological
+        // NFS overlays on /proc are vanishingly rare for a desktop app.
+        const deadline = Date.now() + 800
         let entries: string[] = []
-        try { entries = fsSync.readdirSync('/proc') } catch { /* swallow */ }
-        for (const e of entries) {
-            if (!/^\d+$/.test(e)) continue
+        try { entries = await fs.readdir('/proc') } catch { /* swallow */ }
+        const pidDirs = entries.filter(e => /^\d+$/.test(e))
+        await Promise.all(pidDirs.map(async e => {
+            if (Date.now() > deadline) return
             try {
-                const data = fsSync.readFileSync(`/proc/${e}/stat`, 'utf8')
+                const data = await fs.readFile(`/proc/${e}/stat`, 'utf8')
                 const close = data.lastIndexOf(')')
-                if (close < 0) continue
+                if (close < 0) return
                 const rest = data.slice(close + 1).trim().split(/\s+/)
                 const ppid = parseInt(rest[1], 10)
                 if (Number.isFinite(ppid)) pidParent.set(parseInt(e, 10), ppid)
             } catch { /* skip on race / perm */ }
-        }
+        }))
     }
     // Windows: leave pidParent empty; ancestorsOf falls through to the
     // Windows-only sync wmic per-pid lookup. The renderer-jank cost we
@@ -1037,11 +1053,17 @@ function ancestorsOf (pid: number, snapshot: ProcessTreeSnapshot, maxDepth: numb
     let cur = pid
     for (let i = 0; i < maxDepth; i++) {
         let parent: number | null = snapshot.pidParent.get(cur) ?? null
-        // Windows fallback — snapshot is empty; do a per-step probe. Sync
-        // here because the ancestor walk is iterative and reusing the
-        // pre-refactor wmic timeout (1.5 s) keeps behavior unchanged.
-        if (parent === null && process.platform === 'win32') {
-            parent = parentPidOfWindowsSync(cur)
+        // Snapshot miss fallback — snapshot didn't cover this pid (race
+        // where the process spawned between snapshot build and walk, or
+        // worst case the snapshot itself timed out and is empty). Fall
+        // back to a per-step sync probe so the ancestor walk degrades
+        // gracefully instead of silently returning [] and missing the
+        // "truePID = caffeinate, ppid = claude" detection path on every
+        // tab for the whole tick. Pre-refactor every step was a sync
+        // probe, so this is at worst the old behavior; in the common case
+        // (snapshot succeeded) we never enter this branch.
+        if (parent === null) {
+            parent = parentPidOfSync(cur)
         }
         if (!parent || parent <= 1 || parent === cur) break
         out.push(parent)
@@ -1081,24 +1103,58 @@ async function childrenOf (pid: number): Promise<number[]> {
 }
 
 /**
- * Windows-only per-step parent lookup, kept synchronous for the ancestor
- * walk. We tolerate the per-call wmic cost on Windows because Windows is
- * not where the per-tab perf reports come from; rolling a batched
- * PowerShell query would only marginally help. Returns null on any
- * failure path so the caller's `parent === null` break-out triggers.
+ * Per-step parent lookup, sync. Called from `ancestorsOf` ONLY when the
+ * per-tick snapshot doesn't cover the requested pid — either the snapshot
+ * itself timed out / failed, or this pid was spawned between snapshot
+ * build and walk. Three platform-specific paths:
+ *
+ *   Linux: single `/proc/<pid>/stat` read. Sub-millisecond. Same shape as
+ *     the snapshot builder, just for one pid.
+ *   macOS: `ps -p <pid> -o ppid=`. ~5ms cold. Matches the pre-refactor
+ *     `parentPidOf` exactly so the graceful-degradation path keeps the
+ *     old "60 ps calls per tick" cost — not great, but no worse than
+ *     pre-refactor for the rare-but-real "snapshot failed" case.
+ *   Windows: `wmic process where ProcessId=<pid>`. ~50ms+ but wmic is
+ *     the only convenient path; PowerShell cold start is worse.
+ *
+ * Returns null on any failure so the caller's `parent === null` exits the
+ * walk loop cleanly. execFileSync (not execSync) keeps the no-shell-
+ * interp safety: pid is internal-controlled, but defense in depth.
  */
-function parentPidOfWindowsSync (pid: number): number | null {
-    // We have to keep a sync call somewhere on Windows because we don't
-    // pre-build the pidParent map there. Using execFileSync (not execSync)
-    // for the no-shell-interp safety even though pid is internal-controlled.
-    try {
-        const { execFileSync } = require('child_process') as typeof import('child_process')
-        const out = execFileSync('wmic', [
-            'process', 'where', `ProcessId=${pid}`, 'get', 'ParentProcessId', '/format:value',
-        ], { encoding: 'utf8', timeout: 1500, windowsHide: true })
-        const m = out.match(/ParentProcessId=(\d+)/)
-        return m ? parseInt(m[1], 10) : null
-    } catch { return null }
+function parentPidOfSync (pid: number): number | null {
+    if (process.platform === 'linux') {
+        try {
+            const data = fsSync.readFileSync(`/proc/${pid}/stat`, 'utf8')
+            const close = data.lastIndexOf(')')
+            if (close < 0) return null
+            const rest = data.slice(close + 1).trim().split(/\s+/)
+            const ppid = parseInt(rest[1], 10)
+            return Number.isFinite(ppid) ? ppid : null
+        } catch { return null }
+    }
+    if (process.platform === 'darwin') {
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { execFileSync } = require('child_process') as typeof import('child_process')
+            const out = execFileSync('ps', ['-p', String(pid), '-o', 'ppid='], {
+                encoding: 'utf8', timeout: 300,
+            })
+            const ppid = parseInt(out.trim(), 10)
+            return Number.isFinite(ppid) ? ppid : null
+        } catch { return null }
+    }
+    if (process.platform === 'win32') {
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const { execFileSync } = require('child_process') as typeof import('child_process')
+            const out = execFileSync('wmic', [
+                'process', 'where', `ProcessId=${pid}`, 'get', 'ParentProcessId', '/format:value',
+            ], { encoding: 'utf8', timeout: 1500, windowsHide: true })
+            const m = out.match(/ParentProcessId=(\d+)/)
+            return m ? parseInt(m[1], 10) : null
+        } catch { return null }
+    }
+    return null
 }
 
 /**
