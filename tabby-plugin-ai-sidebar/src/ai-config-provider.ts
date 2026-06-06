@@ -31,6 +31,15 @@ export class AiSidebarConfigProvider extends ConfigProvider {
             // any command without user confirmation. UI shows a confirm
             // dialog on first enable; see AutoApproveService.
             autoApprovePermissions: false,
+            // Hide rows for tabs that don't have an AI agent running (raw
+            // status `no_ai`). OFF by default — a fresh shell IS a row in
+            // the sidebar, dimmed via the no_ai opacity rule, so users
+            // notice when they have terminals open but unused. Flip ON
+            // when running many AI agents and the plain-shell rows are
+            // pure noise.
+            // User-pinned cwds (right-click → Pin to top) bypass this
+            // filter — the explicit pin gesture overrides the bulk rule.
+            hideTabsWithoutAgent: false,
             // List of cwds the user has right-click-pinned to the top of the
             // sidebar. Persisted so pins survive an app restart that brings
             // the same cwd back (Tabby session restore). Auto-evicted when

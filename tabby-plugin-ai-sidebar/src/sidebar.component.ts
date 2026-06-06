@@ -237,6 +237,16 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
                             </svg>
                             <span class="lbl">Auto-approve permission prompts</span>
                         </button>
+                        <button type="button"
+                                class="action-menu-item"
+                                role="menuitemcheckbox"
+                                [attr.aria-checked]="hideTabsWithoutAgent"
+                                (click)="toggleHideTabsWithoutAgent()">
+                            <svg class="check" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                                <path *ngIf="hideTabsWithoutAgent" d="M3 8.5 L6.5 12 L13 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                            <span class="lbl">Hide tabs without an AI agent</span>
+                        </button>
                     </div>
                 </div>
             </div>
@@ -1134,6 +1144,26 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     }
 
     /**
+     * Read-through to the "hide rows for tabs without an AI agent" setting.
+     * Default false (matches AiSidebarConfigProvider) so during the
+     * config-load window we show every tab; flipping ON triggers a single
+     * Angular CD pass that drops no_ai rows from `visibleStates`.
+     */
+    get hideTabsWithoutAgent (): boolean {
+        return this.config.store?.ai?.hideTabsWithoutAgent === true
+    }
+
+    /**
+     * Flip the hide-no-ai setting and persist. `visibleStates` reads this on
+     * every CD pass so the row list re-renders on the next tick with no
+     * further plumbing. Idempotent — no-op when the value is unchanged.
+     */
+    toggleHideTabsWithoutAgent (): void {
+        this.config.store.ai.hideTabsWithoutAgent = !this.hideTabsWithoutAgent
+        void this.config.save()
+    }
+
+    /**
      * Flip the auto-approve switch. Enabling goes through
      * AutoApproveService.enable() which pops a confirm dialog first — we
      * never want a stray click to grant the AI unconditional run rights.
@@ -1459,14 +1489,28 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
             byOuter.set(s.outerTab, arr)
         }
         const fm = this.filterMode
+        const hideNoAi = this.hideTabsWithoutAgent
         const primaryOf = (group: TabState[]): TabState => this.pickPrimary(group)
         const groupMatches = (group: TabState[]): boolean =>
             fm === 'all' || group.some(s => this.effStatus(s) === fm)
+        // Global "hide tabs without an AI agent" filter — drops a group when
+        // its chosen primary is `no_ai`. Subtle but important: `pickPrimary`
+        // prefers any non-no_ai leaf, so a no_ai primary means EVERY leaf in
+        // the outer tab is no_ai (a SplitTab with one AI leaf still has the
+        // AI as primary and stays visible). User-pinned cwds bypass — pinning
+        // is an explicit "I want this in my view" gesture that should win
+        // over any global filter.
+        const groupPassesNoAiFilter = (group: TabState[], p: TabState): boolean => {
+            if (!hideNoAi) return true
+            if (this.isPinned(p)) return true
+            return this.effStatus(p) !== 'no_ai'
+        }
         const visiblePrimaries: TabState[] = []
         const subsByOuter = new Map<BaseTabComponent, TabState[]>()
         for (const [outer, group] of byOuter) {
             if (!groupMatches(group)) continue
             const p = primaryOf(group)
+            if (!groupPassesNoAiFilter(group, p)) continue
             visiblePrimaries.push(p)
             const subs = group.filter(s => s !== p)
             if (subs.length > 0) subsByOuter.set(outer, subs)
@@ -1583,9 +1627,29 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         this.filterMode = this.filterMode === id && id !== 'all' ? 'all' : id
     }
 
-    /** Pill counter — `All` counts every tab; the others count their bucket. */
+    /** Pill counter — `All` counts every tab the sidebar WOULD show with the
+     *  current global filters (matches what visibleStates produces); the
+     *  other pills count their effStatus bucket directly. The no_ai bucket
+     *  isn't a pill itself, so flipping hideTabsWithoutAgent on only changes
+     *  the `All` count — the working/idle/done/needs_permission buckets are
+     *  unaffected by definition. */
     countFor (id: FilterId): number {
-        if (id === 'all') return this.states.length
+        if (id === 'all') {
+            if (!this.hideTabsWithoutAgent) return this.states.length
+            // Per-outer-tab dedup matches visibleStates' "one primary per
+            // outer tab" model — pinned tabs bypass like in visibleStates.
+            const seen = new Set<BaseTabComponent>()
+            let n = 0
+            for (const s of this.states) {
+                if (seen.has(s.outerTab)) continue
+                seen.add(s.outerTab)
+                if (this.isPinned(s)) { n++; continue }
+                const group = this.states.filter(o => o.outerTab === s.outerTab)
+                const primary = this.pickPrimary(group)
+                if (this.effStatus(primary) !== 'no_ai') n++
+            }
+            return n
+        }
         return this.states.filter(s => this.effStatus(s) === id).length
     }
 
