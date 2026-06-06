@@ -27,6 +27,12 @@ amber when it's asking permission. Click a row → jump straight to that tab.
 └────────────────┴──────────────────────────────────┘
 ```
 
+> **Does it work with my AI tool?** — see the
+> [feature × agent support matrix](docs/feature-matrix.md). Short answer:
+> Claude Code is first-class and tested; Codex has a docs-written adapter
+> (untested); Gemini / opencode / aider / goose currently get
+> process-detection + auto-resume only.
+
 ## Status of this repo
 
 **v0.2 — hook-based architecture, dogfooding.** Built on top of
