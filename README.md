@@ -73,6 +73,32 @@ screen-scraping, zero false positives.
 - v0.3 — Codex, Gemini CLI (same HookAdapter pattern, ~1 day each)
 - v0.4 — opencode, aider (no native hooks; fall back to process-state)
 
+## ⚠️ Auto-approve permissions (opt-in, dangerous)
+
+GlanceTerm can auto-approve Claude Code permission prompts on your behalf —
+useful if you're babysitting many agents and don't want to alt-tab to click
+"Allow" every 30 seconds. **It's off by default.**
+
+When enabled (click the shield icon in the sidebar's bottom toolbar, then
+confirm the warning dialog), GlanceTerm responds `allow` to every Claude
+`PermissionRequest`. Claude can then run any command — including destructive
+ones like `rm -rf` or `curl … | sh` — without asking.
+
+- **Audit log**: every auto-approved action is appended to
+  `~/.glanceterm/auto-approve.log` (tab-separated: timestamp, tab id, tool
+  name, working directory).
+- **Flag file**: `~/.glanceterm/auto-approve.flag` holds `1` (on) or `0`
+  (off). Delete it or set to `0` and Claude falls back to interactive prompts
+  on the next request — useful if you ever want to kill-switch the feature
+  without opening the app.
+- **Disable**: click the shield again. The button is grey when off, amber
+  when on.
+
+**Don't enable this** in your main repo, in directories with credentials or
+production access, or in any shell where `sudo` works without a password.
+Use it in a container, scratch directory, or disposable VM. If something
+goes wrong, you own it — the confirm dialog exists for exactly this reason.
+
 ## Compared to other multi-agent terminals
 
 | | GlanceTerm | hiveterm.com | Agent Deck |
@@ -82,6 +108,32 @@ screen-scraping, zero false positives.
 | Habit change | None — keep typing `claude` | New layout to learn | Must launch every session via `agent-deck` |
 | AI config files modified | Only the agent's hook entry | None | Yes — each tool's hook entry |
 | Cost | Free, MIT | $99/yr Pro | Free (binary) |
+
+## Install
+
+**macOS (recommended)** — grab the latest `.dmg` from the
+[releases page](../../releases). Drag GlanceTerm.app into `/Applications`.
+
+The binary is **ad-hoc signed, not notarized** (no paid Apple Developer
+account yet), so macOS Gatekeeper will refuse to launch it on first run.
+To bypass:
+
+1. After dragging into Applications, right-click GlanceTerm → **Open** →
+   confirm the warning dialog. (Double-clicking won't show the Open
+   option — you need the right-click menu.)
+2. macOS remembers this choice; subsequent launches work normally.
+
+Alternatively, from a terminal:
+```bash
+xattr -d com.apple.quarantine /Applications/GlanceTerm.app
+```
+
+**Linux / Windows** — `.AppImage`, `.deb`, `.rpm`, and Windows `.exe`
+installers are also produced by CI and attached to each release, but
+**none have been validated end-to-end**. The hook handler ships a
+PowerShell variant for Windows and POSIX `sh` for Linux; everything
+compiles, nothing has been smoke-tested. PRs reporting "works on my
+distro" / "breaks here, fix attached" are very welcome.
 
 ## Dev / Build
 
@@ -109,16 +161,31 @@ for CDP-driven UI testing.
 
 ## Known limitations (v0.2)
 
-- macOS only, tested on Sequoia. Linux/Windows likely works since Tabby does
-  but I haven't validated. Hook script ships as POSIX sh; Windows .cmd to come.
-- Only Claude Code is hooked in v0.2. Other tools show as "running" if a
-  process is alive but lack working/idle granularity until their adapters land.
-- No `.dmg` distribution yet — must be built from source.
+- **Only Claude Code is hooked.** Other tools (Codex, Gemini, aider,
+  opencode, goose) are recognised from their process tree and show as
+  `working` while alive, but lack the fine-grained
+  working/idle/needs_permission/done states until per-agent
+  [HookAdapter](HACKING-glanceterm.md#adding-a-new-agent-adapter)
+  implementations land.
+- **Validated on macOS only.** Code paths for Linux and Windows exist —
+  the hook handler ships in both POSIX `sh` and PowerShell forms — but no
+  one has driven them end-to-end yet. Help wanted.
+- **No code signing.** macOS builds are ad-hoc signed (Gatekeeper
+  bypass instructions in [Install](#install) above). No Windows
+  Authenticode signature either.
+- **Auto-update only on macOS / Windows.** Tabby's built-in updater is
+  inherited as-is, now pointed at this repo's releases. Linux's
+  electron-updater is disabled by upstream Tabby — you'll need to update
+  manually. (When you do update macOS or Windows, the same Gatekeeper /
+  SmartScreen warnings apply to the new build as to the first install.)
 
 ## Credits
 
-Built on [Tabby](https://github.com/Eugeny/tabby) by Eugene Pankov. The
-`SidebarProvider` extension point in the fork is intended to upstream — if
-you'd find it useful in your own Tabby plugin, the PR is on the way.
+Built on [Tabby](https://github.com/Eugeny/tabby) v1.0.234 by Eugene Pankov.
+The `SidebarProvider` extension point added in the fork is intended to
+upstream — if you'd find it useful in your own Tabby plugin, the PR is on
+the way.
 
-MIT license, like Tabby.
+GlanceTerm is MIT-licensed, same as Tabby. See [LICENSE](LICENSE) for the
+license text and [NOTICE](NOTICE) for the full list of modifications on top
+of upstream Tabby.

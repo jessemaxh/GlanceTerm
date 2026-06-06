@@ -1,0 +1,44 @@
+GlanceTerm
+Copyright (c) 2026 Xiaohui Ma
+
+Licensed under the MIT License — see LICENSE.
+
+================================================================================
+
+This product is a fork of Tabby:
+  https://github.com/Eugeny/tabby
+  Copyright (c) 2017 Tabby Developers
+  Licensed under the MIT License.
+
+GlanceTerm tracks Tabby v1.0.234 as its upstream baseline.
+
+================================================================================
+
+GlanceTerm modifications on top of Tabby:
+
+1. tabby-core — added a `SidebarProvider` extension point so plugins can
+   contribute a left-hand panel rendered alongside the tab area.
+
+     - new:      tabby-core/src/api/sidebarProvider.ts
+     - new:      tabby-core/src/services/sidebar.service.ts
+     - modified: tabby-core/src/components/appRoot.component.{ts,pug,scss}
+
+2. tabby-plugin-ai-sidebar — new plugin (not present in upstream Tabby) that
+   ships the AI agent status sidebar. Covers:
+
+     - per-tab hook installation for supported AI tools (Claude Code today;
+       Codex / Gemini / aider planned)
+     - real-time status tracking (working / idle / done / needs_permission)
+       via filesystem-watched hook events
+     - opt-in auto-approve of Claude permission prompts, with on-disk audit
+       log at ~/.glanceterm/auto-approve.log
+     - screenshot capture with per-agent paste adapters
+     - split-shell launcher matching the active tab's working directory
+
+3. Branding rename (Tabby → GlanceTerm) in user-facing strings, app
+   metadata, and packaging config. The npm package names of upstream
+   tabby-* modules are kept unchanged so the plugin ecosystem stays
+   source-compatible.
+
+For the authoritative diff, see the git history relative to the merge base
+with https://github.com/Eugeny/tabby at tag v1.0.234.
