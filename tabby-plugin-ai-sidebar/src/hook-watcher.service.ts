@@ -71,6 +71,33 @@ const RESCAN_MS = 30_000
 const BG_ARRIVAL_TTL_MS = 10_000
 
 /**
+ * Subagent pairing window — when a SubagentStop fires, only the queued
+ * spawns whose age (eventAt − spawnTs) sits inside this band are eligible
+ * to be popped as the "completion" of that Stop. Outside the band the
+ * Stop is treated as Claude noise and dropped.
+ *
+ * MIN_AGE = 30s: in observed Claude Code 2026-06 traces, every
+ *   `PreToolUse(Agent)` is followed by a SubagentStop within ~16s, even
+ *   when the spawned subagent goes on to do minutes of work. Treat that
+ *   first close-on-the-heels Stop as an instant-ACK on the spawn and
+ *   drop it; the next real Stop will pair correctly once age > MIN.
+ * MAX_AGE = 4min: SubagentStops fired more than 4 minutes after the
+ *   oldest unpaired spawn are kept as "spawn is still long-running, this
+ *   Stop is probably main-agent noise" rather than paired. Looking at
+ *   real traces, fast subagents finish within 3-4 minutes and we want to
+ *   pair those; backgrounded reviewers commonly run 10+ minutes and we'd
+ *   rather over-display "1 agent" (FP) for one we can't tell is done
+ *   than under-display "0 agents" (FN) for one that's still chewing.
+ *   Stale queue entries clear at SessionStart/End.
+ *
+ * Picked over MAX=5min because under that wider band, real traces showed
+ * spurious Stops slipping through and decrementing real backgrounded
+ * agents to 0 — re-creating the bug we set out to fix.
+ */
+const SUBAGENT_PAIR_MIN_AGE_MS = 30_000
+const SUBAGENT_PAIR_MAX_AGE_MS = 4 * 60_000
+
+/**
  * Watches `~/.glanceterm/hooks/` and exposes the latest status per tab id.
  *
  * IPC format: handler scripts APPEND one NDJSON record per event to a per-tab
@@ -107,32 +134,60 @@ export class HookWatcherService implements OnDestroy {
     readonly snapshots$: Observable<Map<string, HookSnapshot>> = this.subject.asObservable()
 
     /**
-     * Per-tab count of in-flight subagents — how many `Task` tool calls have
-     * been started (PreToolUse with tool_name=Task) without a matching
-     * SubagentStop yet. Tab-monitor consults this to override raw `idle` to
-     * `working` while the count is > 0, which fixes the "main agent's Stop
-     * fired but a backgrounded subagent is still chewing tokens" case
-     * where the row would otherwise read as ready.
+     * Per-tab queue of in-flight subagent spawn timestamps (ms since epoch).
+     * Array length = how many subagents we believe are currently running.
+     * TabMonitor consults this length to override raw `idle` to `working`
+     * while > 0, which fixes the "main agent's Stop fired but a backgrounded
+     * subagent is still chewing tokens" case where the row would otherwise
+     * read as ready.
      *
-     * Reset to 0 on SessionStart so a stale count from a prior Claude
-     * session (e.g. crashed before SubagentStop landed) doesn't pin the
-     * row to working forever. Kept separate from HookSnapshot so the
-     * count can change without forcing a snapshot replacement that would
-     * disturb the idle-stability gate's eventAt arithmetic.
+     * Why an array of timestamps instead of a plain count:
      *
-     * KNOWN LIMITATION:
+     *   Claude Code (as of June 2026) fires `SubagentStop` LIBERALLY —
+     *   in observed traces we counted as many as 15 SubagentStop events
+     *   for 4 PreToolUse(Agent) spawns in a single session, AND tabs with
+     *   0 Agent spawns receiving 4 SubagentStops in the same session.
+     *   Many SubagentStops fire shortly after every `Stop` event (3-180s
+     *   after) regardless of whether a real subagent was spawned. The
+     *   pre-fix plain count `--` on every SubagentStop floored the
+     *   counter to 0 even while real subagents were still running, so
+     *   "backgrounded reviewer in progress" tabs displayed as ready.
      *
-     *   If a subagent crashes mid-task and Claude never emits SubagentStop
-     *   for it, the counter stays > 0 until SessionStart resets it or the
-     *   tab is closed. Auto-reaper rejected because the user can submit new
-     *   prompts while a backgrounded subagent is running, so "main has been
-     *   idle a while" isn't a clean signal.
+     *   Storing per-spawn timestamps lets us reject obviously-spurious
+     *   SubagentStops on age:
      *
-     *   (The earlier "two SubagentStops in the same second collapse into
-     *   one decrement" limitation is fixed by the append-only log IPC —
-     *   each event sits at a unique file offset, so both decrement.)
+     *     SUBAGENT_PAIR_MIN_AGE_MS  — Stops that fire <30s after a spawn
+     *       are usually Claude's immediate-ACK on the spawn, not a real
+     *       completion (real subagents do at least one Bash/Read/etc.,
+     *       which takes >>30s for any non-trivial task).
+     *     SUBAGENT_PAIR_MAX_AGE_MS  — Stops that fire >5min after a
+     *       spawn that's still queued are more likely spurious noise
+     *       from later main-agent Stop events than a real completion of
+     *       that long-running spawn. Trade-off: a genuinely long-running
+     *       backgrounded agent's eventual real Stop is missed, so the
+     *       counter stays inflated until SessionStart/End resets it.
+     *
+     * FP/FN trade-off picked here is FP > FN: better to occasionally
+     * show "1 agent" after the agent finished than to show "ready" while
+     * a real backgrounded agent is still running (which is what users
+     * actually noticed and reported).
+     *
+     * Reset on SessionStart/SessionEnd so stale spawns from a prior
+     * Claude session (crashed before Stop, or older than the FP-tolerable
+     * window) don't pin the row to working forever.
+     *
+     * KNOWN LIMITATIONS:
+     *
+     *   - Long-running backgrounded agents (>SUBAGENT_PAIR_MAX_AGE_MS in
+     *     uptime) won't have their real completion paired; counter stays
+     *     elevated until SessionStart/End.
+     *   - Some Claude background-agent UX flows (the `/agents` slash
+     *     command, named agents in ~/.claude/agents/) may not fire
+     *     PreToolUse(Agent) at all — in which case we cannot detect
+     *     them via hooks. Process-tree detection doesn't help: Claude's
+     *     background agents run in the same process, not as child PIDs.
      */
-    private readonly subagentInFlight = new Map<string, number>()
+    private readonly subagentInFlight = new Map<string, number[]>()
 
     /**
      * Per-tab FIFO queue of timestamps for PreToolUse(Bash,
@@ -226,7 +281,7 @@ export class HookWatcherService implements OnDestroy {
      *  SubagentStop for them yet. TabMonitor uses this to keep the row
      *  green even after the main agent fires Stop. */
     getSubagentInFlight (tabId: string): number {
-        return this.subagentInFlight.get(tabId) ?? 0
+        return this.subagentInFlight.get(tabId)?.length ?? 0
     }
 
     /**
@@ -458,34 +513,47 @@ export class HookWatcherService implements OnDestroy {
         let changed = false
 
         if (eventAt >= this.startupTs) {
-            // Subagent in-flight counter. Three transitions matter:
-            //   PreToolUse(tool_name=Task|Agent) → +1
-            //   SubagentStop                     → -1   (floored at 0)
-            //   SessionStart / SessionEnd        → 0    (boundary reset)
+            // Subagent in-flight queue. Transitions:
+            //   PreToolUse(tool_name=Task|Agent) → push eventAt
+            //   SubagentStop                     → conditionally pop oldest
+            //                                       spawn within pairing window
+            //   SessionStart / SessionEnd        → clear (boundary reset)
             // With append-only logs each PreToolUse sits at a unique file
             // offset, so two subagent spawns in the same wall-clock second
-            // both increment (one of the v0.2 KNOWN LIMITATIONS).
+            // both get pushed.
+            //
+            // SubagentStop pairing rule — see `subagentInFlight` doc-comment
+            // for the full rationale. Briefly: this Claude Code version fires
+            // SubagentStop liberally (including for tabs that never invoked
+            // the Agent tool), so we don't blindly decrement. A Stop is
+            // accepted as "real completion of the oldest queued spawn" only
+            // when that spawn's age sits inside [MIN_AGE, MAX_AGE].
             //
             // tool_name: Claude Code renamed the subagent-spawning tool from
-            // `Task` to `Agent` (the rename landed in the CLI we observe on
-            // this machine — every PreToolUse for a Task tool spawn comes
-            // in as `Agent`). Match both so older installs keep working;
+            // `Task` to `Agent`. Match both so older installs keep working;
             // if Anthropic adds a third name we'll need a registry, but two
             // strings doesn't earn one.
             if (parsed.event === 'PreToolUse' && (parsed.tool_name === 'Task' || parsed.tool_name === 'Agent')) {
-                this.subagentInFlight.set(parsed.tab_id, (this.subagentInFlight.get(parsed.tab_id) ?? 0) + 1)
+                const arr = this.subagentInFlight.get(parsed.tab_id) ?? []
+                arr.push(eventAt)
+                this.subagentInFlight.set(parsed.tab_id, arr)
                 changed = true
             } else if (parsed.event === 'SubagentStop') {
-                const cur = this.subagentInFlight.get(parsed.tab_id) ?? 0
-                if (cur > 0) {
-                    this.subagentInFlight.set(parsed.tab_id, cur - 1)
-                    changed = true
+                const arr = this.subagentInFlight.get(parsed.tab_id)
+                if (arr && arr.length > 0) {
+                    const oldest = arr[0]
+                    const ageMs = eventAt - oldest
+                    if (ageMs >= SUBAGENT_PAIR_MIN_AGE_MS && ageMs <= SUBAGENT_PAIR_MAX_AGE_MS) {
+                        arr.shift()
+                        if (arr.length === 0) this.subagentInFlight.delete(parsed.tab_id)
+                        changed = true
+                    }
+                    // else: drop the SubagentStop on the floor. Too-young (<MIN)
+                    // is Claude's instant-after-spawn ACK; too-old (>MAX) is
+                    // background noise unrelated to this queued spawn.
                 }
             } else if (parsed.event === 'SessionStart' || parsed.event === 'SessionEnd') {
-                if ((this.subagentInFlight.get(parsed.tab_id) ?? 0) !== 0) {
-                    this.subagentInFlight.set(parsed.tab_id, 0)
-                    changed = true
-                }
+                if (this.subagentInFlight.delete(parsed.tab_id)) changed = true
                 // Same boundary reset for the bg-arrival queue — a stale
                 // arrival left over from a prior session would otherwise
                 // get falsely matched to the next new child of the freshly
