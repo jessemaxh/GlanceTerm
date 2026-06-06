@@ -86,18 +86,30 @@ updates.
 `Command`, port via `Object.defineProperty` on the constructed Command
 rather than reassigning `command.icon = button.icon`.
 
-### `src/directives/fastHtmlBind.directive.ts` — NEW FILE
+### `src/api/index.ts` — MODIFIED (2 re-exports)
 
-Trusted-innerHTML-binding directive used by the AI-sidebar plugin's
-toolbar button to render the unread-count SVG without triggering
-Angular's HTML sanitizer on every change-detection pass.
+Two re-exports added so the AI-sidebar plugin can import the sidebar
+contribution types from `'tabby-core'` directly:
 
-**Why**: The plugin's toolbar SVG embeds a counter. `[innerHTML]` runs
-sanitization on every update; `[fastHtmlBind]` accepts pre-trusted
-markup straight to the DOM.
+- line 7:  `export { SidebarProvider, SidebarContribution, SidebarSide } from './sidebarProvider'`
+- line 37: `export { SidebarService } from '../services/sidebar.service'`
 
-**Rebase risk**: low. Pure new file, registered via
-`tabby-core/src/index.ts:36` import.
+**Why**: Companion to the new sidebarProvider + sidebar.service files
+above; without these re-exports the plugin would have to deep-import
+across the module boundary.
+
+**Rebase risk**: trivial — two surgical add-only lines.
+
+### `src/components/startPage.component.pug`, `titleBar.component.pug`, `welcomeTab.component.pug` — MODIFIED (branding strings)
+
+Strings rebranded from "Tabby" → "GlanceTerm" / "HiveTerm" in the
+visible UI surfaces — start page header, title bar, welcome tab copy.
+
+**Why**: Product rename. Pure visual; no behavioral change.
+
+**Rebase risk**: trivial-but-real. Every upstream change to these
+strings will leave a `.pug` diff to manually re-apply. Search/replace
+on "Tabby" → "GlanceTerm" inside the .pug body usually does the job.
 
 ---
 
