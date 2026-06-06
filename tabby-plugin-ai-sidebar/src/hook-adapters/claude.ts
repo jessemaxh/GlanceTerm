@@ -320,6 +320,16 @@ export class ClaudeHookAdapter extends HookAdapter {
         }
     }
 
+    // The Claude handler script classifies EVERY PreToolUse(Bash) as bg=0 or
+    // bg=1 by reading tool_input.run_in_background. So a child of the Claude
+    // process whose parent PreToolUse carried bg=0 (synchronous) is NEVER a
+    // background job, even if it runs for minutes (e.g. xcodebuild). Letting
+    // TabMonitor know we honour this contract lets it skip the persistence-
+    // time heuristic that would otherwise falsely badge long sync calls.
+    override signalsBgJobs (): boolean {
+        return true
+    }
+
     // ── internals ────────────────────────────────────────────────────────
 
     /**

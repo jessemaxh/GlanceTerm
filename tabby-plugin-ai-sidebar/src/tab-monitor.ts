@@ -548,7 +548,7 @@ export class TabMonitor implements OnDestroy {
         //    pending-arrival queue against this tick's new children.
         let backgroundJobCount = 0
         if (aiPid !== null) {
-            backgroundJobCount = this.updateBackgroundJobCount(t.inner, aiPid, tabId)
+            backgroundJobCount = this.updateBackgroundJobCount(t.inner, aiPid, tabId, aiTool)
         } else {
             this.bgChildrenFirstSeen.delete(t.inner)
             this.bgConfirmedPids.delete(t.inner)
@@ -601,6 +601,7 @@ export class TabMonitor implements OnDestroy {
         inner: BaseTabComponent,
         aiPid: number,
         tabId: string | undefined,
+        aiTool: AiTool | null,
     ): number {
         const now = Date.now()
         const live = new Set(childrenOf(aiPid))
@@ -650,8 +651,72 @@ export class TabMonitor implements OnDestroy {
             }
         }
 
-        // Final count: confirmed pids are counted immediately; heuristic
-        // pids only after they've persisted past the threshold.
+        // Is the hook authoritative for THIS tab? Two conditions:
+        //   (a) the adapter promises a bg classification on every Bash
+        //       (adapter.signalsBgJobs() — Claude yes, Codex no), AND
+        //   (b) we've actually seen at least one hook event for this tab
+        //       (hooks.getStatus(tabId) — proves the hook is installed
+        //       and firing; without this we'd suppress the heuristic on
+        //       a tab whose hooks were never wired, under-counting bg jobs).
+        const adapter = this.registry.forTool(aiTool)
+        const hookAuthoritative = !!(adapter?.signalsBgJobs() && tabId && this.hooks.getStatus(tabId))
+
+        if (hookAuthoritative) {
+            // Race-recovery: a Bash hook event can flush AFTER the child
+            // PID is already in firstSeen (the newThisTick claim above
+            // only matches THIS tick's new pids — by the next poll the
+            // PID is no longer new). The old persistence-time heuristic
+            // implicitly absorbed this lag. With the heuristic suppressed
+            // we instead pair each pending arrival against an unconfirmed
+            // firstSeen PID — but ONLY ones whose `seenAt >= arrival.ts`,
+            // i.e. the PID was first observed AT OR AFTER the bg hook fired.
+            // Without this temporal gate a long-pre-existing child (e.g.
+            // a still-running synchronous xcodebuild) would be falsely
+            // credited to a brand-new bg arrival, and the real bg child
+            // would later sit unmatched in firstSeen and never be counted.
+            // Two-pointer pair-match (arrivals FIFO by ts, candidates
+            // ascending by seenAt). Stops at the first arrival that has no
+            // eligible candidate; remaining arrivals stay queued for a
+            // future tick when the matching child becomes visible.
+            if (tabId && firstSeen.size > 0) {
+                const arrivals = this.hooks.peekBgArrivals(tabId)
+                if (arrivals.length > 0) {
+                    const candidates = Array.from(firstSeen.entries())
+                        .sort((a, b) => a[1] - b[1])
+                    const toPromote: number[] = []
+                    let ai = 0; let ci = 0
+                    while (ai < arrivals.length && ci < candidates.length) {
+                        const [pid, seenAt] = candidates[ci]
+                        if (seenAt >= arrivals[ai]) {
+                            toPromote.push(pid)
+                            ai++; ci++
+                        } else {
+                            ci++
+                        }
+                    }
+                    if (toPromote.length > 0) {
+                        // claimBgArrivals pops FIFO from the same queue we
+                        // peeked, so `toPromote[i]` ↔ arrival at index i.
+                        const claimed = this.hooks.claimBgArrivals(tabId, toPromote.length)
+                        for (let i = 0; i < claimed; i++) {
+                            const pid = toPromote[i]
+                            firstSeen.delete(pid)
+                            confirmed.add(pid)
+                        }
+                    }
+                }
+            }
+            // Heuristic suppressed: trust the hook. A long-lived child of
+            // aiPid that the hook never tagged as bg=1 is a synchronous
+            // Bash (xcodebuild / npm install / …), not a bg job.
+            return confirmed.size
+        }
+
+        // Fallback (no adapter / non-bg-signalling adapter / hooks not yet
+        // firing): confirmed pids count immediately, heuristic pids only
+        // after they've persisted past the threshold. Over-counts long
+        // synchronous calls but keeps bg detection working without per-
+        // call hook coverage.
         let count = confirmed.size
         for (const seenAt of firstSeen.values()) {
             if (now - seenAt >= BG_PERSIST_MS) count++

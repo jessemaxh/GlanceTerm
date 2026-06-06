@@ -252,6 +252,32 @@ export class HookWatcherService implements OnDestroy {
         return claimable
     }
 
+    /**
+     * Read-only peek at the (TTL-pruned) timestamps of pending bg arrivals for
+     * a tab, in FIFO order (head = oldest). Used by TabMonitor's
+     * race-recovery path so it can pair an arrival to a `firstSeen` PID only
+     * when the PID's seenAt postdates the arrival — preventing an unrelated
+     * long-pre-existing PID from being falsely credited to a freshly-queued
+     * arrival. The returned array is a defensive copy; mutating it has no
+     * effect on the queue (use `claimBgArrivals` to actually pop entries).
+     *
+     * Side effect: same TTL eviction that `claimBgArrivals` does on its head,
+     * so a long-stale arrival doesn't linger in the snapshot. This keeps the
+     * caller's "did I see any arrivals?" check honest without requiring a
+     * separate poke method.
+     */
+    peekBgArrivals (tabId: string): number[] {
+        const arr = this.pendingBgArrivals.get(tabId)
+        if (!arr || arr.length === 0) return []
+        const now = Date.now()
+        while (arr.length > 0 && now - arr[0] > BG_ARRIVAL_TTL_MS) arr.shift()
+        if (arr.length === 0) {
+            this.pendingBgArrivals.delete(tabId)
+            return []
+        }
+        return arr.slice()
+    }
+
     private async start (): Promise<void> {
         await this.runtime.ensureReady()
 

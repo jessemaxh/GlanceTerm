@@ -86,4 +86,23 @@ export abstract class HookAdapter {
      * observability-only, SessionStart is ambiguous, etc.).
      */
     abstract mapEventToStatus (event: string, matcher?: string): TabStatus | null
+
+    /**
+     * True when this adapter's hook payloads carry an authoritative
+     * "this Bash invocation is backgrounded" signal for EVERY Bash call —
+     * i.e. the handler writes `bg=1` when the agent intends to background
+     * the shell, and `bg=0` (or absent) otherwise. When true, TabMonitor
+     * trusts the hook absolutely: child processes that weren't claimed by
+     * a `bg=1` event are NOT bg jobs, even if they're long-lived. This
+     * eliminates the "long synchronous Bash gets falsely badged as bg"
+     * over-count the persistence-time heuristic suffers from.
+     *
+     * Defaults to false: adapters that haven't been audited against the
+     * "every Bash gets a bg classification" contract fall through to the
+     * heuristic, which over-counts on long synchronous calls but keeps
+     * bg detection working without per-call hook coverage.
+     */
+    signalsBgJobs (): boolean {
+        return false
+    }
 }
