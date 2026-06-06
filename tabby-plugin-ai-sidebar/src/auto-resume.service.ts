@@ -115,6 +115,10 @@ export class AutoResumeService implements OnDestroy {
     /** Pending replay timers, keyed by outer tab so we can cancel cleanly
      *  on tab close. */
     private readonly pendingTimers = new WeakMap<BaseTabComponent, ReturnType<typeof setTimeout>>()
+    /** Per-tab "we already warned about an unsafe-looking cmdline here this
+     *  service lifetime" — prevents the shell-safety reject path from
+     *  re-logging on every poll for the same offending process. */
+    private readonly warnedUnsafeCapture = new WeakSet<BaseTabComponent>()
 
     private sub: Subscription | null = null
 
@@ -189,9 +193,27 @@ export class AutoResumeService implements OnDestroy {
         for (const s of states) {
             // CAPTURE: agent is alive here, remember the (cwd → command)
             // for next restart. Also arm the cleanup gate for this tab.
+            //
+            // Shell-safety gate: if the reduced command contains shell
+            // metacharacters (`;`, backtick, `$(`, redirections, quotes,
+            // control chars, etc.) we refuse to persist. See `isShellSafe`
+            // docstring for the threat model — short version, a process
+            // whose argv passes our AI_PATTERNS regex but contains shell
+            // metacharacters would otherwise get typed verbatim into a
+            // fresh shell on next launch and execute the attacker payload.
+            // Falling through silently to "no auto-resume for this cwd" is
+            // strictly safer than persisting an attacker-controlled string.
+            // The cleanup gate STILL arms — the agent is observably alive
+            // here regardless of the cmdline's shape.
             if (s.aiTool && s.cwd && s.aiCommandLine) {
                 const command = toRunnableCommand(s.aiCommandLine, s.aiTool)
-                void this.setPersisted(s.cwd, command)
+                if (isShellSafe(command)) {
+                    void this.setPersisted(s.cwd, command)
+                } else if (!this.warnedUnsafeCapture.has(s.outerTab)) {
+                    this.warnedUnsafeCapture.add(s.outerTab)
+                    // eslint-disable-next-line no-console
+                    console.warn('[glanceterm] auto-resume: refusing to persist cmdline containing shell metacharacters for tab', s.title)
+                }
                 this.hadAgentThisSession.set(s.outerTab, s.aiTool)
                 continue
             }
@@ -232,6 +254,18 @@ export class AutoResumeService implements OnDestroy {
     }
 
     private scheduleResume (s: TabState, command: string): void {
+        // Defense in depth: capture-side already rejects unsafe commands
+        // before persistence, so the persisted map SHOULDN'T have any to
+        // begin with. But config can be edited externally (or by a prior
+        // pre-fix install of GlanceTerm), so re-check here. Lossless skip
+        // — the worst case is a missed auto-resume for one cwd until the
+        // user manually re-launches.
+        if (!isShellSafe(command)) {
+            // eslint-disable-next-line no-console
+            console.error('[glanceterm] auto-resume: refusing to send cmdline containing shell metacharacters')
+            return
+        }
+
         // Cancel any previous pending timer for the same outer tab.
         const existing = this.pendingTimers.get(s.outerTab)
         if (existing) clearTimeout(existing)
@@ -248,6 +282,55 @@ export class AutoResumeService implements OnDestroy {
         }, AutoResumeService.RESUME_DELAY_MS)
         this.pendingTimers.set(s.outerTab, t)
     }
+}
+
+/**
+ * Conservative shell-safety check for the `aiCommandLine` we're about to
+ * persist (and later type verbatim, with a trailing `\r`, into a freshly-
+ * restored shell).
+ *
+ * Threat model
+ * ------------
+ * `aiCommandLine` is captured from a raw `ps -p <pid> -o command=` read in
+ * TabMonitor — i.e. the literal argv of whatever process matched our
+ * AI_PATTERNS regex. An attacker who can briefly run a process whose argv
+ * looks like `claude '; rm -rf ~ #'` (the basename matches, the regex
+ * fires) gets that string captured, persisted to
+ * `ai.autoResumeCommandByCwd`, and typed verbatim into the user's shell on
+ * the NEXT app launch. That converts an ephemeral exec into a persistent
+ * remote-code-execution trigger on every subsequent restart.
+ *
+ * The check
+ * ---------
+ * Reject anything containing characters that would let the shell
+ * re-interpret the captured cmdline as more than a single program
+ * invocation — command separators, redirections, substitutions, quotes,
+ * escapes, the comment introducer, control characters. Allowlist would be
+ * cleaner but the legitimate character set spans too widely (paths with
+ * Unicode, locale-specific identifiers, version strings); a tight denylist
+ * of known-dangerous metacharacters is the pragmatic balance.
+ *
+ * Reject set:
+ *   ; & | `   command separators / pipes / backtick-substitution
+ *   $         variable / `$()` substitution
+ *   < >       redirection
+ *   ' "       quoting (could close an outer quote and break out)
+ *   \         escape introducer
+ *   #         comment introducer (would let attacker hide tail of payload)
+ *   \x00-\x1f control chars including \n \r \t \0 — \n / \r are the
+ *             real concern (line separator could end input early), but
+ *             nothing legitimate has control chars in an AI CLI argv.
+ *   \x7f      DEL
+ *
+ * Legitimate cmdlines that pass: `claude`, `claude --resume foo`,
+ * `node /Users/me/.../@anthropic-ai/claude-code/cli.js --resume foo`,
+ * `claude --model=claude-opus-4-7 --max-tokens 4096`, `codex -m gpt-5`.
+ *
+ * Exported alongside `toRunnableCommand` so it can be unit-tested.
+ */
+const SHELL_UNSAFE_RE = /[;&|`$<>'"\\#\x00-\x1f\x7f]/
+export function isShellSafe (s: string): boolean {
+    return !SHELL_UNSAFE_RE.test(s)
 }
 
 /**
