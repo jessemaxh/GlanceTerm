@@ -71,6 +71,25 @@ const RESCAN_MS = 30_000
 const BG_ARRIVAL_TTL_MS = 10_000
 
 /**
+ * Startup-sweep retention window for `~/.glanceterm/hooks/<tab_uuid>.log`
+ * append-only logs. Files whose mtime is older than this are unlinked
+ * before the watcher cold-loads.
+ *
+ * Without sweeping, every Tabby session creates a new UUID-named log file
+ * that lives forever — the handler appends, never deletes, and the
+ * watcher only drops in-memory state on ENOENT (which requires the file
+ * to be gone). Cold-load and the 30s rescan both walk the entire dir, so
+ * cold-load time grows linearly with cumulative-sessions-ever. 7 days is
+ * long enough to recover state for any session a user might want to
+ * "wake up after a weekend" but short enough that the dir doesn't
+ * accumulate into the hundreds for a daily user.
+ *
+ * Sweep is best-effort. A failure (permission, race with another
+ * process) is swallowed — cold-load still works on the remaining files,
+ * and the next launch retries. */
+const HOOK_LOG_RETENTION_MS = 7 * 24 * 60 * 60_000
+
+/**
  * Subagent pairing window — when a SubagentStop fires, only the queued
  * spawns whose age (eventAt − spawnTs) sits inside this band are eligible
  * to be popped as the "completion" of that Stop. Outside the band the
@@ -336,6 +355,15 @@ export class HookWatcherService implements OnDestroy {
     private async start (): Promise<void> {
         await this.runtime.ensureReady()
 
+        // Sweep stale logs BEFORE we attach the watcher or cold-load. Doing
+        // it first means cold-load doesn't ingest events from sessions we're
+        // about to delete (avoiding briefly populating subagentInFlight /
+        // tailOffset for a tab_id whose file will vanish a moment later),
+        // and the watcher won't fire spurious change events on the unlinks
+        // (the watcher attaches AFTER this sweep). Best-effort: if it fails,
+        // proceed anyway — see HOOK_LOG_RETENTION_MS doc for the trade-offs.
+        await this.sweepStaleLogs()
+
         // ORDER MATTERS (issue M2): start the watcher BEFORE the cold-load,
         // so events landing during the cold-load window aren't lost. The
         // ts-aware merge in ingest() handles the race: newer events
@@ -355,6 +383,43 @@ export class HookWatcherService implements OnDestroy {
         // Periodic safety rescan — fs.watch silently drops events on NFS
         // and some FUSE mounts. Re-enumerate the dir every 30s as a backstop.
         this.rescanTimer = setInterval(() => { void this.coldLoad() }, RESCAN_MS)
+    }
+
+    /**
+     * Unlink `~/.glanceterm/hooks/<tab_uuid>.log` files whose mtime is
+     * older than HOOK_LOG_RETENTION_MS. Called once at start. mtime gets
+     * touched on every handler append, so a still-active session never
+     * matches the predicate — only abandoned tabs from prior runs do.
+     *
+     * Best-effort: any per-file error (race with another process, fs
+     * permission) is swallowed so a single problem file doesn't block
+     * the rest of the sweep. A dir-level error (missing dir, permission)
+     * is also swallowed because the watcher's fs.watch will report it
+     * separately with better context.
+     */
+    private async sweepStaleLogs (): Promise<void> {
+        let entries: string[] = []
+        try {
+            entries = await fs.readdir(this.runtime.stateDir)
+        } catch { return }
+
+        const now = Date.now()
+        let removed = 0
+        for (const e of entries) {
+            if (!e.endsWith('.log')) continue
+            const filePath = path.join(this.runtime.stateDir, e)
+            try {
+                const st = await fs.stat(filePath)
+                if (now - st.mtimeMs > HOOK_LOG_RETENTION_MS) {
+                    await fs.unlink(filePath)
+                    removed++
+                }
+            } catch { /* race / perm — leave for next launch's sweep */ }
+        }
+        if (removed > 0) {
+            // eslint-disable-next-line no-console
+            console.log(`[glanceterm] hook-watcher: swept ${removed} stale .log file(s) (>${Math.floor(HOOK_LOG_RETENTION_MS / 86_400_000)}d old)`)
+        }
     }
 
     private async coldLoad (): Promise<void> {
