@@ -95,6 +95,7 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
                             <span *ngIf="s.aiTool" class="tag" [attr.data-tool]="s.aiTool">{{ toolTag(s.aiTool) }}</span>
                             <span class="status" [attr.data-status]="effStatus(s)">{{ statusLabel(s) }}</span>
                             <span *ngIf="s.subagentCount > 0" class="micro accent">{{ s.subagentCount }} {{ s.subagentCount === 1 ? 'agent' : 'agents' }}</span>
+                            <span *ngIf="s.backgroundJobCount > 0" class="micro accent" [title]="bgJobTitle(s)">{{ s.backgroundJobCount }} bg</span>
                         </div>
                         <div *ngIf="s.cwd && effStatus(s) !== 'needs_permission'" class="line3">
                             <span class="path-sub" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
@@ -1570,6 +1571,12 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         const h = Math.floor(m / 60)
         if (h < 24) return `${h}h`
         return `${Math.floor(h / 24)}d`
+    }
+
+    bgJobTitle (s: TabState): string {
+        const n = s.backgroundJobCount
+        const noun = n === 1 ? 'job' : 'jobs'
+        return `${n} background ${noun} running under this agent (immediate child processes of the agent's PID that have persisted across polls — typically backgrounded shells started via the agent's own bg-task mechanism).`
     }
 
     /**

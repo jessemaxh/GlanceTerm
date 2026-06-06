@@ -13,6 +13,17 @@ import { HookInstallerService } from './hook-installer.service'
  * is only here to discover when an AI tool starts/stops in a tab. */
 const POLL_MS = 1500
 
+/** A direct child of the AI agent process is counted as a "background job"
+ *  once it has survived at least this many ms — i.e. been observed across
+ *  ≥ 2 polls (POLL_MS = 1500). Short-lived synchronous Bash invocations
+ *  (Claude calling `ls`, ripgrep, etc.) typically finish well under 1 s, so
+ *  the persistence filter drops them while keeping long-running
+ *  backgrounded shells (Claude's `run_in_background: true`, Codex equivalents).
+ *  Tradeoff: a synchronous tool call that genuinely runs >2 s will be
+ *  counted as a bg job for the rest of its lifetime — an over-count, not an
+ *  under-count, which we prefer because under-counting hides real work. */
+const BG_PERSIST_MS = 2_000
+
 /**
  * How long a raw `idle` must sit stable in the hook layer after a prior
  * `working` before we surface it to UI consumers. Claude (and other agents
@@ -133,6 +144,15 @@ export interface TabState {
      * subagentInFlight doc).
      */
     subagentCount: number
+    /**
+     * Number of long-lived child processes hanging off `aiPid` — proxy for
+     * "backgrounded shells / jobs the agent kicked off and walked away
+     * from". Sidebar renders `· N bg` after the status when > 0. Agent-
+     * agnostic: any AI tool that spawns a subprocess that survives across
+     * polls bumps this count, no per-agent code required. See BG_PERSIST_MS
+     * for the persistence threshold and the over- vs under-count tradeoff.
+     */
+    backgroundJobCount: number
 }
 
 interface ChildProcessInfo { pid: number; ppid: number; command: string }
@@ -244,6 +264,15 @@ export class TabMonitor implements OnDestroy {
      * effective status actually leaves working.
      */
     private workingSince = new WeakMap<BaseTabComponent, number>()
+    /**
+     * Per-tab map of `child pid → first-seen wall-clock ms` for the immediate
+     * descendants of the tab's `aiPid`. Entries age in by being observed on
+     * a tick; entries age out when the pid is no longer in the current child
+     * list. Counted toward `backgroundJobCount` once the entry is at least
+     * BG_PERSIST_MS old. Inner map is reused across ticks so persistence
+     * survives — see makeState for the update protocol.
+     */
+    private bgChildrenFirstSeen = new WeakMap<BaseTabComponent, Map<number, number>>()
 
     readonly states$: Observable<TabState[]> = this.subject.asObservable()
 
@@ -481,6 +510,17 @@ export class TabMonitor implements OnDestroy {
             this.workingSince.delete(t.inner)
         }
 
+        // 5. Background-job count: persistent immediate children of aiPid.
+        //    Only meaningful when there IS an aiPid — for no_ai tabs we
+        //    leave the count at 0 and also drop the tracker so a tab that
+        //    later revives starts fresh instead of inheriting stale pids.
+        let backgroundJobCount = 0
+        if (aiPid !== null) {
+            backgroundJobCount = this.updateBackgroundJobCount(t.inner, aiPid)
+        } else {
+            this.bgChildrenFirstSeen.delete(t.inner)
+        }
+
         return {
             outerTab: t.outer,
             innerTab: t.inner,
@@ -495,7 +535,39 @@ export class TabMonitor implements OnDestroy {
             // couldn't resolve a tabId (no env var captured yet, no hook
             // event yet, etc.), matching placeholderState.
             subagentCount: tabId ? this.hooks.getSubagentInFlight(tabId) : 0,
+            backgroundJobCount,
         }
+    }
+
+    /**
+     * Update the per-tab persistent-children tracker and return the count of
+     * children that have lived at least BG_PERSIST_MS. Pure on its inputs
+     * apart from the WeakMap mutation; the mutation is the whole point —
+     * persistence is what distinguishes a backgrounded shell from a
+     * transient synchronous tool call.
+     */
+    private updateBackgroundJobCount (inner: BaseTabComponent, aiPid: number): number {
+        const now = Date.now()
+        const live = new Set(childrenOf(aiPid))
+        let tracker = this.bgChildrenFirstSeen.get(inner)
+        if (!tracker) {
+            tracker = new Map<number, number>()
+            this.bgChildrenFirstSeen.set(inner, tracker)
+        }
+        // Evict entries for pids that have exited.
+        for (const pid of Array.from(tracker.keys())) {
+            if (!live.has(pid)) tracker.delete(pid)
+        }
+        // Age newly-observed pids in.
+        for (const pid of live) {
+            if (!tracker.has(pid)) tracker.set(pid, now)
+        }
+        // Count entries past the persistence threshold.
+        let count = 0
+        for (const firstSeen of tracker.values()) {
+            if (now - firstSeen >= BG_PERSIST_MS) count++
+        }
+        return count
     }
 
     /**
@@ -589,7 +661,9 @@ export class TabMonitor implements OnDestroy {
     ): TabState {
         // Session died (no_ai) — drop any working-anchor so a future revival
         // starts a fresh turn timer instead of continuing the dead one.
+        // Same reasoning for the bg-children tracker.
         this.workingSince.delete(t.inner)
+        this.bgChildrenFirstSeen.delete(t.inner)
         return {
             outerTab: t.outer,
             innerTab: t.inner,
@@ -601,6 +675,7 @@ export class TabMonitor implements OnDestroy {
             lastActiveMs: null,
             awaitingFirstEvent: false,
             subagentCount: 0,
+            backgroundJobCount: 0,
         }
     }
 
@@ -720,6 +795,41 @@ function ancestorsOf (pid: number, maxDepth: number): number[] {
         cur = parent
     }
     return out
+}
+
+/**
+ * Cross-platform "list immediate children of this pid". Returns an empty
+ * array on any failure (process exited, ps not available, permission
+ * denied) — callers treat that as "no bg jobs", which is the safe default.
+ *
+ * macOS / Linux: `pgrep -P <pid>` matches by parent pid. pgrep is shipped
+ *   with both BSD utils (macOS) and procps-ng (Linux). Exit code 1 when
+ *   nothing matches; execSync throws on non-zero, which we swallow.
+ * Windows: wmic ParentProcessId filter. wmic is deprecated in modern
+ *   Windows but still present in 10/11; if it's missing the catch returns
+ *   empty and the bg-count badge just stays at 0.
+ */
+function childrenOf (pid: number): number[] {
+    if (process.platform === 'win32') {
+        try {
+            const out = execSync(
+                `wmic process where ParentProcessId=${pid} get ProcessId /format:value`,
+                { encoding: 'utf8', timeout: 1_500, windowsHide: true },
+            )
+            const pids: number[] = []
+            for (const m of out.matchAll(/ProcessId=(\d+)/g)) {
+                const n = parseInt(m[1], 10)
+                if (Number.isFinite(n) && n > 0) pids.push(n)
+            }
+            return pids
+        } catch { return [] }
+    }
+    try {
+        const out = execSync(`pgrep -P ${pid}`, { encoding: 'utf8', timeout: 300 })
+        return out.trim().split(/\s+/)
+            .map(s => parseInt(s, 10))
+            .filter(n => Number.isFinite(n) && n > 0)
+    } catch { return [] }
 }
 
 function parentPidOf (pid: number): number | null {
