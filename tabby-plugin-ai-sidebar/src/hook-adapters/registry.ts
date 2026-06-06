@@ -3,6 +3,7 @@ import { Injectable } from '@angular/core'
 import type { AiTool } from '../tab-monitor'
 import { HookAdapter } from './adapter'
 import { ClaudeHookAdapter } from './claude'
+import { CodexHookAdapter } from './codex'
 
 /**
  * Single point that hands out HookAdapter instances by tool id. The whole
@@ -18,8 +19,12 @@ import { ClaudeHookAdapter } from './claude'
 export class HookAdapterRegistry {
     private readonly adapters: Map<AiTool, HookAdapter> = new Map<AiTool, HookAdapter>([
         ['claude', new ClaudeHookAdapter()],
+        // Codex: status detection only — auto-approve not supported by
+        // Codex's hook output schema (PermissionRequest doesn't accept the
+        // decision JSON the way Claude's does). UNTESTED — adapter written
+        // from Codex hooks docs, see codex.ts head comment.
+        ['codex',  new CodexHookAdapter()],
         // Future:
-        // ['codex',  new CodexHookAdapter()],
         // ['gemini', new GeminiHookAdapter()],
     ])
 

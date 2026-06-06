@@ -443,7 +443,11 @@ export function claudeConfigDirExistsSync (): boolean {
  * expected install time (<100ms) and short enough that a crashed launch
  * doesn't paralyze the next one.
  */
-async function withFileLock<T> (lockPath: string, fn: () => Promise<T>): Promise<T> {
+/** Exported for reuse by sibling adapters (codex.ts and future ones) that
+ *  need the same atomic-write discipline. Importing from claude.ts beats
+ *  duplicating the implementation in every adapter; the function is pure
+ *  enough that there's no behavioural coupling. */
+export async function withFileLock<T> (lockPath: string, fn: () => Promise<T>): Promise<T> {
     const TIMEOUT_MS = 5_000
     const POLL_MS = 50
     const STALE_MS = 30_000
@@ -481,6 +485,7 @@ async function withFileLock<T> (lockPath: string, fn: () => Promise<T>): Promise
     }
 }
 
-function escapeRegex (s: string): string {
+/** Exported sibling helper — see withFileLock above. */
+export function escapeRegex (s: string): string {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
