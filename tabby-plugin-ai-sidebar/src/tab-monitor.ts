@@ -1,9 +1,39 @@
 import { Injectable, OnDestroy } from '@angular/core'
 import { BehaviorSubject, Observable } from 'rxjs'
-import { execSync } from 'child_process'
+import { execFile } from 'child_process'
 import * as fsSync from 'fs'
+import { promisify } from 'util'
 
 import { AppService, BaseTabComponent } from 'tabby-core'
+
+/**
+ * Promisified `execFile` — used in lieu of `execSync` throughout the
+ * monitor's process-tree probes. Two reasons we switched:
+ *
+ *   1. `execSync` blocks the renderer thread. At 10+ tabs that's hundreds
+ *      of synchronous `ps`/`pgrep`/`wmic` calls per 1.5 s tick, which
+ *      manifests as visible Tabby UI jank.
+ *   2. `execFile` doesn't shell-interpret its args. The caller passes argv
+ *      as an array, so pid lists and other interpolated values are
+ *      safe by construction — no shell-injection surface even if a
+ *      probe were ever wired to attacker-controllable input.
+ *
+ * Wrapped in a tiny helper so the call sites stay one-liners and the
+ * common error path (timeout, missing binary, non-zero exit) collapses
+ * to a returned empty string. Callers parse the stdout and fall back to
+ * "no info" semantics on empty — matching the pre-refactor
+ * `try/catch { swallow }` behavior. */
+const execFileAsync = promisify(execFile)
+async function runProbe (cmd: string, args: string[], timeoutMs: number): Promise<string> {
+    try {
+        const { stdout } = await execFileAsync(cmd, args, {
+            encoding: 'utf8',
+            timeout: timeoutMs,
+            windowsHide: true,
+        })
+        return stdout
+    } catch { return '' }
+}
 
 import { HookAdapterRegistry } from './hook-adapters/registry'
 import { HookWatcherService } from './hook-watcher.service'
@@ -333,11 +363,16 @@ export class TabMonitor implements OnDestroy {
         this.busy = true
         try {
             const tabs = this.collectTerminalTabs()
+            // Build the process-tree snapshot ONCE per tick. All per-tab
+            // ancestor walks become memory lookups against this map instead
+            // of one synchronous `ps -p` per step. See ProcessTreeSnapshot
+            // doc for the perf rationale.
+            const snapshot = await buildProcessTreeSnapshot()
             const out: TabState[] = []
             const CHUNK = 8
             for (let i = 0; i < tabs.length; i += CHUNK) {
                 const chunk = tabs.slice(i, i + CHUNK)
-                const results = await Promise.all(chunk.map(t => this.safeMakeState(t)))
+                const results = await Promise.all(chunk.map(t => this.safeMakeState(t, snapshot)))
                 for (const r of results) if (r) out.push(r)
             }
             this.subject.next(out)
@@ -351,9 +386,10 @@ export class TabMonitor implements OnDestroy {
 
     private async safeMakeState (
         t: { outer: BaseTabComponent; inner: BaseTabComponent },
+        snapshot: ProcessTreeSnapshot,
     ): Promise<TabState | null> {
         try {
-            return await this.makeState(t)
+            return await this.makeState(t, snapshot)
         } catch (e) {
             // eslint-disable-next-line no-console
             console.error('[glanceterm] makeState failed for tab:', t.outer?.title, e)
@@ -363,6 +399,7 @@ export class TabMonitor implements OnDestroy {
 
     private async makeState (
         t: { outer: BaseTabComponent; inner: BaseTabComponent },
+        snapshot: ProcessTreeSnapshot,
     ): Promise<TabState | null> {
         const sess: any = (t.inner as any).session
         if (!sess || typeof sess.getChildProcesses !== 'function') {
@@ -428,11 +465,11 @@ export class TabMonitor implements OnDestroy {
         }
         if (truePid !== null) {
             pushCand(truePid)
-            for (const a of ancestorsOf(truePid, 6)) pushCand(a)
+            for (const a of ancestorsOf(truePid, snapshot, 6)) pushCand(a)
         }
         for (const c of children) pushCand(c.pid)
 
-        const realCmds = realCommandsFor(candidates.map(c => c.pid))
+        const realCmds = await realCommandsFor(candidates.map(c => c.pid))
 
         let aiTool: AiTool | null = null
         let aiPid: number | null = null
@@ -494,8 +531,8 @@ export class TabMonitor implements OnDestroy {
             const push = (p: number | null) => { if (p && !envCandidates.includes(p)) envCandidates.push(p) }
             push(aiPid)
             push(truePid)
-            if (truePid) for (const a of ancestorsOf(truePid, 6)) push(a)
-            const envId = this.readEnvTabId(t.inner, envCandidates)
+            if (truePid) for (const a of ancestorsOf(truePid, snapshot, 6)) push(a)
+            const envId = await this.readEnvTabId(t.inner, envCandidates)
             tabId = envId ?? sess.glancetermTabId
             const snap = tabId ? this.hooks.getStatus(tabId) : null
             if (snap) {
@@ -548,7 +585,7 @@ export class TabMonitor implements OnDestroy {
         //    pending-arrival queue against this tick's new children.
         let backgroundJobCount = 0
         if (aiPid !== null) {
-            backgroundJobCount = this.updateBackgroundJobCount(t.inner, aiPid, tabId, aiTool)
+            backgroundJobCount = await this.updateBackgroundJobCount(t.inner, aiPid, tabId, aiTool)
         } else {
             this.bgChildrenFirstSeen.delete(t.inner)
             this.bgConfirmedPids.delete(t.inner)
@@ -597,14 +634,14 @@ export class TabMonitor implements OnDestroy {
      * enters confirmed), so the final count is a simple sum with no
      * double counting.
      */
-    private updateBackgroundJobCount (
+    private async updateBackgroundJobCount (
         inner: BaseTabComponent,
         aiPid: number,
         tabId: string | undefined,
         aiTool: AiTool | null,
-    ): number {
+    ): Promise<number> {
         const now = Date.now()
-        const live = new Set(childrenOf(aiPid))
+        const live = new Set(await childrenOf(aiPid))
 
         // Ensure both trackers exist.
         let firstSeen = this.bgChildrenFirstSeen.get(inner)
@@ -798,10 +835,10 @@ export class TabMonitor implements OnDestroy {
      * blocks don't change after exec, so a single successful read is enough
      * for the lifetime of the pty.
      */
-    private readEnvTabId (inner: BaseTabComponent, candidatePids: number[]): string | undefined {
+    private async readEnvTabId (inner: BaseTabComponent, candidatePids: number[]): Promise<string | undefined> {
         if (this.envTabIdCache.has(inner)) return this.envTabIdCache.get(inner)
         for (const pid of candidatePids) {
-            const id = readGlancetermTabIdFromPid(pid)
+            const id = await readGlancetermTabIdFromPid(pid)
             if (id) {
                 this.envTabIdCache.set(inner, id)
                 return id
@@ -868,25 +905,21 @@ function isTerminalTab (t: any): boolean {
  * (notably `claude`, which returns the version string), so we re-read
  * via OS-native APIs and dispatch by platform.
  */
-function realCommandsFor (pids: number[]): Map<number, string> {
+async function realCommandsFor (pids: number[]): Promise<Map<number, string>> {
     if (pids.length === 0) return new Map()
     return process.platform === 'win32'
         ? realCommandsForWindows(pids)
         : realCommandsForPosix(pids)
 }
 
-function realCommandsForPosix (pids: number[]): Map<number, string> {
+async function realCommandsForPosix (pids: number[]): Promise<Map<number, string>> {
     const out = new Map<number, string>()
-    try {
-        const psOut = execSync(`ps -p ${pids.join(',')} -o pid=,command=`, {
-            encoding: 'utf8',
-            timeout: 500,
-        })
-        for (const line of psOut.split('\n')) {
-            const m = line.match(/^\s*(\d+)\s+(.*)$/)
-            if (m) out.set(parseInt(m[1], 10), m[2].trim())
-        }
-    } catch { /* swallow */ }
+    if (pids.length === 0) return out
+    const psOut = await runProbe('ps', ['-p', pids.join(','), '-o', 'pid=,command='], 500)
+    for (const line of psOut.split('\n')) {
+        const m = line.match(/^\s*(\d+)\s+(.*)$/)
+        if (m) out.set(parseInt(m[1], 10), m[2].trim())
+    }
     return out
 }
 
@@ -903,23 +936,25 @@ function realCommandsForPosix (pids: number[]): Map<number, string> {
  * Timeout is bumped vs POSIX (2 s vs 500 ms) — PowerShell cold-start adds
  * ~150–250 ms on top of the query itself.
  */
-function realCommandsForWindows (pids: number[]): Map<number, string> {
+async function realCommandsForWindows (pids: number[]): Promise<Map<number, string>> {
     const out = new Map<number, string>()
-    try {
-        const script = [
-            `$ids = @(${pids.join(',')})`,
-            `Get-CimInstance Win32_Process | Where-Object { $ids -contains $_.ProcessId } | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress -Depth 2`,
-        ].join('; ')
-        const encoded = Buffer.from(script, 'utf16le').toString('base64')
-        const psOut = execSync(
-            `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand ${encoded}`,
-            { encoding: 'utf8', timeout: 2000, windowsHide: true },
-        )
+    if (pids.length === 0) return out
+    const script = [
+        `$ids = @(${pids.join(',')})`,
+        `Get-CimInstance Win32_Process | Where-Object { $ids -contains $_.ProcessId } | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress -Depth 2`,
+    ].join('; ')
+    const encoded = Buffer.from(script, 'utf16le').toString('base64')
+    const psOut = await runProbe(
+        'powershell.exe',
+        ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
+        2000,
+    )
 
-        // ConvertTo-Json emits a single object if there's one row, an array
-        // otherwise. Normalise both shapes.
-        const trimmed = psOut.trim()
-        if (!trimmed) return out
+    // ConvertTo-Json emits a single object if there's one row, an array
+    // otherwise. Normalise both shapes.
+    const trimmed = psOut.trim()
+    if (!trimmed) return out
+    try {
         const parsed = JSON.parse(trimmed)
         const list: Array<{ ProcessId?: number; CommandLine?: string }> =
             Array.isArray(parsed) ? parsed : [parsed]
@@ -928,24 +963,86 @@ function realCommandsForWindows (pids: number[]): Map<number, string> {
                 out.set(item.ProcessId, item.CommandLine.trim())
             }
         }
-    } catch { /* swallow — degraded "no command info" mode is fine */ }
+    } catch { /* malformed JSON — degraded "no command info" mode is fine */ }
     return out
 }
 
 /**
+ * Per-tick process-tree snapshot. Built once at the top of `tick()` and
+ * passed through to every per-tab probe so the N tabs share one ppid map
+ * instead of each running their own `ps -p` per ancestor step.
+ *
+ * `pidParent` is the bulk lookup. On macOS one `ps -A -o pid=,ppid=` call
+ * returns every process's ppid in a single ~5–10 ms invocation; cheaper
+ * than the pre-refactor 6 × N synchronous `ps -p` calls (10 tabs ⇒ 60
+ * blocking shell-outs every 1.5 s). On Linux we read from `/proc`
+ * directly with no exec needed.
+ *
+ * Windows: we don't pre-build, falling through to a per-call wmic in
+ * `parentPidOfFromSnapshot`. Wmic is deprecated; a batched PowerShell
+ * query would help, but Windows isn't where the perf reports come from.
+ */
+interface ProcessTreeSnapshot {
+    pidParent: Map<number, number>
+}
+
+async function buildProcessTreeSnapshot (): Promise<ProcessTreeSnapshot> {
+    const pidParent = new Map<number, number>()
+    if (process.platform === 'darwin') {
+        const out = await runProbe('ps', ['-A', '-o', 'pid=,ppid='], 800)
+        for (const line of out.split('\n')) {
+            const m = line.match(/^\s*(\d+)\s+(\d+)/)
+            if (m) {
+                const pid = parseInt(m[1], 10)
+                const ppid = parseInt(m[2], 10)
+                if (Number.isFinite(pid) && Number.isFinite(ppid)) {
+                    pidParent.set(pid, ppid)
+                }
+            }
+        }
+    } else if (process.platform === 'linux') {
+        // Read /proc directly — no exec, very fast.
+        let entries: string[] = []
+        try { entries = fsSync.readdirSync('/proc') } catch { /* swallow */ }
+        for (const e of entries) {
+            if (!/^\d+$/.test(e)) continue
+            try {
+                const data = fsSync.readFileSync(`/proc/${e}/stat`, 'utf8')
+                const close = data.lastIndexOf(')')
+                if (close < 0) continue
+                const rest = data.slice(close + 1).trim().split(/\s+/)
+                const ppid = parseInt(rest[1], 10)
+                if (Number.isFinite(ppid)) pidParent.set(parseInt(e, 10), ppid)
+            } catch { /* skip on race / perm */ }
+        }
+    }
+    // Windows: leave pidParent empty; ancestorsOf falls through to the
+    // Windows-only sync wmic per-pid lookup. The renderer-jank cost we
+    // care about is dominated by the long-tabs macOS workflow.
+    return { pidParent }
+}
+
+/**
  * Walk up the ppid chain from `pid`, returning at most `maxDepth` ancestors
- * (closest-first). Stops at pid 1 / 0 / failure. Cross-platform.
+ * (closest-first). Stops at pid 1 / 0 / failure. Pure: takes the
+ * pre-built snapshot.
  *
  * Used by tab detection to find AI tools that sit above the pty's
  * foreground process — e.g. truePID = caffeinate, ppid = claude, ppid =
  * zsh. We want to inspect claude even though it isn't the foreground
  * leader at this moment.
  */
-function ancestorsOf (pid: number, maxDepth: number): number[] {
+function ancestorsOf (pid: number, snapshot: ProcessTreeSnapshot, maxDepth: number): number[] {
     const out: number[] = []
     let cur = pid
     for (let i = 0; i < maxDepth; i++) {
-        const parent = parentPidOf(cur)
+        let parent: number | null = snapshot.pidParent.get(cur) ?? null
+        // Windows fallback — snapshot is empty; do a per-step probe. Sync
+        // here because the ancestor walk is iterative and reusing the
+        // pre-refactor wmic timeout (1.5 s) keeps behavior unchanged.
+        if (parent === null && process.platform === 'win32') {
+            parent = parentPidOfWindowsSync(cur)
+        }
         if (!parent || parent <= 1 || parent === cur) break
         out.push(parent)
         cur = parent
@@ -958,70 +1055,50 @@ function ancestorsOf (pid: number, maxDepth: number): number[] {
  * array on any failure (process exited, ps not available, permission
  * denied) — callers treat that as "no bg jobs", which is the safe default.
  *
- * macOS / Linux: `pgrep -P <pid>` matches by parent pid. pgrep is shipped
- *   with both BSD utils (macOS) and procps-ng (Linux). Exit code 1 when
- *   nothing matches; execSync throws on non-zero, which we swallow.
- * Windows: wmic ParentProcessId filter. wmic is deprecated in modern
- *   Windows but still present in 10/11; if it's missing the catch returns
- *   empty and the bg-count badge just stays at 0.
+ * macOS / Linux: `pgrep -P <pid>`.
+ * Windows: wmic ParentProcessId filter (deprecated in modern Windows but
+ *   still present in 10/11; if missing, catch returns empty and the
+ *   bg-count badge just stays at 0).
  */
-function childrenOf (pid: number): number[] {
+async function childrenOf (pid: number): Promise<number[]> {
     if (process.platform === 'win32') {
-        try {
-            const out = execSync(
-                `wmic process where ParentProcessId=${pid} get ProcessId /format:value`,
-                { encoding: 'utf8', timeout: 1_500, windowsHide: true },
-            )
-            const pids: number[] = []
-            for (const m of out.matchAll(/ProcessId=(\d+)/g)) {
-                const n = parseInt(m[1], 10)
-                if (Number.isFinite(n) && n > 0) pids.push(n)
-            }
-            return pids
-        } catch { return [] }
+        const out = await runProbe(
+            'wmic',
+            ['process', 'where', `ParentProcessId=${pid}`, 'get', 'ProcessId', '/format:value'],
+            1_500,
+        )
+        const pids: number[] = []
+        for (const m of out.matchAll(/ProcessId=(\d+)/g)) {
+            const n = parseInt(m[1], 10)
+            if (Number.isFinite(n) && n > 0) pids.push(n)
+        }
+        return pids
     }
-    try {
-        const out = execSync(`pgrep -P ${pid}`, { encoding: 'utf8', timeout: 300 })
-        return out.trim().split(/\s+/)
-            .map(s => parseInt(s, 10))
-            .filter(n => Number.isFinite(n) && n > 0)
-    } catch { return [] }
+    const out = await runProbe('pgrep', ['-P', String(pid)], 300)
+    return out.trim().split(/\s+/)
+        .map(s => parseInt(s, 10))
+        .filter(n => Number.isFinite(n) && n > 0)
 }
 
-function parentPidOf (pid: number): number | null {
-    if (process.platform === 'linux') {
-        try {
-            const data = fsSync.readFileSync(`/proc/${pid}/stat`, 'utf8')
-            // /proc/<pid>/stat: pid (comm) state ppid …
-            // `comm` may contain whitespace/parens, so anchor on the LAST ')'.
-            const close = data.lastIndexOf(')')
-            if (close < 0) return null
-            const rest = data.slice(close + 1).trim().split(/\s+/)
-            // After ')' the fields are: state, ppid, …
-            const ppid = parseInt(rest[1], 10)
-            return Number.isFinite(ppid) ? ppid : null
-        } catch { return null }
-    }
-    if (process.platform === 'darwin') {
-        try {
-            const out = execSync(`ps -p ${pid} -o ppid=`, { encoding: 'utf8', timeout: 300 })
-            const ppid = parseInt(out.trim(), 10)
-            return Number.isFinite(ppid) ? ppid : null
-        } catch { return null }
-    }
-    if (process.platform === 'win32') {
-        // Single-shot wmic is fast enough for the 6-deep walk; we accept
-        // the per-call cost vs setting up a batched PowerShell query that
-        // would only pay off for very deep trees.
-        try {
-            const out = execSync(`wmic process where ProcessId=${pid} get ParentProcessId /format:value`, {
-                encoding: 'utf8', timeout: 1500, windowsHide: true,
-            })
-            const m = out.match(/ParentProcessId=(\d+)/)
-            return m ? parseInt(m[1], 10) : null
-        } catch { return null }
-    }
-    return null
+/**
+ * Windows-only per-step parent lookup, kept synchronous for the ancestor
+ * walk. We tolerate the per-call wmic cost on Windows because Windows is
+ * not where the per-tab perf reports come from; rolling a batched
+ * PowerShell query would only marginally help. Returns null on any
+ * failure path so the caller's `parent === null` break-out triggers.
+ */
+function parentPidOfWindowsSync (pid: number): number | null {
+    // We have to keep a sync call somewhere on Windows because we don't
+    // pre-build the pidParent map there. Using execFileSync (not execSync)
+    // for the no-shell-interp safety even though pid is internal-controlled.
+    try {
+        const { execFileSync } = require('child_process') as typeof import('child_process')
+        const out = execFileSync('wmic', [
+            'process', 'where', `ProcessId=${pid}`, 'get', 'ParentProcessId', '/format:value',
+        ], { encoding: 'utf8', timeout: 1500, windowsHide: true })
+        const m = out.match(/ParentProcessId=(\d+)/)
+        return m ? parseInt(m[1], 10) : null
+    } catch { return null }
 }
 
 /**
@@ -1034,7 +1111,7 @@ function parentPidOf (pid: number): number | null {
  * Callers must treat null as "fall back to sess.glancetermTabId" rather
  * than as a hard failure.
  */
-function readGlancetermTabIdFromPid (pid: number): string | null {
+async function readGlancetermTabIdFromPid (pid: number): Promise<string | null> {
     if (process.platform === 'linux') {
         try {
             const buf = fsSync.readFileSync(`/proc/${pid}/environ`)
@@ -1051,15 +1128,9 @@ function readGlancetermTabIdFromPid (pid: number): string | null {
         // separated by single spaces. We can't disambiguate spaces in argv
         // from the env-pair separator, but GLANCETERM_TAB_ID values are
         // UUIDv4 — fixed shape — so a focused regex is enough.
-        try {
-            const out = execSync(`ps eww -p ${pid} -o command=`, {
-                encoding: 'utf8',
-                timeout: 500,
-            })
-            const m = out.match(/\bGLANCETERM_TAB_ID=([0-9a-fA-F-]{36})\b/)
-            return m ? m[1] : null
-        } catch { /* swallow */ }
-        return null
+        const out = await runProbe('ps', ['eww', '-p', String(pid), '-o', 'command='], 500)
+        const m = out.match(/\bGLANCETERM_TAB_ID=([0-9a-fA-F-]{36})\b/)
+        return m ? m[1] : null
     }
     // Windows: reading another process's env block requires NtQueryInformation
     // -Process gymnastics that aren't worth the bundle weight. We fall back
