@@ -1,7 +1,7 @@
 import { Injectable, OnDestroy } from '@angular/core'
 import { BehaviorSubject, Observable, Subscription } from 'rxjs'
 
-import { AppService, BaseTabComponent, HostWindowService } from 'tabby-core'
+import { AppService, BaseTabComponent } from 'tabby-core'
 
 /**
  * Tracks "AI just finished, you haven't looked" — emitted when a tab
@@ -14,14 +14,40 @@ import { AppService, BaseTabComponent, HostWindowService } from 'tabby-core'
  *   3. macOS Dock badge with the total count (best-effort, no-op on web
  *      and non-mac platforms)
  *
- * Cleared when the user focuses the tab (activeTabChange or window focus),
- * or when the tab is closed.
+ * Clearing model — IM-style "content engagement", not "tab focus":
+ *
+ * Pre-fix the badge cleared on `activeTabChange$` and `windowFocused$` —
+ * a quick "did I miss something?" sidebar click would clear the badge
+ * before the user actually saw the agent's output, which is exactly the
+ * surprise WeChat/iMessage avoid (opening a chat does NOT mark messages
+ * read; scrolling to the content does).
+ *
+ * Now: a per-unread-tab listener arms on `markReady()` and clears only
+ * when the user actively engages with the terminal content:
+ *
+ *   - `frontend.input$`         — typing into the terminal
+ *   - `mouseEvent$` 'mousewheel'— scroll wheel on the terminal body
+ *   - `mouseEvent$ 'mousedown'  — click inside the terminal (text
+ *     selection / cursor positioning — still a real "I'm reading" signal)
+ *
+ * Switching to the tab from the sidebar, or returning to the GlanceTerm
+ * window from another app, does NOT clear by itself — the user has to
+ * actually look at the content.
+ *
+ * Tab close still clears (otherwise we'd leak strong refs to destroyed
+ * tabs in `unread`).
  */
 @Injectable({ providedIn: 'root' })
 export class UnreadService implements OnDestroy {
     private unread = new Set<BaseTabComponent>()
     private subject = new BehaviorSubject<number>(0)
     private subs: Subscription[] = []
+    /**
+     * Per-unread-tab listener watching frontend input/scroll/click. Cleared
+     * (and the entry removed) on first qualifying interaction OR on tab
+     * close. WeakMap so a tab destroyed before being read doesn't leak.
+     */
+    private clearListeners = new WeakMap<BaseTabComponent, Subscription>()
     private dock: { setBadge: (s: string) => void } | null = null
 
     /** Latest count of unseen-ready tabs. Observable for any reactive consumer. */
@@ -29,16 +55,9 @@ export class UnreadService implements OnDestroy {
 
     constructor (
         private app: AppService,
-        hostWindow: HostWindowService,
     ) {
-        // Clearing rules — see class doc.
-        this.subs.push(this.app.activeTabChange$.subscribe(tab => {
-            if (tab) this.clearTabAndChildren(tab)
-        }))
-        this.subs.push(hostWindow.windowFocused$.subscribe(() => {
-            if (this.app.activeTab) this.clearTabAndChildren(this.app.activeTab)
-        }))
-        // Don't leak entries for tabs the user closed before reading them.
+        // Tab close: drop any unread entry AND tear down its interaction
+        // listener so we don't leak a Subscription on a destroyed frontend.
         this.subs.push(this.app.tabRemoved$.subscribe(tab => this.clearTabAndChildren(tab)))
 
         this.dock = resolveElectronDock()
@@ -53,8 +72,10 @@ export class UnreadService implements OnDestroy {
     }
 
     /**
-     * Mark a tab's last working→ready transition as "unseen". Idempotent —
-     * a second call while the tab is still unread is a no-op (no extra emit).
+     * Mark a tab's last working→ready transition as "unseen" and arm the
+     * interaction listener that will clear it on real engagement.
+     * Idempotent — a second call while the tab is still unread is a no-op
+     * (no extra emit, and the listener from the first call stays armed).
      * Callers should NOT mark a tab the user is currently looking at; the
      * point of the badge is to surface what they missed.
      */
@@ -62,6 +83,7 @@ export class UnreadService implements OnDestroy {
         if (this.unread.has(innerTab)) return
         this.unread.add(innerTab)
         this.emit()
+        this.armInteractionListener(innerTab)
     }
 
     /** Sync check used by the sidebar template's red-dot binding. */
@@ -74,17 +96,71 @@ export class UnreadService implements OnDestroy {
     }
 
     /**
+     * Wire a one-shot listener on the tab's terminal frontend. See the class
+     * docstring for the engagement-vs-focus rationale.
+     *
+     * Defensive on a missing frontend: if the tab's frontend isn't attached
+     * yet (rare — markReady fires after working→idle, which requires the
+     * session to have been live this run, which requires the frontend to
+     * have been attached on first focus), skip. The badge stays put until
+     * either the user closes the tab or — if the agent fires another
+     * working→idle cycle later — the next markReady call (idempotent guard
+     * bails out, but we re-arm anyway via `disarm + arm`).
+     */
+    private armInteractionListener (innerTab: BaseTabComponent): void {
+        // Drop any prior subscription first — defensive against future
+        // refactors that call arm() outside markReady's idempotent guard.
+        const existing = this.clearListeners.get(innerTab)
+        if (existing) existing.unsubscribe()
+
+        const tab = innerTab as unknown as {
+            frontend?: {
+                input$?: Observable<unknown>
+                mouseEvent$?: Observable<{ type: string }>
+            }
+        }
+        const frontend = tab.frontend
+        if (!frontend?.input$ || !frontend.mouseEvent$) return
+
+        const sub = new Subscription()
+        sub.add(frontend.input$.subscribe(() => this.clearOnInteraction(innerTab)))
+        sub.add(frontend.mouseEvent$.subscribe(e => {
+            if (e.type === 'mousewheel' || e.type === 'mousedown') {
+                this.clearOnInteraction(innerTab)
+            }
+        }))
+        this.clearListeners.set(innerTab, sub)
+    }
+
+    private clearOnInteraction (innerTab: BaseTabComponent): void {
+        if (!this.unread.has(innerTab)) return
+        this.unread.delete(innerTab)
+        this.disarmInteractionListener(innerTab)
+        this.emit()
+    }
+
+    private disarmInteractionListener (innerTab: BaseTabComponent): void {
+        const sub = this.clearListeners.get(innerTab)
+        if (sub) {
+            sub.unsubscribe()
+            this.clearListeners.delete(innerTab)
+        }
+    }
+
+    /**
      * Drop the tab AND any leaves it contains (SplitTabComponent wraps
-     * multiple terminal leaves; clicking the outer should clear them all).
-     * Duck-typed via `getAllTabs()` to dodge the cross-module-realm
-     * `instanceof` trap that already bites tab-monitor.
+     * multiple terminal leaves; the outer being destroyed should clear
+     * them all). Duck-typed via `getAllTabs()` to dodge the cross-module-
+     * realm `instanceof` trap that already bites tab-monitor.
      */
     private clearTabAndChildren (tab: BaseTabComponent): void {
         let changed = this.unread.delete(tab)
+        this.disarmInteractionListener(tab)
         const anyTab = tab as any
         if (typeof anyTab.getAllTabs === 'function') {
             for (const leaf of anyTab.getAllTabs()) {
                 if (this.unread.delete(leaf)) changed = true
+                this.disarmInteractionListener(leaf)
             }
         }
         if (changed) this.emit()

@@ -440,14 +440,17 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             background: rgba(255, 159, 69, 0.07);
         }
 
-        /* Done row — agent finished, user hasn't opened it yet. Quieter than
-           needs_permission (no animated indicator), louder than idle (tinted
-           background). All done styling is gated on :not(.active): an
-           active+done row is rare but possible — attention-notifier suppresses
-           the markReady ping only when document.hasFocus() is true, so a
-           backgrounded GlanceTerm window can mark its own active tab unread.
-           In that case the blue "you are here" surface wins until the user
-           refocuses (which clears unread and flips done → idle). */
+        /* Done row — agent finished, user hasn't engaged with it yet.
+           Quieter than needs_permission (no animated indicator), louder than
+           idle (tinted background). All done styling is gated on :not(.active):
+           an active+done row is rare but possible — attention-notifier
+           suppresses the markReady ping only when document.hasFocus() is
+           true, so a backgrounded GlanceTerm window can mark its own active
+           tab unread. In that case the blue "you are here" surface wins
+           until the user actually engages with the terminal content (scroll,
+           type, or click into the body — see UnreadService docstring for
+           the IM-style engagement model). Tab focus alone does NOT clear
+           unread — that's intentional. */
         .row[data-status="done"]:not(.active) {
             box-shadow: inset 0 0 0 1px rgba(255, 82, 82, 0.3);
             background: rgba(255, 82, 82, 0.06);
