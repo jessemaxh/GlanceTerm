@@ -67,8 +67,14 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             </div>
 
             <div *ngIf="states.length > 0 && visibleStates.length === 0" class="sb-empty filtered">
-                <div class="et">No {{ filterLabel() }}</div>
-                <div class="es">Tap "All" to see every tab.</div>
+                <ng-container *ngIf="hideTabsWithoutAgent && filterMode === 'all'; else regularFilterEmpty">
+                    <div class="et">All hidden</div>
+                    <div class="es">Every open tab is a plain shell. Uncheck "Hide tabs without an AI agent" in settings to see them.</div>
+                </ng-container>
+                <ng-template #regularFilterEmpty>
+                    <div class="et">No {{ filterLabel() }}</div>
+                    <div class="es">Tap "All" to see every tab.</div>
+                </ng-template>
             </div>
 
             <div *ngIf="visibleStates.length > 0" class="sb-list">
@@ -1114,8 +1120,8 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      * through `store` itself — ConfigService loads `store` asynchronously
      * (config.service.ts:226) and component getters run during early CD
      * passes before that resolves. Default true matches the default declared
-     * in AiSidebarConfigProvider, so the speaker icon starts in the "on"
-     * state during the load window.
+     * in AiSidebarConfigProvider, so the gear menu's checkmark starts checked
+     * during the load window.
      */
     get soundOnReady (): boolean {
         return this.config.store?.ai?.soundOnReady !== false
@@ -1136,8 +1142,8 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
 
     /**
      * Read-through to the persisted auto-approve setting. Default false —
-     * matches AiSidebarConfigProvider — so the shield icon starts in the
-     * "off" state during the config-load window.
+     * matches AiSidebarConfigProvider — so the gear menu's checkmark starts
+     * unchecked during the config-load window.
      */
     get autoApprovePermissions (): boolean {
         return this.autoApprove.enabled
@@ -1489,28 +1495,15 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
             byOuter.set(s.outerTab, arr)
         }
         const fm = this.filterMode
-        const hideNoAi = this.hideTabsWithoutAgent
         const primaryOf = (group: TabState[]): TabState => this.pickPrimary(group)
         const groupMatches = (group: TabState[]): boolean =>
             fm === 'all' || group.some(s => this.effStatus(s) === fm)
-        // Global "hide tabs without an AI agent" filter — drops a group when
-        // its chosen primary is `no_ai`. Subtle but important: `pickPrimary`
-        // prefers any non-no_ai leaf, so a no_ai primary means EVERY leaf in
-        // the outer tab is no_ai (a SplitTab with one AI leaf still has the
-        // AI as primary and stays visible). User-pinned cwds bypass — pinning
-        // is an explicit "I want this in my view" gesture that should win
-        // over any global filter.
-        const groupPassesNoAiFilter = (group: TabState[], p: TabState): boolean => {
-            if (!hideNoAi) return true
-            if (this.isPinned(p)) return true
-            return this.effStatus(p) !== 'no_ai'
-        }
         const visiblePrimaries: TabState[] = []
         const subsByOuter = new Map<BaseTabComponent, TabState[]>()
         for (const [outer, group] of byOuter) {
             if (!groupMatches(group)) continue
             const p = primaryOf(group)
-            if (!groupPassesNoAiFilter(group, p)) continue
+            if (!this.groupPassesNoAiFilter(group, p)) continue
             visiblePrimaries.push(p)
             const subs = group.filter(s => s !== p)
             if (subs.length > 0) subsByOuter.set(outer, subs)
@@ -1543,6 +1536,30 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      */
     private pickPrimary (group: TabState[]): TabState {
         return group.find(s => this.effStatus(s) !== 'no_ai') ?? group[0]
+    }
+
+    /**
+     * Shared predicate for the "Hide tabs without an AI agent" filter — used
+     * by both `visibleStates` (list rendering) and `countFor('all')` (pill
+     * counter) so the two NEVER disagree.
+     *
+     * Returns true when the group should remain visible. Subtleties:
+     *
+     *   - `pickPrimary` prefers any non-no_ai leaf, so a no_ai primary means
+     *     EVERY leaf in the outer tab is no_ai. A SplitTab with one AI leaf
+     *     still has the AI as primary and passes.
+     *
+     *   - User-pinned cwds bypass the filter. Pin status is checked across
+     *     EVERY leaf in the group, not just the primary — if the user
+     *     right-clicked a non-primary shell leaf to pin it, that pin gesture
+     *     should still keep the whole group visible. (`isPinned` is keyed
+     *     on cwd, so pinning a subordinate doesn't propagate to the primary
+     *     by itself.)
+     */
+    private groupPassesNoAiFilter (group: TabState[], primary: TabState): boolean {
+        if (!this.hideTabsWithoutAgent) return true
+        if (group.some(s => this.isPinned(s))) return true
+        return this.effStatus(primary) !== 'no_ai'
     }
 
     /**
@@ -1627,26 +1644,33 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         this.filterMode = this.filterMode === id && id !== 'all' ? 'all' : id
     }
 
-    /** Pill counter — `All` counts every tab the sidebar WOULD show with the
-     *  current global filters (matches what visibleStates produces); the
-     *  other pills count their effStatus bucket directly. The no_ai bucket
-     *  isn't a pill itself, so flipping hideTabsWithoutAgent on only changes
-     *  the `All` count — the working/idle/done/needs_permission buckets are
-     *  unaffected by definition. */
+    /** Pill counter — `All` matches `visibleStates.length` exactly (every leaf
+     *  the sidebar will actually render, including subordinates of a passing
+     *  SplitTab); other pills count their effStatus bucket. The no_ai bucket
+     *  isn't a pill, so flipping hideTabsWithoutAgent on only changes `All`;
+     *  working/idle/done/needs_permission counts are unaffected by definition.
+     *
+     *  Same group / primary / pin-bypass semantics as visibleStates via the
+     *  shared `groupPassesNoAiFilter` predicate — invariant to maintain is
+     *  that the pill number and the rendered row count never disagree, even
+     *  when a passing SplitTab contributes a primary plus N subordinate rows. */
     countFor (id: FilterId): number {
         if (id === 'all') {
             if (!this.hideTabsWithoutAgent) return this.states.length
-            // Per-outer-tab dedup matches visibleStates' "one primary per
-            // outer tab" model — pinned tabs bypass like in visibleStates.
-            const seen = new Set<BaseTabComponent>()
-            let n = 0
+            // Single pass: group by outer tab, sum group.length for every
+            // group that passes the no_ai filter. Counting group.length
+            // (not 1) is what makes the pill match the actual visible leaf
+            // count when SplitTabs are involved.
+            const groups = new Map<BaseTabComponent, TabState[]>()
             for (const s of this.states) {
-                if (seen.has(s.outerTab)) continue
-                seen.add(s.outerTab)
-                if (this.isPinned(s)) { n++; continue }
-                const group = this.states.filter(o => o.outerTab === s.outerTab)
+                const arr = groups.get(s.outerTab) ?? []
+                arr.push(s)
+                groups.set(s.outerTab, arr)
+            }
+            let n = 0
+            for (const group of groups.values()) {
                 const primary = this.pickPrimary(group)
-                if (this.effStatus(primary) !== 'no_ai') n++
+                if (this.groupPassesNoAiFilter(group, primary)) n += group.length
             }
             return n
         }
