@@ -1,17 +1,21 @@
 import { Injectable } from '@angular/core'
 
-import { NotificationsService } from 'tabby-core'
+import { ConfigService, NotificationsService } from 'tabby-core'
 
 import { openCaptureWindow, CaptureResult } from './capture-window'
 
 /**
  * Public surface used by the sidebar button.
  *
- * `capture()` does the full flow: hide the main GlanceTerm window (so it
- * doesn't appear in the screenshot), grab the primary display via
+ * `capture()` does the full flow: optionally hide the main GlanceTerm window
+ * (default on — `ai.screenshotHideWindow`), grab the primary display via
  * `desktopCapturer`, hand it to the overlay window, await the user's
  * confirm/cancel, then restore the main window. Returns a Node Buffer of the
  * cropped PNG, or null on cancel.
+ *
+ * Hide toggle: when off, GlanceTerm stays on-screen and shows up in the
+ * captured frame — the WeChat default. Useful when the user wants to capture
+ * something inside another GlanceTerm tab and route it to a different agent.
  *
  * Multi-display support: v1 captures the display where the GlanceTerm window
  * currently lives (`screen.getDisplayMatching(window.bounds)`). A user with
@@ -22,7 +26,10 @@ import { openCaptureWindow, CaptureResult } from './capture-window'
 export class ScreenshotService {
     private inProgress = false
 
-    constructor (private notifications: NotificationsService) {}
+    constructor (
+        private notifications: NotificationsService,
+        private config: ConfigService,
+    ) {}
 
     /**
      * Run a screenshot session. Returns the PNG bytes on confirm, null on
@@ -104,15 +111,18 @@ export class ScreenshotService {
         // bad run.
         ensureDockVisible(remote)
 
+        const hideWindow = this.config.store?.ai?.screenshotHideWindow !== false
         const wasVisible = !ourWindow.isMinimized() && ourWindow.isVisible()
         try {
-            // Hide so the GlanceTerm UI isn't in the screenshot. minimize()
-            // on macOS triggers a Genie animation; hide() is instant + invisible.
-            ourWindow.hide()
-            // Tiny breather lets the compositor catch up before the capture
-            // call — without it the screenshot can still include the window
-            // frame on slow machines.
-            await new Promise(r => setTimeout(r, 120))
+            if (hideWindow) {
+                // Hide so the GlanceTerm UI isn't in the screenshot. minimize()
+                // on macOS triggers a Genie animation; hide() is instant + invisible.
+                ourWindow.hide()
+                // Tiny breather lets the compositor catch up before the capture
+                // call — without it the screenshot can still include the window
+                // frame on slow machines.
+                await new Promise(r => setTimeout(r, 120))
+            }
 
             const screenDataURL = await this.captureDisplay(desktopCapturer, target)
             if (!screenDataURL) {
@@ -143,7 +153,7 @@ export class ScreenshotService {
             return null
         } finally {
             try {
-                if (wasVisible) {
+                if (hideWindow && wasVisible) {
                     ourWindow.show()
                     ourWindow.focus()
                 }

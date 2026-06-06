@@ -13,6 +13,25 @@ export class AiSidebarConfigProvider extends ConfigProvider {
             'ai-jump-next-attention': ['Ctrl-J'],
             'ai-jump-prev-attention': ['Ctrl-Shift-J'],
         },
+        ai: {
+            // Play a short chime when an AI tab transitions working → done.
+            // Pairs with the existing OS notification + sidebar badge.
+            // Default on — losing the badge happens easily when the window is
+            // backgrounded; a sound makes the transition impossible to miss.
+            soundOnReady: true,
+            // Hide the GlanceTerm window during the screenshot grab so it
+            // doesn't end up in the captured frame. Default on because the
+            // common case is "screenshot something OTHER than GlanceTerm to
+            // share with the agent" — but expose a toggle so users who want
+            // to capture content from another GlanceTerm tab can flip it off.
+            screenshotHideWindow: true,
+            // Auto-approve Claude Code permission prompts (Bash(rm *), etc.)
+            // by responding `allow` to its synchronous PermissionRequest hook.
+            // OFF by default — flipping it ON gives the AI free rein to run
+            // any command without user confirmation. UI shows a confirm
+            // dialog on first enable; see AutoApproveService.
+            autoApprovePermissions: false,
+        },
     }
 
     platformDefaults = {

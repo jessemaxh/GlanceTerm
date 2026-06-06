@@ -14,10 +14,22 @@ import * as path from 'path'
  *   $1     : the agent identifier ("claude", "codex", "gemini", …)
  *   env    : GLANCETERM_TAB_ID is inherited from the spawning Tabby shell
  *
- * Output: writes `~/.glanceterm/hooks/<TAB_ID>.json` (atomic rename pattern).
+ * Output: APPENDS one NDJSON line per event to `~/.glanceterm/hooks/<TAB_ID>.log`.
  * Always exits 0 — failed status writes must not stall the agent's main loop.
  *
- * Hardening notes (post-review fixes):
+ * Why append-only (was: overwrite-single-file `<TAB_ID>.json` + atomic rename):
+ *   Claude fires multiple hook events for one tool invocation within
+ *   milliseconds — PreToolUse → PermissionRequest for permission-gated tools,
+ *   PreToolUse → PostToolUse for sub-100ms tools like Read/Glob. fs.watch
+ *   coalesces rapid writes on macOS (FSEvents has a ~10ms latency window)
+ *   and sometimes on Linux too, so the watcher's single-file read used to
+ *   see ONLY the last event in such bursts — silently dropping any earlier
+ *   PreToolUse's tool_name (sidebar needs it to render `working · Bash`
+ *   inline) and any same-second SubagentStop pair (subagent counter would
+ *   stick one too high). Append-only lets the watcher read every event in
+ *   the order it fired, by tracking a byte offset per file.
+ *
+ * Hardening notes (carried over from the overwrite-pattern handler):
  *   - Extracted fields are run through `tr -d '\\\000-\037'` to strip
  *     backslashes + every ASCII control byte (0x00-0x1F, the full RFC 8259
  *     forbidden range for JSON strings); without this a malicious cwd /
@@ -25,14 +37,23 @@ import * as path from 'path'
  *     unparseable JSON that the watcher silently drops (issue C1 in the
  *     v0.2 review).
  *   - If `GLANCETERM_TAB_ID` is missing/empty/"unknown", exit silently instead
- *     of writing to `hooks/unknown.json` — that file would otherwise get
- *     overwritten by every pre-injection Claude session and never match a
- *     real tab (issue M3).
+ *     of writing to `hooks/unknown.log` — that file would otherwise grow
+ *     forever with every pre-injection Claude session's events and never
+ *     match a real tab (issue M3).
  */
 const HANDLER_SH = `#!/bin/sh
 # GlanceTerm hook handler (POSIX) — see hook-runtime.service.ts for the contract.
 # DO NOT EDIT BY HAND — regenerated on every GlanceTerm launch.
 set -u
+
+# Restrict mode of every file we create here to 0600. Both the per-tab
+# NDJSON log and the auto-approve audit log contain tool names and cwds
+# (and, in the audit log, every command Claude was permitted to run); on
+# multi-user hosts the default umask 022 leaves them world-readable.
+# Setting it at the top covers all later >> redirections without per-call
+# chmod fiddling. The flag-file write (in the Angular service) is already
+# 0600 via fs.writeFile mode.
+umask 077
 
 AGENT="\${1:-unknown}"
 TAB_ID="\${GLANCETERM_TAB_ID:-}"
@@ -85,21 +106,46 @@ EVENT=$(extract hook_event_name)
 SESSION_ID=$(extract session_id)
 MATCHER=$(extract matcher)
 # tool_name only present on PreToolUse / PostToolUse payloads. We need it to
-# know which PreToolUse events are "Task" (spawning a subagent) vs every
-# other tool — only Task ones bump the subagent in-flight counter that keeps
-# the row at 'working' across main-agent Stop.
+# know which PreToolUse events spawn a subagent (tool_name = "Task" on older
+# Claude Code, "Agent" on current) vs every other tool — only those bump the
+# subagent in-flight counter that keeps the row at 'working' across main-agent
+# Stop. See hook-watcher.service.ts processEvent() for the match.
 TOOL_NAME=$(extract tool_name)
 CWD=$(extract cwd)
 TS=$(date +%s)
 
-OUT="$STATE_DIR/$TAB_ID.json"
-TMP="$OUT.tmp.$$"
+# Auto-approve permission prompts (Claude only, P0). When the user has
+# explicitly enabled the feature via the sidebar toggle, AutoApproveService
+# writes "1" to ~/.glanceterm/auto-approve.flag; when disabled, "0". For
+# Claude's PermissionRequest event (registered with async:false in
+# claude.ts so Claude reads stdout), emit the allow-decision JSON. For all
+# other events / agents / when flag is 0, emit nothing — Claude's normal
+# approval flow runs. Each grant is appended to ~/.glanceterm/auto-approve.log
+# (tab-separated: ts, tab_id, tool_name, cwd) so a user can review what
+# was auto-approved after the fact.
+# \`head -c 1\` deliberately reads only ONE byte: tolerates a trailing newline
+# in the flag file (most editors add one) without an extra \`tr -d\`.
+if [ "\$AGENT" = "claude" ] && [ "\$EVENT" = "PermissionRequest" ]; then
+    FLAG=$(head -c 1 "\${HOME}/.glanceterm/auto-approve.flag" 2>/dev/null)
+    if [ "\$FLAG" = "1" ]; then
+        printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}\\n'
+        printf '%s\\t%s\\t%s\\t%s\\n' "\$TS" "\$TAB_ID" "\$TOOL_NAME" "\$CWD" \\
+            >> "\${HOME}/.glanceterm/auto-approve.log" 2>/dev/null
+    fi
+fi
 
-cat > "$TMP" <<EOF_GT
-{"tab_id":"$TAB_ID","agent":"$AGENT","event":"$EVENT","matcher":"$MATCHER","tool_name":"$TOOL_NAME","session_id":"$SESSION_ID","cwd":"$CWD","ts":$TS}
-EOF_GT
+OUT="$STATE_DIR/$TAB_ID.log"
 
-mv "$TMP" "$OUT" 2>/dev/null
+# Append one newline-terminated JSON record. POSIX \`>>\` opens the file with
+# O_APPEND, which guarantees the write goes to current EOF; for writes
+# ≤ PIPE_BUF (4 KiB+ on macOS / Linux) the write is atomic with respect to
+# other concurrent appenders. Our records are ~250 bytes — well under the
+# limit — so two handler processes firing simultaneously cannot interleave
+# bytes mid-record.
+printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","ts":%s}\\n' \\
+    "$TAB_ID" "$AGENT" "$EVENT" "$MATCHER" "$TOOL_NAME" "$SESSION_ID" "$CWD" "$TS" \\
+    >> "$OUT" 2>/dev/null
+
 exit 0
 `
 
@@ -155,10 +201,43 @@ $out = [ordered]@{
     ts         = [int][double]::Parse((Get-Date -UFormat %s))
 }
 
-$outPath = Join-Path $stateDir "$tabId.json"
-$tmpPath = "$outPath.tmp.$PID"
-$out | ConvertTo-Json -Compress | Out-File -FilePath $tmpPath -Encoding utf8 -NoNewline
-Move-Item -Force -Path $tmpPath -Destination $outPath
+# Auto-approve permission prompts (Claude only, P0) — mirror of the POSIX
+# block in HANDLER_SH. See hook-runtime.service.ts comments there for the
+# full rationale. When the user has enabled the feature, AutoApproveService
+# writes "1" to %USERPROFILE%\\.glanceterm\\auto-approve.flag.
+if ($Agent -eq "claude" -and $out.event -eq "PermissionRequest") {
+    $flagFile = Join-Path $env:USERPROFILE ".glanceterm\\auto-approve.flag"
+    $flag = ""
+    try { $flag = ([System.IO.File]::ReadAllText($flagFile)).Trim() } catch {}
+    if ($flag -eq "1") {
+        # Claude reads stdout for sync hooks. Hard-coded JSON (rather than
+        # ConvertTo-Json on a hashtable) keeps the on-the-wire payload
+        # byte-identical to the POSIX handler, which simplifies regression
+        # comparison and avoids any future PowerShell key-ordering surprise.
+        #
+        # Use Write + explicit \`n (LF) rather than WriteLine — the latter
+        # emits CRLF on Windows, and if Claude's stdout reader line-splits
+        # on \\n and feeds the trailing \\r into its JSON parser it would
+        # treat the decision as malformed. LF matches the POSIX handler.
+        [Console]::Out.Write('{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}' + "\`n")
+        $auditPath = Join-Path $env:USERPROFILE ".glanceterm\\auto-approve.log"
+        $auditLine = ("{0}\`t{1}\`t{2}\`t{3}\`n" -f $out.ts, $out.tab_id, $out.tool_name, $out.cwd)
+        [System.IO.File]::AppendAllText($auditPath, $auditLine, [System.Text.Encoding]::UTF8)
+    }
+}
+
+$outPath = Join-Path $stateDir "$tabId.log"
+
+# Append one NDJSON record. See HANDLER_SH for the rationale (single-file
+# overwrite + fs.watch coalescing lost fast event pairs). NTFS does not give
+# the POSIX-style O_APPEND atomicity guarantee, but System.IO.File.AppendAllText
+# opens with FILE_APPEND_DATA which serializes appends at the OS level for
+# small writes — and concurrent Claude handler instances for the same tab are
+# rare enough (Claude runs hooks async per event, not per turn) that the
+# residual interleave risk is acceptable. If it ever bites us, switch to a
+# named mutex.
+$line = ($out | ConvertTo-Json -Compress) + "\`n"
+[System.IO.File]::AppendAllText($outPath, $line, [System.Text.Encoding]::UTF8)
 exit 0
 `
 

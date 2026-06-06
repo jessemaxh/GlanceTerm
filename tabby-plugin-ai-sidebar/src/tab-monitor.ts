@@ -127,12 +127,6 @@ export interface TabState {
      */
     awaitingFirstEvent: boolean
     /**
-     * Name of the tool the agent is currently inside (`Bash` / `Read` / `Task`
-     * / …) — sidebar renders it as `working · Bash`. Null when between tool
-     * calls or when no AI tool is recognised on the tab.
-     */
-    currentTool: string | null
-    /**
      * Number of subagents the main agent has spawned without a matching
      * SubagentStop yet. Sidebar renders `· N agents` after the status when
      * > 0. Also drives the idle→working override (see hook-watcher's
@@ -227,6 +221,29 @@ export class TabMonitor implements OnDestroy {
      * the previous timer.
      */
     private idleGateTimers = new WeakMap<BaseTabComponent, ReturnType<typeof setTimeout>>()
+    /**
+     * Per-tab "we entered effective `working` at this wall-clock ms" anchor.
+     * Set on the first tick that surfaces status=working after a non-working
+     * tick; cleared when status leaves working. Drives `lastActiveMs` for
+     * working tabs so the sidebar age cell shows turn-duration (matching the
+     * AI tool's own spinner — e.g. Claude's "Propagating… 9m 16s") instead
+     * of "ms since the last hook event", which resets to ~0 on every
+     * PreToolUse / PostToolUse and made an actively-chewing agent display
+     * "0s" indefinitely.
+     *
+     * Why anchor to NOW and not snap.eventAt: the working-triggering hook
+     * has already fired, so NOW under-reports by at most one poll interval
+     * (POLL_MS = 1.5 s) while snap.eventAt would over-report after a
+     * SessionStart-style event whose timestamp lives in the past. A
+     * one-poll undercount is the gentler error.
+     *
+     * Idle flicker is already absorbed by applyIdleGate (a brief raw idle
+     * inside IDLE_STABILITY_MS stays effective=working), so a working
+     * stretch peppered with PostToolUse → SessionStart pings does NOT
+     * cause the timer to restart — workingSince only clears when the
+     * effective status actually leaves working.
+     */
+    private workingSince = new WeakMap<BaseTabComponent, number>()
 
     readonly states$: Observable<TabState[]> = this.subject.asObservable()
 
@@ -394,9 +411,9 @@ export class TabMonitor implements OnDestroy {
         let lastActiveMs: number | null = null
         let awaitingFirstEvent = false
         // tabId hoisted to function scope so the TabState return at the
-        // bottom can read HookWatcher's side-trackers (currentTool,
-        // subagentInFlight). Stays undefined for tabs without an adapter-
-        // supported AI tool, which short-circuits the side-channel reads.
+        // bottom can read HookWatcher's subagent in-flight counter. Stays
+        // undefined for tabs without an adapter-supported AI tool, which
+        // short-circuits the side-channel read.
         let tabId: string | undefined
 
         if (!aiTool) {
@@ -449,6 +466,21 @@ export class TabMonitor implements OnDestroy {
             }
         }
 
+        // Override lastActiveMs for working tabs to show turn-duration (since
+        // entering effective=working) instead of "ms since last hook event".
+        // See workingSince doc for rationale. Runs AFTER applyIdleGate so a
+        // brief raw-idle inside the gate window doesn't reset the anchor.
+        if (status === 'working') {
+            let since = this.workingSince.get(t.inner)
+            if (since === undefined) {
+                since = Date.now()
+                this.workingSince.set(t.inner, since)
+            }
+            lastActiveMs = Date.now() - since
+        } else {
+            this.workingSince.delete(t.inner)
+        }
+
         return {
             outerTab: t.outer,
             innerTab: t.inner,
@@ -459,11 +491,9 @@ export class TabMonitor implements OnDestroy {
             status,
             lastActiveMs,
             awaitingFirstEvent,
-            // Side-channel reads from HookWatcher. Default to null / 0 when
-            // we couldn't resolve a tabId (no env var captured yet, no hook
-            // event yet, etc.) — sidebar treats both defaults as "render
-            // nothing", matching the placeholderState case.
-            currentTool: tabId ? this.hooks.getCurrentTool(tabId) : null,
+            // Side-channel read from HookWatcher — default to 0 when we
+            // couldn't resolve a tabId (no env var captured yet, no hook
+            // event yet, etc.), matching placeholderState.
             subagentCount: tabId ? this.hooks.getSubagentInFlight(tabId) : 0,
         }
     }
@@ -557,6 +587,9 @@ export class TabMonitor implements OnDestroy {
     private placeholderState (
         t: { outer: BaseTabComponent; inner: BaseTabComponent },
     ): TabState {
+        // Session died (no_ai) — drop any working-anchor so a future revival
+        // starts a fresh turn timer instead of continuing the dead one.
+        this.workingSince.delete(t.inner)
         return {
             outerTab: t.outer,
             innerTab: t.inner,
@@ -567,7 +600,6 @@ export class TabMonitor implements OnDestroy {
             status: 'no_ai',
             lastActiveMs: null,
             awaitingFirstEvent: false,
-            currentTool: null,
             subagentCount: 0,
         }
     }

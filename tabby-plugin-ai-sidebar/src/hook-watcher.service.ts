@@ -5,6 +5,7 @@ import * as fsSync from 'fs'
 import * as path from 'path'
 
 import type { AiTool, TabStatus } from './tab-monitor'
+import { HookAdapter } from './hook-adapters/adapter'
 import { HookAdapterRegistry } from './hook-adapters/registry'
 import { HookRuntimeService } from './hook-runtime.service'
 
@@ -41,7 +42,7 @@ export interface HookSnapshot {
 /**
  * UUID v4 shape — matches what crypto.randomUUID() produces (and what
  * tabby-local/session.ts injects as GLANCETERM_TAB_ID). Used to reject
- * `unknown.json` and other malformed names from contaminating the map
+ * `unknown.log` and other malformed names from contaminating the map
  * (issue M3 in the v0.2 review).
  */
 const TAB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -55,17 +56,31 @@ const RESCAN_MS = 30_000
 /**
  * Watches `~/.glanceterm/hooks/` and exposes the latest status per tab id.
  *
+ * IPC format: handler scripts APPEND one NDJSON record per event to a per-tab
+ * log file `<TAB_ID>.log`. The watcher tails each log by remembering the byte
+ * offset of the last fully-processed line. This replaces the earlier
+ * single-file overwrite scheme, which lost any event in a sub-fs.watch-window
+ * burst (PreToolUse → PermissionRequest for permission-gated tools, or
+ * PreToolUse → PostToolUse for sub-100ms tools like Read). With append-only
+ * + offset tracking, every fired event is observed exactly once.
+ *
  * Architecture notes:
  *   - fs.watch is best-effort: drops events on NFS/SMB, sometimes on Linux
  *     for `mv`-into-dir. We compensate with a periodic 30s rescan AND with
  *     a "start-watch-before-cold-load" ordering — events that arrive during
- *     the brief cold-load window get buffered by Node and overwritten by
- *     newer ts-stamped entries (ts-aware merge in `ingest`).
- *   - Concurrent reads of the same file can complete out of order. Every
- *     ingest checks the parsed `ts` against the existing snapshot's `ts`
- *     and refuses stale updates (issue M1).
- *   - Tab IDs that aren't UUIDs (e.g. `unknown.json` from a pre-injection
+ *     the brief cold-load window get coalesced with the cold-load result by
+ *     offset-tracking (anything beyond `tailOffset` is processed exactly once
+ *     regardless of which path saw the bytes first).
+ *   - File size shrinking below the recorded offset means the log was
+ *     truncated externally (rotation, manual cleanup) — reset offset to 0
+ *     and re-process from the new beginning. This is the ONLY safe response
+ *     to truncation that doesn't silently drop newly-appended events.
+ *   - Tab IDs that aren't UUIDs (e.g. `unknown.log` from a pre-injection
  *     Claude session) are dropped at ingest time.
+ *   - Stale lines from prior process lifetimes (eventAt < startupTs) update
+ *     the displayed snapshot but do NOT mutate the subagent counter. That
+ *     gate's the same as before; the only thing that changed is the on-disk
+ *     format the lines come from.
  */
 @Injectable({ providedIn: 'root' })
 export class HookWatcherService implements OnDestroy {
@@ -88,68 +103,40 @@ export class HookWatcherService implements OnDestroy {
      * count can change without forcing a snapshot replacement that would
      * disturb the idle-stability gate's eventAt arithmetic.
      *
-     * KNOWN LIMITATIONS:
+     * KNOWN LIMITATION:
      *
-     *   1. If a subagent crashes mid-task and Claude never emits SubagentStop
-     *      for it, the counter stays > 0 until SessionStart resets it or
-     *      the tab is closed. Auto-reaper rejected for v0.2 because the user
-     *      can submit new prompts while a backgrounded subagent is running,
-     *      so "main has been idle a while" isn't a clean signal.
+     *   If a subagent crashes mid-task and Claude never emits SubagentStop
+     *   for it, the counter stays > 0 until SessionStart resets it or the
+     *   tab is closed. Auto-reaper rejected because the user can submit new
+     *   prompts while a backgrounded subagent is running, so "main has been
+     *   idle a while" isn't a clean signal.
      *
-     *   2. Two SubagentStops firing in the same wall-clock second are not
-     *      both decremented. The handler writes one file per tab, last-
-     *      write-wins; the watcher sees at most one of the two payloads.
-     *      Even if it saw both, the dedup `(ts, event)` gate would bail on
-     *      the second. Real bug for users with parallel Tasks finishing
-     *      simultaneously — counter sticks one too high. Root cause is the
-     *      single-file IPC; the proper fix (event-log / per-event files +
-     *      tool_use_id tracking) is a v0.3 IPC redesign.
+     *   (The earlier "two SubagentStops in the same second collapse into
+     *   one decrement" limitation is fixed by the append-only log IPC —
+     *   each event sits at a unique file offset, so both decrement.)
      */
     private readonly subagentInFlight = new Map<string, number>()
 
     /**
-     * Per-tab "what tool is the main agent currently inside" — the tool_name
-     * from the most recent PreToolUse, cleared on PostToolUse / Stop /
-     * SessionEnd. Surfaces in the sidebar as a `working · Bash` suffix on
-     * the status line so the user can see what Claude is actually doing
-     * between status transitions.
+     * Per-tab byte offset of the next unread byte in `<TAB_ID>.log`. Append-only
+     * format means every event sits at a unique offset — once we've processed
+     * bytes [0, tailOffset) of a file, those events are done and never need to
+     * be re-evaluated, no matter how many fs.watch fires / 30s rescans /
+     * cold-load re-entries hit the same file.
      *
-     * Fast tools (Read / Grep / sub-second Bash) will set+clear within a
-     * single render cycle and visibly flicker; that's intentional — the
-     * flicker IS the signal "Claude is firing many quick tools right now".
-     * Slow tools (long Bash, WebFetch, Task) linger long enough to read
-     * easily. No debounce.
+     * This replaces the `(ts, event)`-keyed dedup map the old single-file
+     * scheme used. Offset dedup is strictly stronger: it disambiguates
+     * same-second same-event writes (e.g. two SubagentStops within one
+     * wall-clock second — the v0.2 KNOWN LIMITATION the subagent counter
+     * doc-comment used to call out — by their byte position, so the counter
+     * decrements both as it should).
      *
-     * Independent of HookSnapshot for the same reason as `subagentInFlight`:
-     * we want tool transitions to refresh the UI without rewriting the
-     * snapshot's eventAt, which would disturb the idle-stability gate.
+     * Truncation handling: if a stat shows `size < tailOffset`, the file was
+     * rotated / cleared externally and we MUST reset offset to 0; otherwise
+     * we'd skip everything written after the truncation. Detected per ingest
+     * via a size check before the read.
      */
-    private readonly currentTool = new Map<string, string>()
-
-    /**
-     * Per-tab "last event we've already processed" — `{ts, event}`. Used to
-     * make `ingest()` idempotent across the four ways the same on-disk file
-     * can get read more than once:
-     *   1. The 30s periodic `coldLoad` rescan re-reads every file in the dir.
-     *   2. fs.watch can fire multiple times for the same write under load.
-     *   3. Out-of-order read completion: two reads in flight whose callbacks
-     *      return reversed (older read returns last).
-     *   4. The startup coldLoad and the first fs.watch event for a brand-new
-     *      file racing each other.
-     *
-     * Without this dedup, the subagent counter (which mutates as a side-effect
-     * of ingesting PreToolUse(Task) / SubagentStop) would drift: every rescan
-     * of a tab whose last event was PreToolUse(Task) would bump the counter
-     * again, and a stale SubagentStop read would decrement an active counter
-     * for a still-running subagent. Snapshot writes have a separate ts-merge
-     * guard at the bottom of ingest, but that guard ran AFTER the counter
-     * mutation, leaving the counter exposed.
-     *
-     * Compared via (ts, event_name): same-second writes with DIFFERENT event
-     * names are both processed (e.g. an immediate PreToolUse followed by a
-     * PostToolUse in the same wall-clock second).
-     */
-    private readonly lastProcessedEvent = new Map<string, { ts: number, event: string }>()
+    private readonly tailOffset = new Map<string, number>()
 
     /**
      * Stamp of when this HookWatcher instance was constructed. Used to
@@ -205,13 +192,6 @@ export class HookWatcherService implements OnDestroy {
         return this.subagentInFlight.get(tabId) ?? 0
     }
 
-    /** Sync lookup — name of the tool whose PreToolUse arrived without a
-     *  matching PostToolUse / Stop yet. Sidebar renders it inline after the
-     *  status text. Null when between tool calls. */
-    getCurrentTool (tabId: string): string | null {
-        return this.currentTool.get(tabId) ?? null
-    }
-
     private async start (): Promise<void> {
         await this.runtime.ensureReady()
 
@@ -221,7 +201,7 @@ export class HookWatcherService implements OnDestroy {
         // overwrite older cold-loaded ones; older events lose.
         try {
             this.watcher = fsSync.watch(this.runtime.stateDir, { persistent: false }, (_event, filename) => {
-                if (!filename || !filename.endsWith('.json')) return
+                if (!filename || !filename.endsWith('.log')) return
                 this.scheduleFlush(path.join(this.runtime.stateDir, filename))
             })
         } catch (e: any) {
@@ -244,7 +224,7 @@ export class HookWatcherService implements OnDestroy {
 
         let anyChanged = false
         for (const e of entries) {
-            if (!e.endsWith('.json')) continue
+            if (!e.endsWith('.log')) continue
             const before = this.map.size + (this.lastTsOf(e) ?? 0)
             await this.ingest(path.join(this.runtime.stateDir, e), { skipEmit: true })
             const after = this.map.size + (this.lastTsOf(e) ?? 0)
@@ -254,7 +234,7 @@ export class HookWatcherService implements OnDestroy {
     }
 
     private lastTsOf (filename: string): number | null {
-        const tabId = filename.replace(/\.json$/, '')
+        const tabId = filename.replace(/\.log$/, '')
         return this.map.get(tabId)?.eventAt ?? null
     }
 
@@ -270,7 +250,7 @@ export class HookWatcherService implements OnDestroy {
      * `scheduleEmit()` calls inside the window collapse to one repaint.
      *
      * Use this from EVERY ingest path that wants to surface a state change
-     * (snapshot, counter, currentTool, dedup, …). Calling `this.emit()`
+     * (snapshot, counter, dedup, …). Calling `this.emit()`
      * directly from inside `ingest()` would double-fire on the fs.watch
      * path: ingest's inner emit + scheduleFlush's `.then(() => emit)`
      * trailing emit. For a 30-tool turn that's the difference between 30
@@ -289,153 +269,143 @@ export class HookWatcherService implements OnDestroy {
         }, 60)
     }
 
+    /**
+     * Tail one per-tab log file: read [tailOffset, fileSize), split into
+     * complete NDJSON lines, process each. A trailing partial line (no `\n`
+     * yet) is left untouched — tailOffset advances only past complete lines,
+     * so the next ingest picks the partial line up once its `\n` arrives.
+     *
+     * Truncation: `fileSize < tailOffset` means the log was rotated / cleared
+     * externally; reset offset to 0 and re-process from the new beginning.
+     *
+     * Missing file (ENOENT): the handler tore down the per-tab log on
+     * SessionEnd, or the user cleared `~/.glanceterm/hooks/`. Drop all
+     * per-tab maps so a future tab reusing the same UUID doesn't inherit
+     * stale counters.
+     */
     private async ingest (filePath: string, opts: { skipEmit?: boolean } = {}): Promise<void> {
-        const baseName = path.basename(filePath, '.json')
+        const baseName = path.basename(filePath, '.log')
 
-        let raw: string
+        // Reject malformed/sentinel tab IDs at the file-name layer so we
+        // never even open something like `unknown.log` (issue M3). The
+        // handler short-circuits before writing too — this is defense in
+        // depth for orphaned files / manual creation.
+        if (!TAB_ID_RE.test(baseName)) return
+
+        let stat: fsSync.Stats
         try {
-            raw = await fs.readFile(filePath, 'utf8')
+            stat = await fs.stat(filePath)
         } catch {
-            // File deleted (e.g. on session end the handler might tidy up).
-            // Drop EVERY per-tab map's entry keyed off the file's base name:
-            // snapshot, in-flight counter, dedup tracker. Missing any of
-            // these would leave per-tab state for a tab that no longer
-            // exists, which over many sessions amounts to a slow leak and
-            // (for subagentInFlight) a stale value if a future tab somehow
-            // reuses the same tab_id.
-            const snapshotDropped = this.map.delete(baseName)
-            const counterDropped = this.subagentInFlight.delete(baseName)
-            const toolDropped = this.currentTool.delete(baseName)
-            const dedupDropped = this.lastProcessedEvent.delete(baseName)
-            if ((snapshotDropped || counterDropped || toolDropped || dedupDropped) && !opts.skipEmit) this.scheduleEmit()
+            // File gone — drop every per-tab map keyed off the base name so
+            // we don't leak state across UUID reuse.
+            const dropped = this.dropTabState(baseName)
+            if (dropped && !opts.skipEmit) this.scheduleEmit()
             return
         }
 
-        let parsed: HookStatusFile
+        const recorded = this.tailOffset.get(baseName) ?? 0
+        const readFrom = stat.size < recorded ? 0 : recorded
+        if (stat.size === readFrom) return // nothing new
+
+        let buf: Buffer
         try {
-            parsed = JSON.parse(raw)
+            const fd = await fs.open(filePath, 'r')
+            try {
+                buf = Buffer.alloc(stat.size - readFrom)
+                await fd.read(buf, 0, buf.length, readFrom)
+            } finally {
+                await fd.close()
+            }
         } catch {
-            return // Half-written read; the next event will give us a clean one.
+            return // racy read; next fs.watch fire (or 30s rescan) will retry.
         }
 
-        // Reject malformed/sentinel tab IDs — issue M3. The handler script's
-        // own short-circuit usually prevents these from being written, but
-        // defense in depth catches anything that slipped through (manual
-        // file creation, downgraded handler version, etc.).
-        if (!parsed.tab_id || !TAB_ID_RE.test(parsed.tab_id)) return
+        const text = buf.toString('utf8')
+        const lastNewline = text.lastIndexOf('\n')
+        if (lastNewline < 0) {
+            // No complete line in the new bytes — write is mid-flight. Leave
+            // offset where it was; next ingest will see the full line.
+            return
+        }
+        this.tailOffset.set(baseName, readFrom + lastNewline + 1)
 
-        const adapter = this.registry.forTool(parsed.agent as AiTool)
-        if (!adapter) return
+        let anyChanged = false
+        for (const line of text.slice(0, lastNewline).split('\n')) {
+            if (!line) continue
+            let parsed: HookStatusFile
+            try {
+                parsed = JSON.parse(line)
+            } catch {
+                continue // skip a malformed line; rest of the file is fine
+            }
+            // Cross-check the embedded tab_id matches the file we read from
+            // (a hand-written record claiming a different UUID would otherwise
+            // be attributed to the wrong tab).
+            if (!parsed.tab_id || parsed.tab_id !== baseName || !TAB_ID_RE.test(parsed.tab_id)) continue
+            const adapter = this.registry.forTool(parsed.agent as AiTool)
+            if (!adapter) continue
+            if (this.processEvent(parsed, adapter)) anyChanged = true
+        }
 
-        // (1) Idempotency / out-of-order gate — runs BEFORE any side-effect
-        // (counter mutation or snapshot write). See `lastProcessedEvent`
-        // doc for the four re-read paths this catches. Two bail conditions:
-        //   - last.ts > eventAt        → older event arriving out-of-order;
-        //                                 the newer one already won.
-        //   - last.ts === eventAt
-        //     && last.event === event  → same file content as last read
-        //                                 (rescan, fs.watch storm, …).
-        // Same-ts + different-event proceeds: distinct events sharing a
-        // wall-clock second (Claude ts has 1 s resolution) both deserve
-        // processing.
+        if (anyChanged && !opts.skipEmit) this.scheduleEmit()
+    }
+
+    /** Drop every per-tab map keyed by tab_id. Returns true if any held state. */
+    private dropTabState (tabId: string): boolean {
+        const snapshotDropped = this.map.delete(tabId)
+        const counterDropped = this.subagentInFlight.delete(tabId)
+        const offsetDropped = this.tailOffset.delete(tabId)
+        return snapshotDropped || counterDropped || offsetDropped
+    }
+
+    /**
+     * Process one parsed event line. Returns true if any per-tab state
+     * (snapshot or side-tracker) changed. Side-effect mutations are gated on
+     * `eventAt >= startupTs` so stale lines from prior process lifetimes
+     * (cold-loaded from existing logs) update the displayed snapshot but do
+     * NOT mutate the subagent counter — same rationale as the pre-append-only
+     * design.
+     */
+    private processEvent (parsed: HookStatusFile, adapter: HookAdapter): boolean {
         const eventAt = (parsed.ts || 0) * 1000
-        const last = this.lastProcessedEvent.get(parsed.tab_id)
-        if (last) {
-            if (last.ts > eventAt) return
-            if (last.ts === eventAt && last.event === parsed.event) return
-        }
-        this.lastProcessedEvent.set(parsed.tab_id, { ts: eventAt, event: parsed.event })
+        let changed = false
 
-        // (2a) Subagent in-flight counter — runs BEFORE the status-mapping
-        // bail so SubagentStop (which maps to null) still decrements. Three
-        // transitions matter:
-        //   PreToolUse(tool_name=Task) → +1
-        //   SubagentStop                → -1   (floored at 0)
-        //   SessionStart                → 0    (fresh Claude session)
-        //
-        // Counter mutations are gated on `eventAt >= startupTs`: events from
-        // before this process started (stale tab files cold-loaded at launch)
-        // do NOT touch the counter. Without that gate, a stale file whose
-        // last-write was PreToolUse(Task) would push the counter to 1 for a
-        // tab_id whose matching SubagentStop will never arrive, pinning the
-        // row to working forever.
-        let sideEffectChanged = false
         if (eventAt >= this.startupTs) {
-            if (parsed.event === 'PreToolUse' && parsed.tool_name === 'Task') {
+            // Subagent in-flight counter. Three transitions matter:
+            //   PreToolUse(tool_name=Task|Agent) → +1
+            //   SubagentStop                     → -1   (floored at 0)
+            //   SessionStart / SessionEnd        → 0    (boundary reset)
+            // With append-only logs each PreToolUse sits at a unique file
+            // offset, so two subagent spawns in the same wall-clock second
+            // both increment (one of the v0.2 KNOWN LIMITATIONS).
+            //
+            // tool_name: Claude Code renamed the subagent-spawning tool from
+            // `Task` to `Agent` (the rename landed in the CLI we observe on
+            // this machine — every PreToolUse for a Task tool spawn comes
+            // in as `Agent`). Match both so older installs keep working;
+            // if Anthropic adds a third name we'll need a registry, but two
+            // strings doesn't earn one.
+            if (parsed.event === 'PreToolUse' && (parsed.tool_name === 'Task' || parsed.tool_name === 'Agent')) {
                 this.subagentInFlight.set(parsed.tab_id, (this.subagentInFlight.get(parsed.tab_id) ?? 0) + 1)
-                sideEffectChanged = true
+                changed = true
             } else if (parsed.event === 'SubagentStop') {
                 const cur = this.subagentInFlight.get(parsed.tab_id) ?? 0
                 if (cur > 0) {
                     this.subagentInFlight.set(parsed.tab_id, cur - 1)
-                    sideEffectChanged = true
+                    changed = true
                 }
             } else if (parsed.event === 'SessionStart' || parsed.event === 'SessionEnd') {
-                // Session boundary — any subagent still in our books is
-                // either pre-existing leftover (SessionStart from a fresh
-                // Claude that doesn't know about prior state) or
-                // unambiguously dead (SessionEnd = parent gone, all
-                // subagents necessarily terminated). Both → reset to 0.
-                // Pre-fix, only SessionStart reset, so a crashed Claude
-                // mid-subagent could pin the row to working until the
-                // next session start, which might be never.
                 if ((this.subagentInFlight.get(parsed.tab_id) ?? 0) !== 0) {
                     this.subagentInFlight.set(parsed.tab_id, 0)
-                    sideEffectChanged = true
+                    changed = true
                 }
             }
+
         }
 
-        // (2b) Current-tool tracker — same stale-file rule. PreToolUse sets,
-        // every "tool sequence ended" signal clears. Stop / SessionEnd cover
-        // the case where a tool was interrupted mid-run and PostToolUse
-        // never fired (Claude crash, network drop). Cleared on SessionStart
-        // too so a fresh Claude doesn't inherit a stale tool name.
-        //
-        // INTENTIONALLY does NOT clear on PermissionRequest / Notification.
-        // When the user sits on a "Bash(rm *) y/n?" prompt, the row reading
-        // "needs you · Bash" tells them WHICH tool is blocked — actively
-        // useful, not stale. The clear happens naturally on whichever event
-        // resolves the prompt (PostToolUse if approved, Stop if denied).
-        //
-        // Defensive note: PreToolUse with empty tool_name (shouldn't happen
-        // — our handlers always populate it on Pre/PostToolUse) is a no-op
-        // rather than a clear. Treating it as "clear" would risk wiping a
-        // legitimate currentTool whenever a malformed payload races through.
-        // The next real PostToolUse / Stop / SessionEnd will clear it
-        // anyway.
-        if (eventAt >= this.startupTs) {
-            if (parsed.event === 'PreToolUse' && parsed.tool_name) {
-                if (this.currentTool.get(parsed.tab_id) !== parsed.tool_name) {
-                    this.currentTool.set(parsed.tab_id, parsed.tool_name)
-                    sideEffectChanged = true
-                }
-            } else if (parsed.event === 'PostToolUse'
-                    || parsed.event === 'Stop'
-                    || parsed.event === 'SessionStart'
-                    || parsed.event === 'SessionEnd') {
-                if (this.currentTool.has(parsed.tab_id)) {
-                    this.currentTool.delete(parsed.tab_id)
-                    sideEffectChanged = true
-                }
-            }
-        }
-
-        // (3) Status mapping.
         const status = adapter.mapEventToStatus(parsed.event, parsed.matcher)
-        if (!status) {
-            // Adapter says this event doesn't change displayed status (e.g.
-            // SubagentStop, PreToolUse, PostToolUse, PreCompact). Route
-            // any side-tracker changes through the debounced emit so the
-            // tab-monitor override and sidebar tool indicator re-evaluate
-            // — without flooding it with a tick per Pre/PostToolUse fire.
-            if (sideEffectChanged && !opts.skipEmit) this.scheduleEmit()
-            return
-        }
+        if (!status) return changed
 
-        // (4) Snapshot write. The dedup gate at (1) already filters
-        // out-of-order ts and exact re-reads, so the old snapshot-level
-        // `existing.eventAt > eventAt` ts-merge guard is now redundant.
         this.map.set(parsed.tab_id, {
             tabId: parsed.tab_id,
             tool: adapter.id,
@@ -444,6 +414,7 @@ export class HookWatcherService implements OnDestroy {
             sessionId: parsed.session_id || null,
             cwd: parsed.cwd || null,
         })
+        return true
     }
 
     private emit (): void {

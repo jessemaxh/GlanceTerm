@@ -49,8 +49,8 @@ import { HookAdapter, HookEventEntry, InstallReport } from './adapter'
  * `PreToolUse` / `PostToolUse` map to `working`. Two motivations:
  *
  *   - Counter side-channel: HookWatcher uses PreToolUse with
- *     `tool_name: "Task"` to increment the subagent-in-flight tracker, and
- *     PostToolUse to clear the per-tab currentTool string.
+ *     `tool_name: "Task"` or `"Agent"` (the same tool, renamed by Anthropic
+ *     mid-flight) to increment the subagent-in-flight tracker.
  *   - **Unsticking needs_permission**: when the user approves an inline
  *     prompt, Claude does not emit a discrete "permission resolved" event.
  *     The next signal is the tool actually running — i.e. PostToolUse —
@@ -94,11 +94,10 @@ const EVENTS: HookEventEntry[] = [
     { event: 'SessionStart',      async: true },
     { event: 'UserPromptSubmit',  async: true },
     { event: 'PreToolUse',        async: true },
-    // Counter-side signal — HookWatcher uses PostToolUse to clear the
-    // per-tab currentTool, so the sidebar can render "working · Bash"
-    // while a tool is running and drop the suffix between tool calls.
-    // Doubles the per-turn hook traffic vs not subscribing, but each
-    // invocation is sub-100 ms async so it doesn't block Claude.
+    // PostToolUse is what unsticks `needs_permission` after the user
+    // approves an inline prompt — see the head comment for the full
+    // rationale. Doubles per-turn hook traffic vs not subscribing, but
+    // each invocation is sub-100 ms async so it doesn't block Claude.
     { event: 'PostToolUse',       async: true },
     { event: 'Stop',              async: true },
     // Subagent lifecycle. When the main agent invokes the `Task` tool to
@@ -110,7 +109,19 @@ const EVENTS: HookEventEntry[] = [
     { event: 'SubagentStop',      async: true },
     // Canonical event for the inline `Bash(rm *)`-style permission dialog.
     // Fires reliably regardless of terminal focus (unlike Notification).
-    { event: 'PermissionRequest', async: true },
+    //
+    // Registered **synchronously** (async:false) so Claude reads our hook
+    // handler's stdout — that's how the P0 auto-approve feature returns a
+    // `decision.behavior: "allow"` JSON to bypass the prompt when the user
+    // has flipped the toggle on. Sync hook entries block Claude's main loop
+    // until the handler exits, but PermissionRequest only fires when Claude
+    // is *about* to ask the user (i.e. already going to block), so this
+    // adds zero latency to normal tool calls. The handler is a sub-100 ms
+    // shell/PS script that writes the audit log + decision JSON and exits.
+    //
+    // The earlier async:true registration is detected and "upgraded" in
+    // installHooks() — see the comment at the upgrade branch below.
+    { event: 'PermissionRequest', async: false },
     // Backstop / MCP elicitation coverage — matcher narrows to the two
     // notification types that mean "user must decide". Documented as
     // observability-only, but fires in some cases PermissionRequest
@@ -173,7 +184,36 @@ export class ClaudeHookAdapter extends HookAdapter {
             let changed = false
             for (const ev of EVENTS) {
                 const list = hooks[ev.event] ?? []
-                if (this.findOurEntry(list)) continue   // already wired
+                const ours = this.findAllOurEntries(list)
+                if (ours.length > 0) {
+                    // Upgrade path: bring EVERY existing GlanceTerm entry's
+                    // `async` flag in sync with what EVENTS now declares.
+                    // Added when P0 auto-approve flipped PermissionRequest
+                    // from async:true → async:false — a user who upgraded
+                    // GlanceTerm with the old entry still in
+                    // ~/.claude/settings.json would have a `async:true` entry
+                    // whose stdout Claude ignores, so the auto-approve
+                    // toggle would silently no-op until manual cleanup.
+                    //
+                    // We iterate ALL matches (not just the first) for the
+                    // edge case of a user with duplicated entries — copy-
+                    // pasted between machines, or remnants of an earlier
+                    // bug. Leaving one un-upgraded would still defeat
+                    // auto-approve depending on which entry Claude picks
+                    // first when reading stdout.
+                    const shouldBeAsync = !!ev.async
+                    for (const existing of ours) {
+                        const isAsync = existing.async === true
+                        if (shouldBeAsync && !isAsync) {
+                            existing.async = true
+                            changed = true
+                        } else if (!shouldBeAsync && isAsync) {
+                            delete existing.async
+                            changed = true
+                        }
+                    }
+                    continue
+                }
 
                 const entry: ClaudeHookEntry = {
                     type: 'command',
@@ -305,6 +345,23 @@ export class ClaudeHookAdapter extends HookAdapter {
             if (found) return found
         }
         return undefined
+    }
+
+    /**
+     * Collect EVERY GlanceTerm-owned entry across every matcher block. Used
+     * by the install upgrade path so a user with hand-duplicated entries gets
+     * all of them brought to current spec, not just the first one Claude
+     * happens to read. Returns mutable references — callers mutate in place
+     * and the surrounding install flow's writeSettings() persists.
+     */
+    private findAllOurEntries (matchers: ClaudeHookMatcher[]): ClaudeHookEntry[] {
+        const out: ClaudeHookEntry[] = []
+        for (const m of matchers) {
+            for (const h of m.hooks ?? []) {
+                if (this.isOurEntry(h)) out.push(h)
+            }
+        }
+        return out
     }
 
     /** Read settings, returning a tagged outcome so callers can react. */

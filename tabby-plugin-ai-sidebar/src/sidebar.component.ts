@@ -1,13 +1,15 @@
-import { Component, NgZone, OnDestroy, OnInit } from '@angular/core'
+import { Component, ElementRef, HostListener, NgZone, OnDestroy, OnInit, ViewChild } from '@angular/core'
 import { Subscription } from 'rxjs'
 import * as os from 'os'
 
-import { AppService, BaseTabComponent, MenuItemOptions, PlatformService } from 'tabby-core'
+import { AppService, BaseTabComponent, ConfigService, MenuItemOptions, NotificationsService, PlatformService } from 'tabby-core'
 
 import { TabMonitor, TabState } from './tab-monitor'
 import { UnreadService } from './unread.service'
 import { ScreenshotService } from './screenshot/screenshot.service'
 import { ScreenshotPasteService } from './screenshot/paste.service'
+import { SplitShellService } from './split-shell.service'
+import { AutoApproveService } from './auto-approve.service'
 
 type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
 
@@ -74,6 +76,7 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
                      class="row"
                      [attr.data-status]="effStatus(s)"
                      [class.active]="isActive(s)"
+                     [class.subordinate]="isSubordinate(s)"
                      [attr.aria-label]="ariaLabel(s)"
                      [attr.title]="s.cwd || s.title"
                      role="button"
@@ -91,7 +94,6 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
                         <div class="line2">
                             <span *ngIf="s.aiTool" class="tag" [attr.data-tool]="s.aiTool">{{ toolTag(s.aiTool) }}</span>
                             <span class="status" [attr.data-status]="effStatus(s)">{{ statusLabel(s) }}</span>
-                            <span *ngIf="s.currentTool" class="micro">{{ s.currentTool }}</span>
                             <span *ngIf="s.subagentCount > 0" class="micro accent">{{ s.subagentCount }} {{ s.subagentCount === 1 ? 'agent' : 'agents' }}</span>
                         </div>
                         <div *ngIf="s.cwd && effStatus(s) !== 'needs_permission'" class="line3">
@@ -111,28 +113,114 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
                 <span *ngIf="countAttn > 0" class="stat attn-stat"><i></i>{{ countAttn }}<span class="lbl"> need you</span></span>
             </div>
 
-            <!-- "AI toolbar" — only visible when the focused tab is an AI agent.
-                 First action is Screenshot; future AI-scoped actions slot in here.
-                 Hidden for plain shells (and when no tab is active) to keep the
-                 sidebar quiet when there's nothing AI-specific to do. -->
-            <div *ngIf="activeIsAi" class="sb-actions" role="toolbar" aria-label="AI tab actions">
+            <!-- "AI toolbar" — always rendered. Per-tab AI actions on the left
+                 enable/disable based on focus state rather than mount/unmount,
+                 because hiding the split button while a GlanceTerm-owned split
+                 is still open leaves the user with no way to close it (agent
+                 exited, or focus moved to the shell side of the split → no
+                 focused AI agent → button gone, split orphaned). Right cluster
+                 is global settings (sound toggle). -->
+            <div class="sb-actions" role="toolbar" aria-label="AI tab actions">
+                <div class="split-action" #screenshotSplit>
+                    <button type="button"
+                            class="action-btn split-main"
+                            [class.busy]="capturing"
+                            [class.muted]="!activeIsAi"
+                            [disabled]="capturing"
+                            (click)="onScreenshot()"
+                            [title]="screenshotTitle()"
+                            aria-label="Take a screenshot and paste it into the focused AI agent">
+                        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                            <path d="M5.2 3.5 L6.3 2.2 L9.7 2.2 L10.8 3.5 L13.2 3.5
+                                     A1.5 1.5 0 0 1 14.7 5 V11.8
+                                     A1.5 1.5 0 0 1 13.2 13.3 H2.8
+                                     A1.5 1.5 0 0 1 1.3 11.8 V5
+                                     A1.5 1.5 0 0 1 2.8 3.5 Z"
+                                  stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
+                            <circle cx="8" cy="8.4" r="2.6" stroke="currentColor" stroke-width="1.2" fill="none"/>
+                        </svg>
+                    </button>
+                    <button type="button"
+                            class="action-btn split-caret"
+                            [class.open]="screenshotMenuOpen"
+                            [class.muted]="!activeIsAi"
+                            [disabled]="capturing"
+                            (click)="toggleScreenshotMenu($event)"
+                            title="Screenshot options"
+                            aria-label="Open screenshot options menu"
+                            [attr.aria-expanded]="screenshotMenuOpen"
+                            aria-haspopup="menu">
+                        <svg width="9" height="9" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                            <path d="M3 6 L8 11 L13 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
+                    <div *ngIf="screenshotMenuOpen" class="action-menu" role="menu">
+                        <button type="button"
+                                class="action-menu-item"
+                                role="menuitemcheckbox"
+                                [attr.aria-checked]="screenshotHideWindow"
+                                (click)="toggleScreenshotHideWindow()">
+                            <svg class="check" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                                <path *ngIf="screenshotHideWindow" d="M3 8.5 L6.5 12 L13 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                            </svg>
+                            <span class="lbl">Hide GlanceTerm window</span>
+                        </button>
+                    </div>
+                </div>
                 <button type="button"
                         class="action-btn"
-                        [class.busy]="capturing"
-                        [disabled]="capturing"
-                        (click)="onScreenshot()"
-                        [title]="screenshotTitle()"
-                        aria-label="Take a screenshot and paste it into the focused AI agent">
-                    <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                        <path d="M5.2 3.5 L6.3 2.2 L9.7 2.2 L10.8 3.5 L13.2 3.5
-                                 A1.5 1.5 0 0 1 14.7 5 V11.8
-                                 A1.5 1.5 0 0 1 13.2 13.3 H2.8
-                                 A1.5 1.5 0 0 1 1.3 11.8 V5
-                                 A1.5 1.5 0 0 1 2.8 3.5 Z"
-                              stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
-                        <circle cx="8" cy="8.4" r="2.6" stroke="currentColor" stroke-width="1.2" fill="none"/>
+                        [class.active]="isSplitOpenInActiveTab()"
+                        (click)="onSplitShell()"
+                        [title]="splitTitle()"
+                        [attr.aria-label]="splitAriaLabel()">
+                    <svg width="17" height="17" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                        <rect x="1.5" y="2.5" width="6" height="11" rx="1" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.7"/>
+                        <rect x="8.5" y="2.5" width="6" height="11" rx="1"/>
                     </svg>
-                    <span class="lbl">{{ capturing ? 'Capturing…' : 'Screenshot' }}</span>
+                </button>
+                <button type="button"
+                        class="action-btn settings-btn"
+                        [class.muted]="!soundOnReady"
+                        (click)="toggleSoundOnReady()"
+                        [title]="soundOnReady ? 'Mute the ready chime (working → done)' : 'Unmute the ready chime (working → done)'"
+                        [attr.aria-label]="soundOnReady ? 'Mute the ready chime' : 'Unmute the ready chime'"
+                        [attr.aria-pressed]="!soundOnReady">
+                    <svg *ngIf="soundOnReady" width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M2.5 6 H5 L9 3 V13 L5 10 H2.5 Z"
+                              fill="currentColor" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/>
+                        <path d="M11 5.5 Q12.7 8 11 10.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" fill="none"/>
+                        <path d="M12.8 4 Q15.6 8 12.8 12" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" fill="none" opacity="0.75"/>
+                    </svg>
+                    <svg *ngIf="!soundOnReady" width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <path d="M2.5 6 H5 L9 3 V13 L5 10 H2.5 Z"
+                              fill="currentColor" stroke="currentColor" stroke-width="1.1" stroke-linejoin="round"/>
+                        <line x1="10.6" y1="5.6" x2="15.2" y2="10.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+                        <line x1="15.2" y1="5.6" x2="10.6" y2="10.4" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+                    </svg>
+                </button>
+                <!-- Auto-approve permission prompts toggle. The .active state
+                     paints the existing orange accent (same hue as
+                     needs_permission rows / 'danger') to signal "this is on,
+                     watch out". Off state uses the same .muted opacity as the
+                     mute-chime button so the whole toolbar reads uniformly. -->
+                <button type="button"
+                        class="action-btn settings-btn"
+                        [class.muted]="!autoApprovePermissions"
+                        [class.active]="autoApprovePermissions"
+                        (click)="toggleAutoApprove()"
+                        [title]="autoApprovePermissions ? 'Auto-approve is ON — Claude can run any command without asking. Click to disable.' : 'Auto-approve permission prompts (OFF). Click to enable; needs confirmation.'"
+                        [attr.aria-label]="autoApprovePermissions ? 'Disable auto-approve permission prompts' : 'Enable auto-approve permission prompts'"
+                        [attr.aria-pressed]="autoApprovePermissions">
+                    <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <!-- Shield outline; filled translucent when on, hollow when off. -->
+                        <path d="M8 1.5 L13 3.2 V8 C13 11 10.7 13.3 8 14.5 C5.3 13.3 3 11 3 8 V3.2 Z"
+                              stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"
+                              [attr.fill]="autoApprovePermissions ? 'currentColor' : 'none'"
+                              [attr.fill-opacity]="autoApprovePermissions ? 0.18 : 0"/>
+                        <!-- Lightning bolt inside the shield = "auto-pass". -->
+                        <path d="M8.7 5 L6.2 8.7 H7.9 L7.3 11.2 L9.9 7.3 H8.2 Z"
+                              fill="currentColor" stroke="currentColor" stroke-width="0.4" stroke-linejoin="round"/>
+                    </svg>
                 </button>
             </div>
         </div>
@@ -364,6 +452,51 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
         }
         .row.active .primary { color: var(--gt-text); font-weight: 600; }
 
+        /* ---- subordinate row (extra leaf inside a SplitTabComponent) ----
+           A subordinate leaf — a non-primary pane in a split tab, whether a
+           plain shell or another AI — renders with a COMPACT variant of the
+           primary row's content so it visibly reads as an attached child:
+           the index number is suppressed (it would just repeat the
+           primary's), padding is tighter, and the dot + text are smaller.
+           The whole row is also indented so the dashed bracket has its own
+           gutter on the left instead of overlapping the num/dot columns.
+           visibleStates always emits subordinates directly below their
+           primary, so the bracket points at a real parent. */
+        .row.subordinate {
+            padding: 7px 14px 7px 26px;
+        }
+        /* The outer tab's index is already shown on the primary one row up;
+           repeating it on the subordinate is noise. visibility:hidden keeps
+           the grid column reserved so the dot + body stay indented further
+           right than the primary's. */
+        .row.subordinate .num { visibility: hidden; }
+        .row.subordinate .dot { width: 10px; height: 10px; }
+        .row.subordinate .primary { font-size: 14px; }
+        .row.subordinate .line2 { margin-top: 3px; }
+        .row.subordinate .status { font-size: 12.5px; }
+        .row.subordinate .line3 { margin-top: 2px; }
+        .row.subordinate .path-sub { font-size: 12px; }
+        .row.subordinate .age { font-size: 12px; }
+        .row.subordinate::after {
+            content: "";
+            position: absolute;
+            /* Vertical leg starts well into the row above (which has its own
+               13px top padding + ~32px content height); ending around the
+               compact subordinate's mid-height makes the bracket read as
+               "dropped from the primary". Alpha 0.38 survives the
+               .row[data-status="no_ai"] opacity 0.52 compounding
+               (→ effective ~0.20), still visible for the most common case
+               (shell pane under AI primary). */
+            left: 8px;
+            top: -24px;
+            width: 14px;
+            height: 44px;
+            border-left: 1px dashed rgba(255, 255, 255, 0.38);
+            border-bottom: 1px dashed rgba(255, 255, 255, 0.38);
+            border-bottom-left-radius: 4px;
+            pointer-events: none;
+        }
+
         /* ---- status rail dot ---- */
         .rail {
             display: grid;
@@ -486,12 +619,10 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
         .status[data-status="needs_permission"] { color: var(--gt-st-perm); font-weight: 600; }
         .status[data-status="done"]             { color: var(--gt-st-done); font-weight: 600; }
 
-        /* Inline secondary info on line2 — currentTool ("· Bash") and
-           subagent count ("· 2 agents"). Each pill gets a leading bullet
-           via ::before so the template doesn't carry literal separators.
-           .accent variant: subagent count uses the brand honey so the
-           backgrounded-work indicator pops vs the dim tool name. Both
-           pills shrink/clip rather than push status off-row on narrow
+        /* Inline subagent-count pill on line2 ("· 2 agents"). Leading bullet
+           via ::before so the template doesn't carry literal separators. The
+           .accent variant uses brand honey so the backgrounded-work indicator
+           pops. Shrinks/clips rather than pushing status off-row on narrow
            sidebars. */
         .micro {
             font-family: var(--gt-mono);
@@ -610,24 +741,40 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
            start). */
         .sb-actions {
             display: flex;
+            align-items: center;
             gap: 9px;
             padding: 10px 14px 14px;
             border-top: 1px solid var(--gt-border);
         }
         .action-btn {
-            flex: 1 1 auto;
+            /* Icon-only feature buttons. Fixed compact square so the row
+               packs left-to-right as more buttons get added later — not a
+               stretching grid that resizes every existing button.
+               box-sizing: border-box so the 1px border is INSIDE the 32px
+               height — without it the standalone .action-btn ended up 34px
+               tall while the split-action wrapper rendered at 32px, making
+               the screenshot group look slightly taller than its neighbours.
+               line-height: 1 + vertical-align: middle defend against the
+               browser sneaking in a font/baseline-driven gap at the bottom
+               of inline-level flex containers (which was making the camera
+               group still read as ~1px taller than its neighbours). */
+            box-sizing: border-box;
+            flex: 0 0 auto;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            gap: 8px;
-            padding: 10px 14px;
-            border-radius: 9px;
+            width: 36px;
+            height: 32px;
+            min-height: 32px;
+            max-height: 32px;
+            padding: 0;
+            margin: 0;
+            line-height: 1;
+            vertical-align: middle;
+            border-radius: 8px;
             background: var(--gt-surface-2);
             border: 1px solid var(--gt-border);
             color: var(--gt-text-dim);
-            font: inherit;
-            font-size: 14px;
-            font-weight: 500;
             cursor: pointer;
             transition: background-color 0.13s ease, color 0.13s ease,
                         border-color 0.13s ease, transform 0.06s ease;
@@ -643,7 +790,124 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             cursor: progress;
         }
         .action-btn.busy { color: var(--gt-accent); }
+        /* "Available but not useful right now" — visually dim like :disabled,
+           but the button stays clickable so onScreenshot() can fire a toast
+           explaining why nothing happened. Cursor stays default (not progress)
+           so the user can tell this from an in-flight capture. */
+        .action-btn.muted:not(:disabled) {
+            opacity: 0.55;
+        }
+        .action-btn.muted:not(:disabled):hover {
+            opacity: 1;
+        }
+        .action-btn.active {
+            background: var(--gt-accent-soft);
+            border-color: rgba(255, 170, 85, 0.55);
+            color: var(--gt-accent);
+        }
         .action-btn svg { flex: none; }
+
+        /* Split-button group: the main action sits flush against a narrow
+           caret that opens a popover menu. We keep the visual footprint close
+           to a normal action-btn by making the caret slim (14px wide) and
+           collapsing the shared border between the two halves.
+           Explicit display:flex (NOT inline-flex) + explicit 32px height
+           is the belt-and-braces fix for "screenshot group reads a hair
+           taller than its neighbours": inline-flex containers sit on the
+           text baseline of the parent flex row, which on some font/zoom
+           combos adds a sub-pixel of descender room below the children.
+           Block-level flex sidesteps it. */
+        .split-action {
+            position: relative;
+            display: flex;
+            align-items: center;
+            height: 32px;
+            box-sizing: border-box;
+            flex: 0 0 auto;
+            line-height: 1;
+            vertical-align: middle;
+        }
+        .split-action .action-btn.split-main {
+            border-top-right-radius: 0;
+            border-bottom-right-radius: 0;
+            border-right: none;
+        }
+        .split-action .action-btn.split-caret {
+            width: 14px;
+            padding: 0;
+            border-top-left-radius: 0;
+            border-bottom-left-radius: 0;
+            border-left: 1px solid var(--gt-border);
+            color: var(--gt-text-faint);
+        }
+        .split-action .action-btn.split-caret:hover {
+            color: var(--gt-accent);
+        }
+        .split-action .action-btn.split-caret.open {
+            background: var(--gt-accent-soft);
+            border-color: rgba(255, 170, 85, 0.55);
+            color: var(--gt-accent);
+        }
+
+        /* Popover menu — anchored to the split-action group, opens upward so
+           it doesn't clip below the sidebar footer. */
+        .action-menu {
+            position: absolute;
+            bottom: calc(100% + 6px);
+            left: 0;
+            min-width: 220px;
+            padding: 5px;
+            background: var(--gt-surface-1);
+            border: 1px solid var(--gt-border);
+            border-radius: 8px;
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+            z-index: 50;
+        }
+        .action-menu-item {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            width: 100%;
+            padding: 7px 9px;
+            background: transparent;
+            border: none;
+            border-radius: 5px;
+            color: var(--gt-text);
+            font: inherit;
+            font-size: 13px;
+            text-align: left;
+            cursor: pointer;
+        }
+        .action-menu-item:hover {
+            background: var(--gt-surface-3);
+        }
+        .action-menu-item .check {
+            flex: none;
+            color: var(--gt-accent);
+        }
+        .action-menu-item .lbl {
+            flex: 1;
+            white-space: nowrap;
+        }
+
+        /* Settings cluster lives at the right end of the action row — a quiet
+           separator margin distinguishes it from the per-tab AI actions on
+           the left, and it's always visible regardless of which tab is focused.
+           margin-left:auto only on the FIRST settings-btn so the cluster is
+           pushed right as a group; subsequent settings-btns sit flush next to
+           it (otherwise each one pushes itself, spreading them across the row). */
+        .action-btn.settings-btn { margin-left: auto; }
+        .action-btn.settings-btn + .action-btn.settings-btn { margin-left: 0; }
+        /* Muted speaker reads as "off": dim icon, no accent. Still hover-active
+           so the user has feedback when re-enabling. */
+        .action-btn.settings-btn.muted {
+            color: var(--gt-text-faint);
+            opacity: 0.8;
+        }
+        .action-btn.settings-btn.muted:hover {
+            opacity: 1;
+            color: var(--gt-accent);
+        }
 
         @media (prefers-reduced-motion: reduce) {
             .dot[data-status="working"],
@@ -655,9 +919,11 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     states: TabState[] = []
     /**
      * True when the focused inner tab is one of our recognised AI agents
-     * (`aiTool != null` AND `status != 'no_ai'`). Drives `*ngIf` on the
-     * "AI toolbar" row at the bottom of the sidebar so it only surfaces
-     * actions (Screenshot, …) when there's an AI agent to act on.
+     * (`aiTool != null` AND `status != 'no_ai'`). Gates the *enabled* state
+     * of the per-tab AI toolbar buttons (screenshot, open-split). The
+     * buttons are always rendered — disabling rather than unmounting keeps
+     * the close-split action reachable after an agent exits or focus moves
+     * to the shell side of the split.
      */
     activeIsAi = false
     filterMode: FilterId = 'all'
@@ -674,8 +940,12 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     private sub?: Subscription
     private activeTabSub?: Subscription
     private unreadSub?: Subscription
+    private tabOpenedSub?: Subscription
+    private splitTabSubs = new Map<BaseTabComponent, Subscription[]>()
     private home = os.homedir()
     capturing = false
+    screenshotMenuOpen = false
+    @ViewChild('screenshotSplit', { static: false }) private screenshotSplitEl?: ElementRef<HTMLElement>
 
     /**
      * Sort-position pin for the just-clicked row. When you click a `done` row,
@@ -736,8 +1006,129 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         private unread: UnreadService,
         private screenshot: ScreenshotService,
         private screenshotPaste: ScreenshotPasteService,
+        private splitShell: SplitShellService,
+        private config: ConfigService,
+        private notifications: NotificationsService,
         private zone: NgZone,
+        private autoApprove: AutoApproveService,
     ) {}
+
+    /**
+     * Read-through to the persisted setting. The `?.` reaches all the way
+     * through `store` itself — ConfigService loads `store` asynchronously
+     * (config.service.ts:226) and component getters run during early CD
+     * passes before that resolves. Default true matches the default declared
+     * in AiSidebarConfigProvider, so the speaker icon starts in the "on"
+     * state during the load window.
+     */
+    get soundOnReady (): boolean {
+        return this.config.store?.ai?.soundOnReady !== false
+    }
+
+    /**
+     * Flip the chime setting and persist. AttentionNotifierService reads
+     * `config.store.ai.soundOnReady` per-chime, so the new value takes
+     * effect on the very next working → done transition with no restart.
+     * `ai` is a structural default in AiSidebarConfigProvider, so ConfigProxy
+     * guarantees `store.ai` exists once `store` itself is loaded — no need
+     * to seed it.
+     */
+    toggleSoundOnReady (): void {
+        this.config.store.ai.soundOnReady = !this.soundOnReady
+        void this.config.save()
+    }
+
+    /**
+     * Read-through to the persisted auto-approve setting. Default false —
+     * matches AiSidebarConfigProvider — so the shield icon starts in the
+     * "off" state during the config-load window.
+     */
+    get autoApprovePermissions (): boolean {
+        return this.autoApprove.enabled
+    }
+
+    /**
+     * Flip the auto-approve switch. Enabling goes through
+     * AutoApproveService.enable() which pops a confirm dialog first — we
+     * never want a stray click to grant the AI unconditional run rights.
+     * Disabling is one click, no dialog: backing off should be frictionless.
+     */
+    async toggleAutoApprove (): Promise<void> {
+        if (this.autoApprovePermissions) {
+            await this.autoApprove.disable()
+        } else {
+            await this.autoApprove.enable()
+        }
+    }
+
+    /**
+     * Read-through to the persisted setting. Default `true` matches
+     * AiSidebarConfigProvider — when the store hasn't loaded yet we still
+     * read as "hide enabled" so the menu's checkmark matches the actual
+     * behavior the ScreenshotService will apply on its own first-read.
+     */
+    get screenshotHideWindow (): boolean {
+        return this.config.store?.ai?.screenshotHideWindow !== false
+    }
+
+    toggleScreenshotHideWindow (): void {
+        this.config.store.ai.screenshotHideWindow = !this.screenshotHideWindow
+        void this.config.save()
+        // Close the menu after the choice — single-item menu, no reason to
+        // linger and force a second click.
+        this.screenshotMenuOpen = false
+    }
+
+    toggleScreenshotMenu (ev: MouseEvent): void {
+        // The document:click listener uses contains() to keep the menu open
+        // when the click is inside the split-action group. We still call
+        // stopPropagation here as belt-and-braces against future ancestors
+        // (e.g. a row-click handler on `.sb-actions`) intercepting the event.
+        ev.stopPropagation()
+        this.screenshotMenuOpen = !this.screenshotMenuOpen
+    }
+
+    /**
+     * Close the popover when the user clicks anywhere outside the
+     * split-action group. We let clicks INSIDE the group through (the caret
+     * toggle and the menu items handle their own state) — contains() covers
+     * both the buttons and the menu, which is rendered as a child of the
+     * group.
+     */
+    @HostListener('document:click', ['$event'])
+    onDocumentClick (ev: MouseEvent): void {
+        if (!this.screenshotMenuOpen) return
+        const host = this.screenshotSplitEl?.nativeElement
+        if (host && ev.target instanceof Node && host.contains(ev.target)) return
+        this.zone.run(() => { this.screenshotMenuOpen = false })
+    }
+
+    @HostListener('document:keydown.escape')
+    onEscape (): void {
+        if (this.screenshotMenuOpen) {
+            this.zone.run(() => { this.screenshotMenuOpen = false })
+        }
+    }
+
+    async onSplitShell (): Promise<void> {
+        await this.splitShell.toggleShellInCurrentTab('r')
+        // tabsService.create / addTab dispatch through Tabby internals that
+        // can resolve outside the Angular zone, so the `[class.active]` /
+        // `[disabled]` bindings on this button would otherwise stay stale
+        // until the next tab-monitor poll (~1.5 s). Re-enter the zone to
+        // flush a CD pass now.
+        this.zone.run(() => { /* trigger CD */ })
+    }
+
+    /**
+     * Drives the button's open/close icon state. Called per change-detection
+     * cycle (no OnPush in this component); the underlying resolution scans
+     * `activeTab.getAllTabs()` for our marker, which is O(leaves) — fine at
+     * the typical 1–4 panes per tab.
+     */
+    isSplitOpenInActiveTab (): boolean {
+        return this.splitShell.isOpenIn(this.app.activeTab)
+    }
 
     /**
      * Capture flow: open the WeChat-style overlay, then route the cropped PNG
@@ -747,6 +1138,17 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      */
     async onScreenshot (): Promise<void> {
         if (this.capturing) return
+        // Non-AI tab: the paste step has no target. Tell the user instead of
+        // silently dropping the click — disabling the button leaves users
+        // wondering whether it's broken.
+        if (!this.activeIsAi) {
+            this.notifications.info('Focus an AI agent tab (Claude, Codex, …) to use screenshot paste.')
+            return
+        }
+        // Close the options popover if it's open — clicking the main action
+        // means "I'm done configuring, go". The document:click handler treats
+        // the whole split-action group as "inside" so it wouldn't auto-close.
+        this.screenshotMenuOpen = false
         this.capturing = true
         try {
             const result = await this.screenshot.capture()
@@ -759,23 +1161,60 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
 
     screenshotTitle (): string {
         if (this.capturing) return 'Capture in progress…'
+        if (!this.activeIsAi) return 'Focus an AI agent tab to enable screenshot paste'
         return 'Take a screenshot — drag to select, annotate, then confirm to paste the path into the focused AI agent.'
+    }
+
+    splitTitle (): string {
+        if (this.isSplitOpenInActiveTab()) return 'Close shell split'
+        return 'Open shell in current tab CWD'
+    }
+
+    splitAriaLabel (): string {
+        if (this.isSplitOpenInActiveTab()) return 'Close the shell pane GlanceTerm opened in this tab'
+        return 'Open a local shell split to the right of the focused tab, with CWD inherited from the focused pane'
     }
 
     ngOnInit (): void {
         this.sub = this.monitor.states$.subscribe(s => {
-            this.states = s
-            this.dropStalePins(s)
-            this.recomputeActiveIsAi()
+            // Bounce through zone — the BehaviorSubject's notifications can
+            // resolve outside Angular's zone after a few ticks (the monitor's
+            // setInterval was set up in zone, but rxjs scheduling drift can
+            // still escape it), and our `[class.active]` / `[disabled]` bindings
+            // on the toolbar buttons need CD to re-read isSplitOpenInActiveTab()
+            // after each poll. Without this the split button stays stuck on its
+            // boot-time state until something else (tab switch, hover) triggers
+            // CD.
+            this.zone.run(() => {
+                this.states = s
+                this.dropStalePins(s)
+                this.recomputeActiveIsAi()
+            })
         })
         // Tab switches don't change `states`, but they do change which row is
-        // "active" — so the toolbar visibility (`activeIsAi`) needs to
+        // "active" — so the toolbar's enabled state (`activeIsAi`) needs to
         // re-evaluate. AppService emits outside the Angular zone in some
         // paths (focus restoration), so re-enter the zone to keep the
-        // *ngIf reactive.
+        // bindings reactive.
         this.activeTabSub = this.app.activeTabChange$.subscribe(() => {
             this.zone.run(() => this.recomputeActiveIsAi())
         })
+        // tabOpened$ fires for every restored tab during boot. Each event is
+        // a chance for isSplitOpenInActiveTab() to flip true (the moment the
+        // SplitTab finishes its async recovery and the inner pane carrying
+        // our env-persisted flag becomes reachable via getAllTabs()). Without
+        // this hook the button stays inactive for up to ~1.5 s after boot —
+        // until the first monitor poll lands — which reads as "didn't
+        // remember my split".
+        this.tabOpenedSub = this.app.tabOpened$.subscribe(tab => {
+            this.zone.run(() => this.watchSplitTab(tab))
+            this.recomputeActiveIsAi()
+        })
+        // Also watch any tabs that were already present at mount time
+        // (singleton-revived case, or a sidebar that mounted late).
+        for (const tab of this.app.tabs) {
+            this.watchSplitTab(tab)
+        }
         // Unread set membership is what derives the `done` display status from
         // a raw `idle`. The monitor's 1.5 s poll would eventually re-render
         // anyway, but a focus-clear should flip done → ready instantly — so
@@ -788,10 +1227,40 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         this.recomputeActiveIsAi()
     }
 
+    /**
+     * For a SplitTabComponent (the outer container Tabby uses for AI tabs),
+     * subscribe to its tabAdded$/tabRemoved$ so the toolbar's `active` state
+     * updates the moment a GlanceTerm-owned inner pane is recovered/destroyed.
+     * Plain (non-split) tabs are ignored — they can't host an owned split.
+     *
+     * The destroyed$ subscription cleans us up when the tab itself goes away,
+     * so the Map doesn't leak. Idempotent on already-watched tabs.
+     */
+    private watchSplitTab (tab: BaseTabComponent): void {
+        if (this.splitTabSubs.has(tab)) return
+        const inner = (tab as any).tabAdded$ as { subscribe: (fn: () => void) => Subscription } | undefined
+        const removed = (tab as any).tabRemoved$ as { subscribe: (fn: () => void) => Subscription } | undefined
+        if (!inner || !removed || typeof inner.subscribe !== 'function') return
+        const subs: Subscription[] = [
+            inner.subscribe(() => this.zone.run(() => { /* trigger CD */ })),
+            removed.subscribe(() => this.zone.run(() => { /* trigger CD */ })),
+        ]
+        this.splitTabSubs.set(tab, subs)
+        tab.destroyed$.subscribe(() => {
+            for (const s of subs) s.unsubscribe()
+            this.splitTabSubs.delete(tab)
+        })
+    }
+
     ngOnDestroy (): void {
         this.sub?.unsubscribe()
         this.activeTabSub?.unsubscribe()
         this.unreadSub?.unsubscribe()
+        this.tabOpenedSub?.unsubscribe()
+        for (const subs of this.splitTabSubs.values()) {
+            for (const s of subs) s.unsubscribe()
+        }
+        this.splitTabSubs.clear()
     }
 
     /**
@@ -833,12 +1302,25 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      * works (the 3rd row from top stays the 3rd row from top as long as no
      * attention event interrupts).
      *
-     * Sort key per row:
-     *   (pinnedRank ?? STATUS_RANK[effStatus], tabIdx)
+     * Two-stage layout:
+     *   1. Sort PRIMARIES (one per outer tab) by (pinnedRank ?? STATUS_RANK,
+     *      tabIdx).
+     *   2. Glue each primary's SUBORDINATES (other leaves of the same outer
+     *      tab, in their split-pane order) directly underneath. Subordinates
+     *      never participate in status-rank sorting — a `working` shell pane
+     *      in an idle AI tab still rides under the idle AI, not into the
+     *      Working bucket.
      *
      * Within any rank tier we fall back to Tabby's tab-bar order — STABLE,
      * so tabs only move when their attention status changes, not when their
      * elapsed timer ticks. See STATUS_RANK doc for the bucket layout.
+     *
+     * Filtering: a primary survives the filter when itself OR any of its
+     * subordinates matches the chosen status. This keeps the filtered view
+     * in sync with the pill counts (each row counted by its own effStatus)
+     * — a `working` shell pane riding under an `idle` AI still surfaces the
+     * pair under the Working filter. Subordinates ride along regardless of
+     * their own status so the connector bracket always points somewhere.
      *
      * NOTE: ranking and filtering both go through `effStatus`, not the raw
      * `s.status` from the monitor. The monitor never produces `'done'` — it's
@@ -850,17 +1332,76 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
             const i = this.app.tabs.indexOf(s.outerTab)
             return i < 0 ? Number.MAX_SAFE_INTEGER : i
         }
-        // Pinned rank (see pinnedRank doc) overrides the live effStatus rank,
-        // so a just-clicked row holds its position while its dot recolours.
-        const rankOf = (s: TabState): number =>
-            this.pinnedRank.get(s.innerTab) ?? rank[this.effStatus(s)] ?? 99
-        const filtered = this.filterMode === 'all'
-            ? this.states
-            : this.states.filter(s => this.effStatus(s) === this.filterMode)
-        return [...filtered].sort((a, b) => {
+        const rankOf = (s: TabState): number => {
+            const pinned = this.pinnedRank.get(s.innerTab)
+            if (pinned !== undefined) return pinned
+            return rank[this.effStatus(s)] ?? 99
+        }
+        // Group by outer tab so we can pick a primary per group AND ride
+        // subordinates along under their primary's filter decision.
+        const byOuter = new Map<BaseTabComponent, TabState[]>()
+        for (const s of this.states) {
+            const arr = byOuter.get(s.outerTab) ?? []
+            arr.push(s)
+            byOuter.set(s.outerTab, arr)
+        }
+        const fm = this.filterMode
+        const primaryOf = (group: TabState[]): TabState => this.pickPrimary(group)
+        const groupMatches = (group: TabState[]): boolean =>
+            fm === 'all' || group.some(s => this.effStatus(s) === fm)
+        const visiblePrimaries: TabState[] = []
+        const subsByOuter = new Map<BaseTabComponent, TabState[]>()
+        for (const [outer, group] of byOuter) {
+            if (!groupMatches(group)) continue
+            const p = primaryOf(group)
+            visiblePrimaries.push(p)
+            const subs = group.filter(s => s !== p)
+            if (subs.length > 0) subsByOuter.set(outer, subs)
+        }
+        visiblePrimaries.sort((a, b) => {
             const dr = rankOf(a) - rankOf(b)
-            return dr !== 0 ? dr : tabIdx(a) - tabIdx(b)
+            if (dr !== 0) return dr
+            return tabIdx(a) - tabIdx(b)
         })
+        const out: TabState[] = []
+        for (const p of visiblePrimaries) {
+            out.push(p)
+            const subs = subsByOuter.get(p.outerTab)
+            if (subs) out.push(...subs)
+        }
+        return out
+    }
+
+    /**
+     * Per outer tab, pick the leaf that represents the tab in the sidebar's
+     * primary row. Preference order:
+     *   1. The first leaf whose effStatus is NOT `no_ai` (i.e. an AI pane).
+     *      A running AI is what users care about; if the user split-left a
+     *      plain shell next to their AI, the AI still gets to be primary.
+     *   2. Otherwise the first leaf in pane order (= `getAllTabs()` order).
+     *
+     * The chosen primary represents the tab in the sort/filter/rank pipeline;
+     * every other leaf in the same outer tab is rendered as a subordinate
+     * row below it.
+     */
+    private pickPrimary (group: TabState[]): TabState {
+        return group.find(s => this.effStatus(s) !== 'no_ai') ?? group[0]
+    }
+
+    /**
+     * True when this row is a non-primary leaf inside a SplitTabComponent.
+     * Whether it's an AI agent or a plain shell doesn't matter: subordinates
+     * render with the same content & layout as a primary row (real status,
+     * tool tag, cwd, age) but get a dashed connector to the row above and
+     * skip status-rank sorting so they stay glued under their primary.
+     *
+     * See `pickPrimary` for how the primary is chosen within an outer tab.
+     */
+    isSubordinate (s: TabState): boolean {
+        if (s.outerTab === s.innerTab) return false
+        const group = this.states.filter(o => o.outerTab === s.outerTab)
+        if (group.length <= 1) return false
+        return this.pickPrimary(group) !== s
     }
 
     /**
@@ -938,17 +1479,22 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     }
 
     onSelect (s: TabState): void {
-        // Freeze this row's sort position BEFORE focus runs, so the unread
+        // Freeze the row's sort position BEFORE focus runs, so the unread
         // flip triggered by selectTab doesn't yank the row out from under
-        // the click. See `pinnedRank` doc for the full rationale.
-        const preClickRank = AiSidebarComponent.STATUS_RANK[this.effStatus(s)] ?? 99
-        this.pinnedRank.set(s.innerTab, preClickRank)
-        this.pinnedRawStatusAtPin.set(s.innerTab, s.status)
-        setTimeout(() => {
-            this.pinnedRank.delete(s.innerTab)
-            this.pinnedRawStatusAtPin.delete(s.innerTab)
-            // setTimeout is zone-patched → CD picks this up automatically.
-        }, this.PIN_MS)
+        // the click. See `pinnedRank` doc for the full rationale. Subordinate
+        // rows don't participate in status-rank sort (visibleStates only
+        // sorts primaries), so we skip the pin for them — it would be a
+        // wasted timer + map write.
+        if (!this.isSubordinate(s)) {
+            const preClickRank = AiSidebarComponent.STATUS_RANK[this.effStatus(s)] ?? 99
+            this.pinnedRank.set(s.innerTab, preClickRank)
+            this.pinnedRawStatusAtPin.set(s.innerTab, s.status)
+            setTimeout(() => {
+                this.pinnedRank.delete(s.innerTab)
+                this.pinnedRawStatusAtPin.delete(s.innerTab)
+                // setTimeout is zone-patched → CD picks this up automatically.
+            }, this.PIN_MS)
+        }
 
         this.app.selectTab(s.outerTab)
         // If the matched leaf is inside a split, also focus that specific pane.
