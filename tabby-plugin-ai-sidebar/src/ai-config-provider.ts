@@ -31,6 +31,13 @@ export class AiSidebarConfigProvider extends ConfigProvider {
             // any command without user confirmation. UI shows a confirm
             // dialog on first enable; see AutoApproveService.
             autoApprovePermissions: false,
+            // List of cwds the user has right-click-pinned to the top of the
+            // sidebar. Persisted so pins survive an app restart that brings
+            // the same cwd back (Tabby session restore). Auto-evicted when
+            // a previously-seen-this-session cwd disappears from the live
+            // tab list (the "tab close removes pin" rule). See sidebar
+            // component's prunePinnedCwds for the prune contract.
+            pinnedCwds: [] as string[],
         },
     }
 
