@@ -2,7 +2,7 @@
   "name": "glanceterm-app",
   "description": "GlanceTerm — a terminal that shows every AI agent's status at a glance, so you never miss the one that needs you. Built on Tabby.",
   "private": true,
-  "repository": "https://github.com/you/glanceterm",
+  "repository": "https://github.com/jessemaxh/glanceterm",
   "author": {
     "name": "GlanceTerm",
     "email": "noreply@glanceterm.dev"

@@ -4,7 +4,14 @@ import axios from 'axios'
 import { Logger, LogService, ConfigService, UpdaterService, PlatformService, TranslateService } from 'tabby-core'
 import { ElectronService } from '../services/electron.service'
 
-const UPDATES_URL = 'https://api.github.com/repos/eugeny/tabby/releases/latest'
+// Used by the fallback `check()` path below — surfaces the latest GlanceTerm
+// release in the "Update available" UI when electron-updater can't reach its
+// own feed (e.g. on Linux, where electron-updater is disabled outright, or
+// when a network blip kills the in-process check). Keep in sync with the
+// `repository` field in app/package.json: electron-updater's primary feed is
+// derived from that, and the two URLs must point at the same repo or the
+// fallback would advertise different versions than the auto-updater installs.
+const UPDATES_URL = 'https://api.github.com/repos/jessemaxh/glanceterm/releases/latest'
 
 @Injectable()
 export class ElectronUpdaterService extends UpdaterService {
