@@ -88,8 +88,8 @@ export class AutoApproveService implements OnDestroy {
             type: 'warning',
             message: 'Enable auto-approve permission prompts?',
             detail:
-                'GlanceTerm will respond "allow" to every Claude Code PermissionRequest ' +
-                'on your behalf. Claude will be able to run any command — including ' +
+                'GlanceTerm will respond "allow" to every AI agent permission prompt ' +
+                'on your behalf. The agent will be able to run any command — including ' +
                 'destructive ones like `rm -rf` — without asking you first.\n\n' +
                 'Only enable this in a sandbox or disposable environment. Each ' +
                 'auto-approved action is recorded to ~/.glanceterm/auto-approve.log so ' +

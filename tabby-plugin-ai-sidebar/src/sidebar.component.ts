@@ -214,7 +214,7 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
                         [class.muted]="!autoApprovePermissions"
                         [class.active]="autoApprovePermissions"
                         (click)="toggleAutoApprove()"
-                        [title]="autoApprovePermissions ? 'Auto-approve is ON — Claude can run any command without asking. Click to disable.' : 'Auto-approve permission prompts (OFF). Click to enable; needs confirmation.'"
+                        [title]="autoApprovePermissions ? 'Auto-approve is ON — the agent can run any command without asking. Click to disable.' : 'Auto-approve permission prompts (OFF). Click to enable; needs confirmation.'"
                         [attr.aria-label]="autoApprovePermissions ? 'Disable auto-approve permission prompts' : 'Enable auto-approve permission prompts'"
                         [attr.aria-pressed]="autoApprovePermissions">
                     <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
