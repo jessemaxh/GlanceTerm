@@ -9,22 +9,33 @@ import { UnreadService } from './unread.service'
 type NotifyKind = 'permission' | 'ready'
 
 /**
- * Fires a system notification when an AI tab transitions into a state that
- * needs the user's attention:
+ * Fires attention signals when an AI tab transitions into a state that
+ * needs the user's attention. Three independent surfaces, three different
+ * suppression rules:
  *
- *   - `needs_permission`      block-on-user prompt (claude y/n menu, etc.)
- *                             fires immediately on the transition.
- *   - `working` → `idle`      AI finished its turn. Also fires immediately —
- *                             the idle-stability gate lives upstream in
- *                             TabMonitor (see IDLE_STABILITY_MS there), so
- *                             by the time the transition reaches us the raw
- *                             hook layer has already been idle long enough
- *                             to be trustworthy.
+ *   - In-app badge (markReady → red dot + dock count) on `working → idle`:
+ *     ALWAYS fires. The IM-style "scroll to clear" model means visible-
+ *     but-not-engaged-with doesn't count as "saw it" — a user who happened
+ *     to leave the focused tab on screen but walked away should still see
+ *     the badge waiting for them on return. The badge clears via
+ *     UnreadService's per-tab engagement listener (scroll / type / click
+ *     in terminal) — see UnreadService docstring.
+ *   - Audible chime on `working → idle`: ALWAYS fires (subject to user
+ *     mute toggle and the 600ms throttle). Same rationale — sound is the
+ *     "done" cue that catches you even if you stepped away.
+ *   - OS / system notification: suppressed when the user is currently
+ *     looking at the focused tab in the focused window. A system tray
+ *     ding while you're actively at the terminal is genuinely redundant.
+ *     Clicking the notification focuses the originating tab + window.
  *
- * Both notifications are suppressed when the user is already looking at
- * the tab in question — the sidebar's coloured row is enough signal.
- * Clicking either notification focuses the originating tab and brings the
- * window forward.
+ * The pre-fix design suppressed ALL THREE on `isLookingHere`, which made
+ * the engagement-based unread model inconsistent — focused-tab agents
+ * could finish and the user could walk away with no signal at all.
+ *
+ * Permission events (`needs_permission`) — the sidebar's animated
+ * needs_permission row is high-signal on its own, so the suppression
+ * rule there is unchanged: only the OS notification fires, gated on
+ * not-looking-here, no separate badge/sound channel for this kind.
  *
  * Tabs with non-AI status (`no_ai`) never notify.
  */
@@ -125,24 +136,28 @@ export class AttentionNotifierService implements OnDestroy {
         // dead tab is just misleading (click → selectTab no-op) so drop it.
         if (!this.isStillLive(s)) return
 
-        // Already looking at this tab — sidebar dot is enough, don't bother.
+        // Badge + chime fire BEFORE the looking-here gate — see class doc.
+        // Even if the user is at the focused tab right now, they could be
+        // mid-step-away; the engagement-based clear in UnreadService is the
+        // single source of truth for "user has seen this", and that fires
+        // on real terminal interaction (scroll / type / click in body), not
+        // on activeTab + windowFocused alone.
+        if (kind === 'ready') {
+            this.unread.markReady(s.innerTab)
+            // Chime gates on its own throttle (CHIME_THROTTLE_MS) and the
+            // user-controlled `ai.soundOnReady` toggle — setting toggle is
+            // checked inside.
+            this.playReadyChime()
+        }
+
+        // OS notification stays gated on isLookingHere — a system tray ding
+        // while the user is actively at the focused tab + focused window is
+        // genuinely redundant. Badge + chime above already cover them.
         const isLookingHere =
             s.outerTab === this.app.activeTab &&
             typeof document !== 'undefined' &&
             document.hasFocus()
         if (isLookingHere) return
-
-        // Persistent badge for ready transitions runs BEFORE the OS-notification
-        // guards (Notification API gating, cooldown) — those gate audible/
-        // visible system pings, but the in-app badge should appear even when
-        // a transient ping is suppressed. Idempotent on repeat calls.
-        if (kind === 'ready') {
-            this.unread.markReady(s.innerTab)
-            // Chime gates on its own throttle, independent of the notification
-            // cooldown — losing the audio cue because the OS notification was
-            // deduped defeats the point. Setting toggle is checked inside.
-            this.playReadyChime()
-        }
 
         if (typeof Notification === 'undefined') return
         if ((Notification as any).permission === 'denied') return
