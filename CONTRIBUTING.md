@@ -17,6 +17,12 @@ contributor docs live in:
 2. Fork → branch → PR against `main`.
 3. Run `yarn run lint` before pushing — CI will reject the PR otherwise.
 4. One PR per concern. Drive-by refactors in a bug-fix PR will get split.
+5. **Update [docs/feature-matrix.md](docs/feature-matrix.md) in the same
+   PR** if your change touches what works for which AI agent — new
+   adapter, new feature, agent added to `AI_PATTERNS`, or a previously
+   🧪 cell you've now verified on a real install. See the matrix's
+   "Update protocol" section for the precise rules. Reviewers check
+   this against the code diff.
 
 ## Where help is most wanted
 

@@ -68,10 +68,12 @@ real-time. Multiple Claude sessions in the same project? Each has its own
 `GLANCETERM_TAB_ID`, so they show independent status. Zero polling, zero
 screen-scraping, zero false positives.
 
-**Roadmap:**
-- v0.2 — Claude Code (this release)
-- v0.3 — Codex, Gemini CLI (same HookAdapter pattern, ~1 day each)
-- v0.4 — opencode, aider (no native hooks; fall back to process-state)
+**Per-agent support** is tracked in [docs/feature-matrix.md](docs/feature-matrix.md)
+— full table of which features work with Claude / Codex / Gemini CLI /
+opencode / aider / goose, what's tested vs implemented-but-untested, and
+what's architecturally blocked. Roadmap in one line: Claude is
+first-class, Codex has a docs-written adapter (untested), Gemini /
+opencode / aider / goose are partial via process detection only.
 
 ## ⚠️ Auto-approve permissions (opt-in, dangerous)
 
@@ -161,12 +163,14 @@ for CDP-driven UI testing.
 
 ## Known limitations (v0.2)
 
-- **Only Claude Code is hooked.** Other tools (Codex, Gemini, aider,
-  opencode, goose) are recognised from their process tree and show as
-  `working` while alive, but lack the fine-grained
-  working/idle/needs_permission/done states until per-agent
-  [HookAdapter](HACKING-glanceterm.md#adding-a-new-agent-adapter)
-  implementations land.
+- **Only Claude Code is fully hooked and tested.** Codex has an
+  adapter written from docs but not yet validated on a real install.
+  Gemini / opencode / aider / goose are recognised from their process
+  tree and show as `working` while alive, but lack fine-grained
+  states. See [docs/feature-matrix.md](docs/feature-matrix.md) for the
+  precise per-feature breakdown and
+  [HACKING-glanceterm.md](HACKING-glanceterm.md#adding-a-new-agent-adapter)
+  for how to contribute an adapter.
 - **Validated on macOS only.** Code paths for Linux and Windows exist —
   the hook handler ships in both POSIX `sh` and PowerShell forms — but no
   one has driven them end-to-end yet. Help wanted.

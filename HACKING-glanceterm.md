@@ -81,6 +81,11 @@ for that agent.
 ## Adding a new agent adapter
 
 The whole point of `HookAdapter` is to make this two files of work.
+**When your adapter lands, you must also update
+[docs/feature-matrix.md](docs/feature-matrix.md)** — flip the relevant
+cells from ❌ to 🧪 (untested) or ✅ (tested), and add a "Notes by
+agent" subsection explaining anything non-obvious about the adapter's
+limits. Reviewers will ask.
 
 ### Step 1 — write `src/hook-adapters/<your-tool>.ts`
 
