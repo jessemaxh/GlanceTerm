@@ -77,6 +77,7 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
                      [attr.data-status]="effStatus(s)"
                      [class.active]="isActive(s)"
                      [class.subordinate]="isSubordinate(s)"
+                     [class.pinned]="isPinned(s)"
                      [attr.aria-label]="ariaLabel(s)"
                      [attr.title]="s.cwd || s.title"
                      role="button"
@@ -88,6 +89,10 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
                     </div>
                     <div class="body">
                         <div class="line1">
+                            <svg *ngIf="isPinned(s)" class="pin-mark" width="11" height="11" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" title="Pinned to top">
+                                <path d="M9.5 1.5 L14.5 6.5 L12 7.2 L11.5 11 L8.2 7.8 L4 12 L4 11 L8 6.8 L4.8 3.5 L8.5 3 Z"
+                                      stroke="currentColor" stroke-width="0.6" stroke-linejoin="round"/>
+                            </svg>
                             <span class="primary" [attr.title]="s.cwd || s.title">{{ s.cwd ? folderName(s.cwd) : s.title }}</span>
                             <span *ngIf="effStatus(s) === 'needs_permission'" class="attn" aria-hidden="true"></span>
                         </div>
@@ -243,6 +248,14 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             --gt-st-done:         #FF5252;
             --gt-st-done-soft:    rgba(255, 82, 82, 0.14);
             --gt-st-done-ring:    rgba(255, 82, 82, 0.45);
+
+            /* User-pin colour — orthogonal axis to the status palette (green
+               working / red done / orange needs-perm / blue ready). Gold
+               matches the universal "favorite / star / pinned" convention
+               and doesn't compete with any status hue. */
+            --gt-pin:             #E8C547;
+            --gt-pin-soft:        rgba(232, 197, 71, 0.10);
+            --gt-pin-border:      rgba(232, 197, 71, 0.40);
 
             --gt-surface-1: var(--bs-body-bg, #1C1F23);
             --gt-surface-2: rgba(255, 255, 255, 0.04);
@@ -452,6 +465,29 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             background: var(--gt-st-active);
         }
         .row.active .primary { color: var(--gt-text); font-weight: 600; }
+
+        /* ---- user-pinned row (right-click → Pin to top) ----
+           Faint gold wash + gold pin glyph next to the title. Background
+           is intentionally low-alpha so it doesn't fight the .active blue
+           wash when a pinned row is also the currently-focused tab — the
+           two layer rather than clash. Gold is the only colour in the
+           sidebar that isn't already claimed by a status, so "pinned"
+           reads independently of status state. */
+        .row.pinned {
+            background: var(--gt-pin-soft);
+        }
+        .row.pinned.active {
+            /* When both, lean active (blue wash + pin glyph still gold). */
+            background: var(--gt-st-active-bg);
+        }
+        .pin-mark {
+            display: inline-flex;
+            align-items: center;
+            color: var(--gt-pin);
+            margin-right: 5px;
+            flex: none;
+            line-height: 1;
+        }
 
         /* ---- subordinate row (extra leaf inside a SplitTabComponent) ----
            A subordinate leaf — a non-primary pane in a split tab, whether a
@@ -973,6 +1009,28 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     private readonly PIN_MS = 2000
 
     /**
+     * User-driven sticky pin (separate axis from `pinnedRank`, which is the
+     * 2-second click feedback hold). When a tab's outerTab is in this set,
+     * its row floats above every status bucket — no matter the effStatus
+     * or tab-bar position. Among pinned rows, tab-bar order is preserved
+     * so the user can curate ordering by moving the tabs themselves.
+     *
+     * Keyed by outerTab (not innerTab) on purpose: pinning a split tab
+     * pins the whole group, and the subordinate-pane rendering already
+     * glues subordinates under their primary. Picking innerTab would
+     * make "pin just the right pane of a split" a separate user-facing
+     * concept that isn't worth the extra surface area.
+     *
+     * IN-MEMORY ONLY. Pins do not survive an app restart. Persisting by
+     * cwd would auto-pin every future tab opened at the same path —
+     * surprising — and persisting by GLANCETERM_TAB_ID is meaningless
+     * across restarts (tab IDs regenerate). If users complain, add a
+     * `pinnedCwds: string[]` to the config with an explicit
+     * "remember pins" toggle — out of scope for v1.
+     */
+    private userPinnedOuterTabs = new Set<BaseTabComponent>()
+
+    /**
      * Two attention buckets float to the top — that's the whole point of the
      * sidebar — and *everything else stays in Tabby's top-bar order*.
      *
@@ -1334,6 +1392,11 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
             return i < 0 ? Number.MAX_SAFE_INTEGER : i
         }
         const rankOf = (s: TabState): number => {
+            // User-driven pin wins over everything else — even the click-pin
+            // and even needs_permission (the user explicitly asked for this
+            // row to live at the top; respect it). Negative so it slots
+            // above STATUS_RANK[needs_permission] = 0.
+            if (this.userPinnedOuterTabs.has(s.outerTab)) return -1
             const pinned = this.pinnedRank.get(s.innerTab)
             if (pinned !== undefined) return pinned
             return rank[this.effStatus(s)] ?? 99
@@ -1416,14 +1479,27 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      * also get cleared.
      */
     private dropStalePins (states: TabState[]): void {
-        if (this.pinnedRank.size === 0) return
-        const byInner = new Map(states.map(s => [s.innerTab, s.status]))
-        for (const innerTab of [...this.pinnedRank.keys()]) {
-            const nowStatus = byInner.get(innerTab)
-            const pinStatus = this.pinnedRawStatusAtPin.get(innerTab)
-            if (nowStatus === undefined || nowStatus !== pinStatus) {
-                this.pinnedRank.delete(innerTab)
-                this.pinnedRawStatusAtPin.delete(innerTab)
+        // Drop click-pins on rows whose raw status has changed (the original
+        // signal for "the click feedback isn't the latest story anymore")
+        // or rows that have disappeared entirely (tab closed).
+        if (this.pinnedRank.size > 0) {
+            const byInner = new Map(states.map(s => [s.innerTab, s.status]))
+            for (const innerTab of [...this.pinnedRank.keys()]) {
+                const nowStatus = byInner.get(innerTab)
+                const pinStatus = this.pinnedRawStatusAtPin.get(innerTab)
+                if (nowStatus === undefined || nowStatus !== pinStatus) {
+                    this.pinnedRank.delete(innerTab)
+                    this.pinnedRawStatusAtPin.delete(innerTab)
+                }
+            }
+        }
+        // Drop user-pins for outer tabs that no longer exist in the state
+        // list (tab closed, app reorganised). Same cleanup pass so we don't
+        // grow a set of stale references that hold tab components alive.
+        if (this.userPinnedOuterTabs.size > 0) {
+            const liveOuters = new Set(states.map(s => s.outerTab))
+            for (const outer of [...this.userPinnedOuterTabs]) {
+                if (!liveOuters.has(outer)) this.userPinnedOuterTabs.delete(outer)
             }
         }
     }
@@ -1638,11 +1714,29 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      * wants on a row: rename, copy the path, jump to it in Finder, or
      * spawn another shell at the same cwd.
      */
+    isPinned (s: TabState): boolean {
+        return this.userPinnedOuterTabs.has(s.outerTab)
+    }
+
+    togglePin (s: TabState): void {
+        if (this.userPinnedOuterTabs.has(s.outerTab)) {
+            this.userPinnedOuterTabs.delete(s.outerTab)
+        } else {
+            this.userPinnedOuterTabs.add(s.outerTab)
+        }
+    }
+
     async onContextMenu (s: TabState, ev: MouseEvent): Promise<void> {
         ev.preventDefault()
         ev.stopPropagation()
         const cwd = s.cwd ?? null
+        const pinned = this.isPinned(s)
         const items: MenuItemOptions[] = [
+            {
+                label: pinned ? 'Unpin from top' : 'Pin to top',
+                click: () => this.togglePin(s),
+            },
+            { type: 'separator' },
             {
                 label: 'Rename tab title…',
                 click: () => this.app.renameTab(s.outerTab),
