@@ -113,8 +113,57 @@ const HOOK_LOG_RETENTION_MS = 7 * 24 * 60 * 60_000
  * spurious Stops slipping through and decrementing real backgrounded
  * agents to 0 — re-creating the bug we set out to fix.
  */
-const SUBAGENT_PAIR_MIN_AGE_MS = 30_000
-const SUBAGENT_PAIR_MAX_AGE_MS = 4 * 60_000
+export const SUBAGENT_PAIR_MIN_AGE_MS = 30_000
+export const SUBAGENT_PAIR_MAX_AGE_MS = 4 * 60_000
+
+/**
+ * Single subagent-event tagged union that `reduceSubagentQueue` operates on.
+ * Crosses the boundary between hook-event parsing (which knows about
+ * `PreToolUse`, `SubagentStop`, etc.) and the pairing reducer (which only
+ * cares about spawn / stop / reset). Decoupled this way so the reducer
+ * stays a pure function and can be exhaustively unit-tested without a hook
+ * event JSON harness.
+ */
+export type SubagentEvent =
+    | { kind: 'spawn'; at: number }
+    | { kind: 'stop'; at: number }
+    | { kind: 'reset' }
+
+/**
+ * Pure-function reduction over the per-tab subagent in-flight queue.
+ *
+ * Returns the next queue state. Caller owns persistence; we never mutate
+ * the input. Extracted from `HookWatcherService.processEvent` so the
+ * pairing semantics can be unit-tested without standing up the DI graph
+ * and so a future tweak to the pairing window can be locked behind tests.
+ *
+ * Semantics:
+ *   - `spawn`: append `at` to the queue.
+ *   - `stop`: pop the oldest queued spawn IFF its age (now - oldest) is
+ *     in the closed band [SUBAGENT_PAIR_MIN_AGE_MS, SUBAGENT_PAIR_MAX_AGE_MS].
+ *     Outside the band → no change. See `subagentInFlight` doc on the
+ *     class for the empirical rationale on these numbers.
+ *   - `reset`: clear the queue (used on SessionStart / SessionEnd to
+ *     prevent stale spawns from a prior session pinning the row).
+ *
+ * Identity-preserving on no-op: returns the same array reference when
+ * the event doesn't change state, so callers can cheaply detect "no
+ * change" via reference equality if they care.
+ */
+export function reduceSubagentQueue (
+    queue: readonly number[],
+    ev: SubagentEvent,
+): readonly number[] {
+    if (ev.kind === 'reset') return queue.length === 0 ? queue : []
+    if (ev.kind === 'spawn') return [...queue, ev.at]
+    // ev.kind === 'stop'
+    if (queue.length === 0) return queue
+    const ageMs = ev.at - queue[0]
+    if (ageMs >= SUBAGENT_PAIR_MIN_AGE_MS && ageMs <= SUBAGENT_PAIR_MAX_AGE_MS) {
+        return queue.slice(1)
+    }
+    return queue
+}
 
 /**
  * Watches `~/.glanceterm/hooks/` and exposes the latest status per tab id.
@@ -578,47 +627,41 @@ export class HookWatcherService implements OnDestroy {
         let changed = false
 
         if (eventAt >= this.startupTs) {
-            // Subagent in-flight queue. Transitions:
-            //   PreToolUse(tool_name=Task|Agent) → push eventAt
-            //   SubagentStop                     → conditionally pop oldest
-            //                                       spawn within pairing window
-            //   SessionStart / SessionEnd        → clear (boundary reset)
-            // With append-only logs each PreToolUse sits at a unique file
-            // offset, so two subagent spawns in the same wall-clock second
-            // both get pushed.
+            // Subagent in-flight queue. Three hook events map to three queue
+            // ops, all reduced through the pure `reduceSubagentQueue`:
+            //   PreToolUse(tool_name=Task|Agent) → spawn
+            //   SubagentStop                     → stop (conditional pop)
+            //   SessionStart / SessionEnd        → reset
             //
-            // SubagentStop pairing rule — see `subagentInFlight` doc-comment
-            // for the full rationale. Briefly: this Claude Code version fires
-            // SubagentStop liberally (including for tabs that never invoked
-            // the Agent tool), so we don't blindly decrement. A Stop is
-            // accepted as "real completion of the oldest queued spawn" only
-            // when that spawn's age sits inside [MIN_AGE, MAX_AGE].
+            // Pairing semantics — when a `stop` actually pops, when it gets
+            // dropped on the floor — live entirely in the reducer; see
+            // `reduceSubagentQueue` JSDoc for the band [MIN, MAX] rationale
+            // and `subagentInFlight` field-doc for why we don't blindly 1:1
+            // pair against this Claude Code version's liberal SubagentStop
+            // emission.
             //
-            // tool_name: Claude Code renamed the subagent-spawning tool from
+            // tool_name: Claude renamed the subagent-spawning tool from
             // `Task` to `Agent`. Match both so older installs keep working;
             // if Anthropic adds a third name we'll need a registry, but two
             // strings doesn't earn one.
-            if (parsed.event === 'PreToolUse' && (parsed.tool_name === 'Task' || parsed.tool_name === 'Agent')) {
-                const arr = this.subagentInFlight.get(parsed.tab_id) ?? []
-                arr.push(eventAt)
-                this.subagentInFlight.set(parsed.tab_id, arr)
-                changed = true
-            } else if (parsed.event === 'SubagentStop') {
-                const arr = this.subagentInFlight.get(parsed.tab_id)
-                if (arr && arr.length > 0) {
-                    const oldest = arr[0]
-                    const ageMs = eventAt - oldest
-                    if (ageMs >= SUBAGENT_PAIR_MIN_AGE_MS && ageMs <= SUBAGENT_PAIR_MAX_AGE_MS) {
-                        arr.shift()
-                        if (arr.length === 0) this.subagentInFlight.delete(parsed.tab_id)
-                        changed = true
-                    }
-                    // else: drop the SubagentStop on the floor. Too-young (<MIN)
-                    // is Claude's instant-after-spawn ACK; too-old (>MAX) is
-                    // background noise unrelated to this queued spawn.
+            const queueEvent: SubagentEvent | null =
+                parsed.event === 'PreToolUse' && (parsed.tool_name === 'Task' || parsed.tool_name === 'Agent')
+                    ? { kind: 'spawn', at: eventAt }
+                    : parsed.event === 'SubagentStop'
+                        ? { kind: 'stop', at: eventAt }
+                        : (parsed.event === 'SessionStart' || parsed.event === 'SessionEnd')
+                            ? { kind: 'reset' }
+                            : null
+            if (queueEvent) {
+                const prev = this.subagentInFlight.get(parsed.tab_id) ?? []
+                const next = reduceSubagentQueue(prev, queueEvent)
+                if (next !== prev) {
+                    if (next.length === 0) this.subagentInFlight.delete(parsed.tab_id)
+                    else this.subagentInFlight.set(parsed.tab_id, next.slice())
+                    changed = true
                 }
-            } else if (parsed.event === 'SessionStart' || parsed.event === 'SessionEnd') {
-                if (this.subagentInFlight.delete(parsed.tab_id)) changed = true
+            }
+            if (parsed.event === 'SessionStart' || parsed.event === 'SessionEnd') {
                 // Same boundary reset for the bg-arrival queue — a stale
                 // arrival left over from a prior session would otherwise
                 // get falsely matched to the next new child of the freshly
