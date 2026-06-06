@@ -1331,6 +1331,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
             // CD.
             this.zone.run(() => {
                 this.states = s
+                this.recomputeSubordinates(s)
                 this.dropStalePins(s)
                 this.recomputeActiveIsAi()
             })
@@ -1572,10 +1573,45 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      * See `pickPrimary` for how the primary is chosen within an outer tab.
      */
     isSubordinate (s: TabState): boolean {
-        if (s.outerTab === s.innerTab) return false
-        const group = this.states.filter(o => o.outerTab === s.outerTab)
-        if (group.length <= 1) return false
-        return this.pickPrimary(group) !== s
+        return this.subordinateInnerTabs.has(s.innerTab)
+    }
+
+    /**
+     * Pre-computed set of innerTabs that should render as subordinate rows.
+     * Rebuilt once per `states$` emission via `recomputeSubordinates()`;
+     * `isSubordinate(s)` becomes an O(1) lookup instead of an O(N) filter
+     * over `this.states` per row binding (which is O(N²) across all rows
+     * per change-detection pass — the single biggest CD hot spot the
+     * engineering review flagged).
+     */
+    private readonly subordinateInnerTabs = new Set<BaseTabComponent>()
+
+    private recomputeSubordinates (states: TabState[]): void {
+        this.subordinateInnerTabs.clear()
+        // Group by outer tab once.
+        const byOuter = new Map<BaseTabComponent, TabState[]>()
+        for (const s of states) {
+            if (s.outerTab === s.innerTab) continue   // top-level tab — never subordinate
+            const arr = byOuter.get(s.outerTab) ?? []
+            arr.push(s)
+            byOuter.set(s.outerTab, arr)
+        }
+        for (const [outer, leaves] of byOuter) {
+            // We also need the FULL leaf list (including the primary) to run
+            // pickPrimary correctly — `leaves` above already represents that
+            // (it's every state whose outerTab is this SplitTab; the only
+            // states excluded above were rows where inner === outer, i.e.
+            // non-split tabs, which we don't store in byOuter).
+            if (leaves.length <= 1) continue
+            const primary = this.pickPrimary(leaves)
+            for (const s of leaves) {
+                if (s !== primary) this.subordinateInnerTabs.add(s.innerTab)
+            }
+            // Suppress unused-var warning while keeping the destructuring
+            // self-documenting — outer's only role in this loop is the
+            // Map key.
+            void outer
+        }
     }
 
     /**
