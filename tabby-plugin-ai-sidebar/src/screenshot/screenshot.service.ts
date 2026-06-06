@@ -25,6 +25,26 @@ import { openCaptureWindow, CaptureResult } from './capture-window'
 @Injectable({ providedIn: 'root' })
 export class ScreenshotService {
     private inProgress = false
+    /**
+     * Session-scoped escape hatch for the macOS Screen Recording preflight.
+     *
+     * The preflight (`systemPreferences.getMediaAccessStatus('screen')`)
+     * can disagree with the OS's real TCC state: stale cache after the
+     * user just enabled the toggle, bundle-identifier / signature mismatch
+     * between the running binary and the TCC entry, dev-build vs released-
+     * build confusion. When that happens — pre-fix — the user was stuck in
+     * an infinite "permission needed" dialog loop every time they clicked
+     * the screenshot button, even with the toggle visibly on.
+     *
+     * The dialog now offers a "Permission is already granted — try anyway"
+     * button. Picking it flips this flag for the rest of the session, so
+     * the preflight is bypassed and `desktopCapturer.getSources()` runs
+     * directly. If permission is genuinely granted, capture succeeds and
+     * the flag remains true. If it isn't, getSources fails (worst case:
+     * the macOS "Quit & Reopen" sheet appears, which is the standard
+     * recovery path — strictly better than being stuck in our dialog).
+     */
+    private preflightBypassed = false
 
     constructor (
         private notifications: NotificationsService,
@@ -92,7 +112,7 @@ export class ScreenshotService {
         // to System Settings ourselves, no TCC cache entry gets written.
         // The next Screenshot click finds status === 'granted' and the
         // very first getSources is a fresh call: no restart required.
-        if (process.platform === 'darwin') {
+        if (process.platform === 'darwin' && !this.preflightBypassed) {
             const blocked = await this.checkMacScreenPermission(remote, ourWindow)
             if (blocked) {
                 this.inProgress = false
@@ -229,24 +249,46 @@ export class ScreenshotService {
         const detail =
             'Open System Settings → Privacy & Security → Screen Recording, ' +
             'then enable GlanceTerm. You do NOT need to restart — just click ' +
-            'Screenshot again once the toggle is on.'
+            'Screenshot again once the toggle is on.\n\n' +
+            'If the toggle is already on and you\'re still seeing this, the OS\'s ' +
+            'permission cache may disagree with reality (bundle / signature ' +
+            'mismatch, dev vs release build, …). Click "Already granted — try ' +
+            'anyway" to skip this check for the rest of this session.'
 
-        let response = 1
+        // Button index → action contract:
+        //   0  Open System Settings — opens the relevant pane and aborts capture.
+        //   1  Already granted — try anyway — flips the session bypass and lets
+        //      capture proceed. If permission is genuinely missing, the next
+        //      `desktopCapturer.getSources()` call will fail and macOS may show
+        //      the "Quit & Reopen" sheet — still strictly better than being
+        //      trapped in this dialog forever.
+        //   2  Cancel — aborts capture, no state change.
+        const BTN_OPEN = 0
+        const BTN_TRY = 1
+        const BTN_CANCEL = 2
+
+        let response = BTN_CANCEL
         try {
             const result = await dialog.showMessageBox(win, {
                 type: 'info',
-                buttons: ['Open System Settings', 'Cancel'],
-                defaultId: 0,
-                cancelId: 1,
+                buttons: ['Open System Settings', 'Already granted — try anyway', 'Cancel'],
+                defaultId: BTN_OPEN,
+                cancelId: BTN_CANCEL,
                 title: 'Screen Recording permission needed',
                 message,
                 detail,
             })
-            response = result?.response ?? 1
+            response = result?.response ?? BTN_CANCEL
         } catch {
             return true
         }
-        if (response !== 0) return true
+        if (response === BTN_TRY) {
+            // eslint-disable-next-line no-console
+            console.warn('[glanceterm] user opted to bypass macOS Screen Recording preflight — proceeding without verified permission')
+            this.preflightBypassed = true
+            return false
+        }
+        if (response !== BTN_OPEN) return true
 
         // Try the modern URL scheme (macOS 13+ Privacy_ScreenCapture). If
         // shell.openExternal fails or the URL isn't recognised, fall back

@@ -1,7 +1,7 @@
 import { Injectable, OnDestroy } from '@angular/core'
 import { Subscription } from 'rxjs'
 
-import { ConfigService, BaseTabComponent } from 'tabby-core'
+import { AppService, ConfigService, BaseTabComponent } from 'tabby-core'
 
 import { TabMonitor, TabState, AiTool } from './tab-monitor'
 
@@ -25,14 +25,24 @@ import { TabMonitor, TabState, AiTool } from './tab-monitor'
  *      exiting the agent first, the entry sits in config and triggers
  *      the replay path next launch.
  *
- *   3. REPLAY — for the first RESUME_WINDOW_MS after this service starts,
- *      any TabState we see with (cwd ∈ map, !aiTool) is a freshly-
- *      restored tab whose previous command we should respawn. We
- *      sendInput(`${command}\r`) into the tab after RESUME_DELAY_MS so
- *      the restored shell has time to render its prompt. Each outerTab
- *      is resumed at most once per service lifetime — the WeakSet guard
- *      prevents re-firing if the agent quits and we then see
- *      (cwd ∈ map, !aiTool) again.
+ *   3. REPLAY — for any TabState whose outerTab was tagged as "restored
+ *      from disk" (present at construction OR opened via tabOpened$
+ *      within RESTORED_CAPTURE_MS of startup), the first tick we see
+ *      with (cwd ∈ map, !aiTool) is the moment the lazy-initialized
+ *      shell finally came alive. We sendInput(`${command}\r`) into the
+ *      tab after RESUME_DELAY_MS so the restored shell has time to
+ *      render its prompt. Each outerTab is resumed at most once per
+ *      service lifetime — the WeakSet guard prevents re-firing if the
+ *      agent quits and we then see (cwd ∈ map, !aiTool) again.
+ *
+ *      Why per-tab eligibility instead of a global startup window:
+ *      Tabby lazy-initializes terminal sessions (terminalTab.component
+ *      .ts onFrontendReady → initializeSession, gated on
+ *      frontend.attach which only runs on first focus). Non-focused
+ *      recovered tabs have NO shell — and therefore null cwd — at
+ *      boot. A wall-clock window from service start would expire long
+ *      before the user clicks each tab, leaving every non-focused tab
+ *      stuck with a bare shell after restart.
  *
  * Master toggle: `ai.autoResumeAgents` (default true). When off, no
  * capture, no replay, no cleanup — config is untouched.
@@ -55,21 +65,28 @@ import { TabMonitor, TabState, AiTool } from './tab-monitor'
  *     args; if a user hits this, the worst case is the replayed
  *     command parses the args differently than intended and the user
  *     re-types it once.
- *   - 30 s wall-clock replay window. Slow boots that take longer to
- *     finish session restore would miss it. Alternative (no window,
- *     fire on every new tab open) would surprise users who manually
- *     `cd` into a previously-pinned cwd.
+ *   - "Restored tab" is tagged at tabOpened$ time within a 30 s
+ *     window of service construction. A user who hand-opens a tab
+ *     INSIDE that window (rare — boot is busy) would also be tagged
+ *     and get an auto-launch if their cwd happens to match a pinned
+ *     entry. Outside the window, user-opened tabs are correctly
+ *     ineligible regardless of cwd.
  *   - If the user is actively typing in the just-restored tab in the
  *     2-second delay window, our `claude\r` appends to their input.
  *     Narrow race; flagging for v1.1 fix if anyone notices.
  */
 @Injectable()
 export class AutoResumeService implements OnDestroy {
-    /** How long after service construction we're willing to fire the replay
-     *  path. Long enough for Tabby's session restore to walk all tabs and
-     *  have each report a cwd, short enough that a tab the user opens
-     *  manually a minute later doesn't get a surprise auto-launch. */
-    private static readonly RESUME_WINDOW_MS = 30_000
+    /** Window during which a tabOpened$ emission counts as "this was a
+     *  session-restore tab, not a tab the user just opened". The restore
+     *  path (AppService.recoverTabs → openNewTabRaw → tabOpened.next) walks
+     *  every recovered tab on boot; anything that fires inside this window
+     *  is tagged as restored and stays eligible for auto-resume regardless
+     *  of how long the user takes to focus it. After this window, new tabs
+     *  the user opens manually are NOT eligible — auto-resuming a hand-
+     *  opened tab whose cwd happens to match a persisted entry would be a
+     *  surprise. */
+    private static readonly RESTORED_CAPTURE_MS = 30_000
     /** Delay between detecting a restorable tab and actually typing the
      *  launch command, so the shell has time to render its prompt and the
      *  echoed command doesn't appear before the `$ `. */
@@ -79,6 +96,16 @@ export class AutoResumeService implements OnDestroy {
     /** Outer tabs we've already auto-resumed this service lifetime. WeakSet
      *  so closed tabs drop out automatically. */
     private readonly attempted = new WeakSet<BaseTabComponent>()
+    /** Outer tabs Tabby recovered from disk this launch. We tag a tab as
+     *  "restored" if it was already in app.tabs at construction OR opens
+     *  via tabOpened$ within the RESTORED_CAPTURE_MS startup window. A
+     *  restored tab stays eligible for auto-resume for the lifetime of the
+     *  service — important because Tabby lazy-initializes terminal
+     *  sessions: a non-focused recovered tab has NO live shell (and
+     *  therefore no cwd) until the user clicks it, which can be many
+     *  minutes after boot. Pre-fix we keyed eligibility off a wall-clock
+     *  window from service start and missed every non-focused restored tab. */
+    private readonly restoredOuterTabs = new WeakSet<BaseTabComponent>()
     /** Per-tab "we observed an agent running here at some point during
      *  this service's lifetime" — gate for the cleanup path. Without it,
      *  the freshly-restored bare shell (no agent yet) would itself look
@@ -93,14 +120,38 @@ export class AutoResumeService implements OnDestroy {
 
     constructor (
         private config: ConfigService,
+        app: AppService,
         monitor: TabMonitor,
     ) {
+        // Tag every tab Tabby restored from disk on this launch. Two paths:
+        //   1. Tabs already in app.tabs at construction — covers the race
+        //      where recoverTabs() finished before our singleton instantiated.
+        //   2. Tabs that open via tabOpened$ within RESTORED_CAPTURE_MS —
+        //      AppService.recoverTabs walks the persisted list and calls
+        //      openNewTabRaw for each, so all restored tabs flow through here.
+        // After the capture window closes, new tabs the user opens manually
+        // are NOT tagged, so a fresh shell that happens to land in a pinned
+        // cwd does not auto-launch unexpectedly.
+        for (const tab of app.tabs) this.restoredOuterTabs.add(tab)
+        const captureUntil = this.startupTs + AutoResumeService.RESTORED_CAPTURE_MS
+        const openedSub = app.tabOpened$.subscribe(tab => {
+            if (Date.now() < captureUntil) {
+                this.restoredOuterTabs.add(tab)
+            }
+        })
+
         // States stream fires on every TabMonitor tick AND when a hook
         // event arrives — both moments are useful here. Subscribing to a
-        // dedicated tabOpened$ doesn't help: cwd isn't known at open time
-        // (the shell hasn't reported it yet), so we'd have to wait for
-        // the next states tick anyway.
-        this.sub = monitor.states$.subscribe(states => this.onStates(states))
+        // dedicated tabOpened$ doesn't help for the replay path: cwd isn't
+        // known at open time (the shell hasn't reported it yet, and for
+        // restored non-focused tabs the shell hasn't even spawned yet —
+        // Tabby lazy-initializes sessions on first focus). The states
+        // stream catches the moment cwd lands, whenever that is.
+        const statesSub = monitor.states$.subscribe(states => this.onStates(states))
+
+        this.sub = new Subscription()
+        this.sub.add(openedSub)
+        this.sub.add(statesSub)
     }
 
     ngOnDestroy (): void {
@@ -133,7 +184,6 @@ export class AutoResumeService implements OnDestroy {
 
     private onStates (states: TabState[]): void {
         if (!this.enabled) return
-        const inStartupWindow = Date.now() - this.startupTs < AutoResumeService.RESUME_WINDOW_MS
         const persisted = this.persistedMap
 
         for (const s of states) {
@@ -156,11 +206,19 @@ export class AutoResumeService implements OnDestroy {
                 continue
             }
 
-            // REPLAY: in startup window, freshly-restored tab with a cwd
-            // that matches a persisted entry, agent not running yet,
-            // haven't tried this tab before — schedule the relaunch.
+            // REPLAY: a Tabby-restored tab whose shell has just become live
+            // (cwd known, no agent yet, never attempted), with a cwd that
+            // matches a persisted entry — schedule the relaunch. Gated on
+            // restoredOuterTabs rather than a wall-clock window because
+            // Tabby lazy-initializes terminal sessions: a non-focused
+            // recovered tab has no shell (and therefore no cwd) until the
+            // user clicks it, which can happen well after any reasonable
+            // startup window. Tagging at tabOpened$ time AND requiring the
+            // tab to be in restoredOuterTabs keeps user-opened tabs out
+            // of this path, so a brand-new shell that happens to land in
+            // a pinned cwd is not surprise-launched.
             if (
-                inStartupWindow
+                this.restoredOuterTabs.has(s.outerTab)
                 && s.cwd && !s.aiTool
                 && !this.attempted.has(s.outerTab)
             ) {
