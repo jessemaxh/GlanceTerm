@@ -243,7 +243,13 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             --gt-st-idle:         #8A9099;
             --gt-st-ready:        #5B9EF5;
             --gt-st-active:       #5B9EF5;
-            --gt-st-active-bg:    rgba(91, 158, 245, 0.12);
+            /* Active wash sits at the WeChat-conversation-list ratio: focused
+               row reads as a dominant solid surface, pinned rows are a whisper.
+               Earlier value (0.12 alpha) was the same intensity as pinned-gold
+               (0.10), so an active+pinned screen made the two compete as
+               siblings rather than reading as primary + secondary. Bumped to
+               0.32 to put active at ~6× the weight of pinned. */
+            --gt-st-active-bg:    rgba(91, 158, 245, 0.32);
             --gt-st-perm:         #FF9F45;
             --gt-st-done:         #FF5252;
             --gt-st-done-soft:    rgba(255, 82, 82, 0.14);
@@ -254,7 +260,13 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
                matches the universal "favorite / star / pinned" convention
                and doesn't compete with any status hue. */
             --gt-pin:             #E8C547;
-            --gt-pin-soft:        rgba(232, 197, 71, 0.10);
+            /* Pinned wash is intentionally a whisper — the gold ★ glyph next
+               to the title is the primary "this row is pinned" signal; the
+               background tint is just there so a pinned row is *barely*
+               distinguishable from a non-pinned idle row, without competing
+               visually with the active blue (see --gt-st-active-bg). Was
+               0.10; halved to 0.05 to widen the active-vs-pinned ratio. */
+            --gt-pin-soft:        rgba(232, 197, 71, 0.05);
             --gt-pin-border:      rgba(232, 197, 71, 0.40);
 
             --gt-surface-1: var(--bs-body-bg, #1C1F23);
@@ -457,13 +469,18 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
         }
 
         .row.active { background: var(--gt-st-active-bg); }
+        /* Left rail bar: secondary "you are here" cue alongside the bumped
+           background wash. Widened from 2.5px → 4px so it reads at a glance
+           even when the row is scrolled toward an edge or partially obscured
+           by a hover state — defense in depth for the focus indicator after
+           the WeChat-style background bump. */
         .row.active::before {
             content: "";
             position: absolute;
             left: 0;
             top: 6px;
             bottom: 6px;
-            width: 2.5px;
+            width: 4px;
             border-radius: 0 3px 3px 0;
             background: var(--gt-st-active);
         }
