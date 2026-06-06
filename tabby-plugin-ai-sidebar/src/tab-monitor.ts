@@ -273,6 +273,23 @@ export class TabMonitor implements OnDestroy {
      * survives — see makeState for the update protocol.
      */
     private bgChildrenFirstSeen = new WeakMap<BaseTabComponent, Map<number, number>>()
+    /**
+     * Per-tab set of child pids that have been **definitively** confirmed as
+     * background jobs via a Claude hook signal (PreToolUse(Bash,
+     * run_in_background:true) → claimed against a newly-appeared child on
+     * a subsequent poll tick). Confirmed pids are counted immediately,
+     * bypassing the BG_PERSIST_MS persistence threshold that the unhooked
+     * heuristic relies on. Pids in this set are removed when they exit
+     * (no longer appear in `pgrep -P aiPid`).
+     *
+     * Why a separate set from bgChildrenFirstSeen: pids in firstSeen are
+     * still "auditioning" for bg-job status (the heuristic needs them to
+     * persist past the threshold). Pids in bgConfirmedPids have already
+     * earned the badge — no audition needed. Keeping the two sets
+     * disjoint means the count is `confirmed.size +
+     * (firstSeen entries past threshold).size`, no double counting.
+     */
+    private bgConfirmedPids = new WeakMap<BaseTabComponent, Set<number>>()
 
     readonly states$: Observable<TabState[]> = this.subject.asObservable()
 
@@ -510,15 +527,19 @@ export class TabMonitor implements OnDestroy {
             this.workingSince.delete(t.inner)
         }
 
-        // 5. Background-job count: persistent immediate children of aiPid.
-        //    Only meaningful when there IS an aiPid — for no_ai tabs we
-        //    leave the count at 0 and also drop the tracker so a tab that
+        // 5. Background-job count: confirmed (hook-signaled) + heuristic
+        //    (persisted ≥BG_PERSIST_MS) immediate children of aiPid. Only
+        //    meaningful when there IS an aiPid — for no_ai tabs we leave
+        //    the count at 0 and also drop both trackers so a tab that
         //    later revives starts fresh instead of inheriting stale pids.
+        //    tabId is passed through so we can drain the hook-signaled
+        //    pending-arrival queue against this tick's new children.
         let backgroundJobCount = 0
         if (aiPid !== null) {
-            backgroundJobCount = this.updateBackgroundJobCount(t.inner, aiPid)
+            backgroundJobCount = this.updateBackgroundJobCount(t.inner, aiPid, tabId)
         } else {
             this.bgChildrenFirstSeen.delete(t.inner)
+            this.bgConfirmedPids.delete(t.inner)
         }
 
         return {
@@ -540,32 +561,87 @@ export class TabMonitor implements OnDestroy {
     }
 
     /**
-     * Update the per-tab persistent-children tracker and return the count of
-     * children that have lived at least BG_PERSIST_MS. Pure on its inputs
-     * apart from the WeakMap mutation; the mutation is the whole point —
-     * persistence is what distinguishes a backgrounded shell from a
-     * transient synchronous tool call.
+     * Update the per-tab bg-job trackers and return the total count, which
+     * is `confirmed (live) + heuristic (persisted ≥BG_PERSIST_MS)`. Two
+     * complementary paths:
+     *
+     *   1. Confirmed: Claude's PreToolUse(Bash, run_in_background:true)
+     *      hook events arrive in the watcher's per-tab FIFO queue; this
+     *      method claims one queue entry per newly-appeared child PID and
+     *      promotes that PID to `bgConfirmedPids`, where it counts
+     *      immediately (no persistence delay). Hook-anchored confirmation
+     *      means a long-running synchronous Bash never gets falsely badged.
+     *
+     *   2. Heuristic: PIDs that don't get claimed via the hook (because
+     *      the tab's agent has no adapter, or because the hook arrived
+     *      mid-tick and TabMonitor saw the child before HookWatcher
+     *      processed the event) fall back to "alive for ≥BG_PERSIST_MS
+     *      and you're counted." Over-counts long synchronous calls but
+     *      keeps bg detection working across all agents.
+     *
+     * Both sets evict pids that no longer appear under aiPid. The two
+     * sets are disjoint (a pid is promoted out of firstSeen the moment it
+     * enters confirmed), so the final count is a simple sum with no
+     * double counting.
      */
-    private updateBackgroundJobCount (inner: BaseTabComponent, aiPid: number): number {
+    private updateBackgroundJobCount (
+        inner: BaseTabComponent,
+        aiPid: number,
+        tabId: string | undefined,
+    ): number {
         const now = Date.now()
         const live = new Set(childrenOf(aiPid))
-        let tracker = this.bgChildrenFirstSeen.get(inner)
-        if (!tracker) {
-            tracker = new Map<number, number>()
-            this.bgChildrenFirstSeen.set(inner, tracker)
+
+        // Ensure both trackers exist.
+        let firstSeen = this.bgChildrenFirstSeen.get(inner)
+        if (!firstSeen) {
+            firstSeen = new Map<number, number>()
+            this.bgChildrenFirstSeen.set(inner, firstSeen)
         }
-        // Evict entries for pids that have exited.
-        for (const pid of Array.from(tracker.keys())) {
-            if (!live.has(pid)) tracker.delete(pid)
+        let confirmed = this.bgConfirmedPids.get(inner)
+        if (!confirmed) {
+            confirmed = new Set<number>()
+            this.bgConfirmedPids.set(inner, confirmed)
         }
-        // Age newly-observed pids in.
+
+        // Evict pids no longer alive from BOTH trackers — `kill` /
+        // graceful exit / Claude calling KillShell all converge here.
+        for (const pid of Array.from(firstSeen.keys())) {
+            if (!live.has(pid)) firstSeen.delete(pid)
+        }
+        for (const pid of Array.from(confirmed)) {
+            if (!live.has(pid)) confirmed.delete(pid)
+        }
+
+        // Age newly-observed pids into firstSeen (they enter the heuristic
+        // bucket by default; the hook-claim step below may promote some
+        // of them into confirmed in the same tick).
+        const newThisTick: number[] = []
         for (const pid of live) {
-            if (!tracker.has(pid)) tracker.set(pid, now)
+            if (!firstSeen.has(pid) && !confirmed.has(pid)) {
+                newThisTick.push(pid)
+                firstSeen.set(pid, now)
+            }
         }
-        // Count entries past the persistence threshold.
-        let count = 0
-        for (const firstSeen of tracker.values()) {
-            if (now - firstSeen >= BG_PERSIST_MS) count++
+
+        // Claim hook-signaled arrivals against this tick's new children.
+        // FIFO order on both sides: first new pid gets credited to the
+        // oldest pending arrival. Promoted pids leave firstSeen so we
+        // don't double-count.
+        if (tabId && newThisTick.length > 0) {
+            const claimed = this.hooks.claimBgArrivals(tabId, newThisTick.length)
+            for (let i = 0; i < claimed; i++) {
+                const pid = newThisTick[i]
+                firstSeen.delete(pid)
+                confirmed.add(pid)
+            }
+        }
+
+        // Final count: confirmed pids are counted immediately; heuristic
+        // pids only after they've persisted past the threshold.
+        let count = confirmed.size
+        for (const seenAt of firstSeen.values()) {
+            if (now - seenAt >= BG_PERSIST_MS) count++
         }
         return count
     }
@@ -664,6 +740,7 @@ export class TabMonitor implements OnDestroy {
         // Same reasoning for the bg-children tracker.
         this.workingSince.delete(t.inner)
         this.bgChildrenFirstSeen.delete(t.inner)
+        this.bgConfirmedPids.delete(t.inner)
         return {
             outerTab: t.outer,
             innerTab: t.inner,

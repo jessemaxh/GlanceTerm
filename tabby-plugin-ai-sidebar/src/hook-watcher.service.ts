@@ -26,6 +26,13 @@ interface HookStatusFile {
     session_id?: string
     cwd?: string
     ts: number
+    /** Set to 1 by the handler when this is PreToolUse(Bash) AND
+     *  tool_input.run_in_background == true — i.e. Claude is about to
+     *  spawn a backgrounded shell. TabMonitor uses this as the
+     *  authoritative anchor for "the next new child PID under aiPid is a
+     *  bg job". Older log lines (pre-feature) lack the field; the
+     *  watcher treats absent/0 as "not a bg invocation". */
+    bg?: 0 | 1
 }
 
 /** Per-tab snapshot the rest of the plugin consumes. */
@@ -52,6 +59,16 @@ const TAB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
  *  (issue M2). 30s is comfortably below "user will notice" but rare enough
  *  not to spin disk. */
 const RESCAN_MS = 30_000
+
+/** How long a pending bg-shell arrival (PreToolUse(Bash,
+ *  run_in_background:true) without a matching new child PID yet) is
+ *  allowed to sit in the queue before being discarded. Generous because
+ *  the gap between hook fire and process visibility is normally
+ *  sub-second, and over-aging would cause us to under-count; the only
+ *  failure mode of TOO LARGE a TTL is "if Claude crashed mid-launch,
+ *  the next legitimate bg shell would be falsely credited to the dead
+ *  arrival." A real user wouldn't notice. */
+const BG_ARRIVAL_TTL_MS = 10_000
 
 /**
  * Watches `~/.glanceterm/hooks/` and exposes the latest status per tab id.
@@ -116,6 +133,26 @@ export class HookWatcherService implements OnDestroy {
      *   each event sits at a unique file offset, so both decrement.)
      */
     private readonly subagentInFlight = new Map<string, number>()
+
+    /**
+     * Per-tab FIFO queue of timestamps for PreToolUse(Bash,
+     * run_in_background:true) events that haven't yet been matched to a
+     * concrete child PID by TabMonitor's process-tree poll. Each entry
+     * means "we observed Claude *intend* to background a shell at time T;
+     * the next new child of aiPid that appears in the poll should be
+     * credited to this entry."
+     *
+     * Why a queue, not a count: order matters when several bg shells fire
+     * in quick succession — TabMonitor claims them FIFO to keep the
+     * intent → pid association at least roughly correct under load.
+     *
+     * Entries age out after BG_ARRIVAL_TTL_MS. The TTL covers the case
+     * where the bash invocation was aborted before the shell actually
+     * spawned (Claude crashed, user killed the tab, hook fired but tool
+     * call never executed), so the queue doesn't grow without bound and
+     * a stale arrival doesn't get falsely matched to a much-later child.
+     */
+    private readonly pendingBgArrivals = new Map<string, number[]>()
 
     /**
      * Per-tab byte offset of the next unread byte in `<TAB_ID>.log`. Append-only
@@ -190,6 +227,29 @@ export class HookWatcherService implements OnDestroy {
      *  green even after the main agent fires Stop. */
     getSubagentInFlight (tabId: string): number {
         return this.subagentInFlight.get(tabId) ?? 0
+    }
+
+    /**
+     * Caller (TabMonitor) reports "I just observed N new children appear
+     * under aiPid this poll tick; how many of them should I credit to
+     * hook-signaled bg arrivals?". Returns the count claimed (≤ N), and
+     * removes that many entries from the FIFO. Expired arrivals
+     * (>BG_ARRIVAL_TTL_MS old) are evicted from the queue head before
+     * claiming, so a long-stale arrival can't be matched to a new child.
+     *
+     * Returning 0 means: "all N new children are unattributed; fall back
+     * to the persistence-time heuristic if you want to count them."
+     */
+    claimBgArrivals (tabId: string, maxToClaim: number): number {
+        if (maxToClaim <= 0) return 0
+        const arr = this.pendingBgArrivals.get(tabId)
+        if (!arr || arr.length === 0) return 0
+        const now = Date.now()
+        while (arr.length > 0 && now - arr[0] > BG_ARRIVAL_TTL_MS) arr.shift()
+        const claimable = Math.min(arr.length, maxToClaim)
+        arr.splice(0, claimable)
+        if (arr.length === 0) this.pendingBgArrivals.delete(tabId)
+        return claimable
     }
 
     private async start (): Promise<void> {
@@ -355,7 +415,8 @@ export class HookWatcherService implements OnDestroy {
         const snapshotDropped = this.map.delete(tabId)
         const counterDropped = this.subagentInFlight.delete(tabId)
         const offsetDropped = this.tailOffset.delete(tabId)
-        return snapshotDropped || counterDropped || offsetDropped
+        const bgDropped = this.pendingBgArrivals.delete(tabId)
+        return snapshotDropped || counterDropped || offsetDropped || bgDropped
     }
 
     /**
@@ -399,6 +460,23 @@ export class HookWatcherService implements OnDestroy {
                     this.subagentInFlight.set(parsed.tab_id, 0)
                     changed = true
                 }
+                // Same boundary reset for the bg-arrival queue — a stale
+                // arrival left over from a prior session would otherwise
+                // get falsely matched to the next new child of the freshly
+                // launched agent.
+                if (this.pendingBgArrivals.delete(parsed.tab_id)) changed = true
+            }
+
+            // Background-shell arrival anchor: enqueue a pending arrival when
+            // Claude is about to spawn a backgrounded Bash. Only PreToolUse
+            // with tool_name=Bash AND the handler-extracted bg=1 flag
+            // qualifies; TabMonitor pops these as it observes new children
+            // appear under aiPid. Doesn't touch `changed` — the subscriber
+            // only repaints on TabMonitor's poll cycle anyway.
+            if (parsed.event === 'PreToolUse' && parsed.tool_name === 'Bash' && parsed.bg === 1) {
+                const arr = this.pendingBgArrivals.get(parsed.tab_id) ?? []
+                arr.push(eventAt)
+                this.pendingBgArrivals.set(parsed.tab_id, arr)
             }
 
         }

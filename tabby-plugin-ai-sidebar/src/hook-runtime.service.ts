@@ -114,6 +114,25 @@ TOOL_NAME=$(extract tool_name)
 CWD=$(extract cwd)
 TS=$(date +%s)
 
+# Background-shell indicator: set BG=1 when this is a PreToolUse for the
+# Bash tool with tool_input.run_in_background == true. Used downstream by
+# TabMonitor to definitively credit a new child PID as a backgrounded
+# shell (bypassing the persistence-time heuristic, which is fallback-only
+# for agents we don't have hook adapters for).
+#
+# Pure-sh JSON parsing is not worth the code weight here — Claude emits
+# well-formed JSON, and the literal pattern is unique enough across the
+# documented hook payload schema that a grep is reliable. If a future
+# Claude version embeds the substring inside something other than the
+# tool_input field we'd over-count, but the only known location for the
+# key in Claude's hook payloads IS tool_input.
+BG=0
+if [ "\$EVENT" = "PreToolUse" ] && [ "\$TOOL_NAME" = "Bash" ]; then
+    if printf '%s' "\$PAYLOAD" | grep -qE '"run_in_background"[[:space:]]*:[[:space:]]*true'; then
+        BG=1
+    fi
+fi
+
 # Auto-approve permission prompts (Claude only, P0). When the user has
 # explicitly enabled the feature via the sidebar toggle, AutoApproveService
 # writes "1" to ~/.glanceterm/auto-approve.flag; when disabled, "0". For
@@ -142,8 +161,8 @@ OUT="$STATE_DIR/$TAB_ID.log"
 # other concurrent appenders. Our records are ~250 bytes — well under the
 # limit — so two handler processes firing simultaneously cannot interleave
 # bytes mid-record.
-printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","ts":%s}\\n' \\
-    "$TAB_ID" "$AGENT" "$EVENT" "$MATCHER" "$TOOL_NAME" "$SESSION_ID" "$CWD" "$TS" \\
+printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","ts":%s,"bg":%s}\\n' \\
+    "$TAB_ID" "$AGENT" "$EVENT" "$MATCHER" "$TOOL_NAME" "$SESSION_ID" "$CWD" "$TS" "$BG" \\
     >> "$OUT" 2>/dev/null
 
 exit 0
@@ -190,6 +209,16 @@ if ($json.matcher -and ($json.matcher -is [string])) { $matcher = [string]$json.
 $toolName = ""
 if ($json.tool_name -and ($json.tool_name -is [string])) { $toolName = [string]$json.tool_name }
 
+# Background-shell indicator — see HANDLER_SH for the rationale. PowerShell
+# has native JSON parsing so we can read tool_input.run_in_background
+# directly rather than regex-matching the raw payload.
+$bg = 0
+if ([string]$json.hook_event_name -eq "PreToolUse" -and $toolName -eq "Bash") {
+    if ($json.tool_input -and $json.tool_input.run_in_background -eq $true) {
+        $bg = 1
+    }
+}
+
 $out = [ordered]@{
     tab_id     = [string]$tabId
     agent      = [string]$Agent
@@ -199,6 +228,7 @@ $out = [ordered]@{
     session_id = [string]$json.session_id
     cwd        = [string]$json.cwd
     ts         = [int][double]::Parse((Get-Date -UFormat %s))
+    bg         = [int]$bg
 }
 
 # Auto-approve permission prompts (Claude only, P0) — mirror of the POSIX
