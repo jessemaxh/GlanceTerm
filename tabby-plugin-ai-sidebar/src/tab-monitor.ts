@@ -224,6 +224,21 @@ export class TabMonitor implements OnDestroy {
     private subject = new BehaviorSubject<TabState[]>([])
     private timer?: NodeJS.Timeout
     private busy = false
+    /**
+     * Coalescing flag for `tick()` requests that arrive while a tick is in
+     * flight. Without it, the 50-200 ms async window of one tick swallows
+     * any `tabsChanged$` / `hooks.snapshots$` event that fires during it,
+     * and the next refresh has to wait POLL_MS — re-introducing the lag
+     * the event subscription was added to fix. The boot-recovery path is
+     * the worst offender: AppService's `for (const tab of tabs) openNewTabRaw`
+     * fires N synchronous `tabsChanged.next()`s while the first tick is
+     * still awaiting `buildProcessTreeSnapshot()`, so N-1 of them get
+     * dropped and the sidebar briefly shows only one of the recovered tabs.
+     * With this flag, the in-flight tick re-fires exactly once at the end
+     * regardless of how many events piled up — full state restored within
+     * one extra tick instead of waiting up to 1.5 s for the timer.
+     */
+    private pendingTick = false
     /** Cache so we don't re-stat per tick when nothing has changed. */
     private shellPidCache = new WeakMap<BaseTabComponent, number>()
     /**
@@ -353,6 +368,13 @@ export class TabMonitor implements OnDestroy {
         // A fresh hook event should refresh the UI within the next render
         // cycle even if no poll has fired since — re-emit our last states.
         this.hooks.snapshots$.subscribe(() => { void this.tick() })
+        // Tab open / close / split-pane add+remove / tab-adoption all funnel
+        // through AppService.tabsChanged$ (see app.service.ts addTabRaw + the
+        // SplitTabComponent hookup). Without this the sidebar list only
+        // refreshes on the next POLL_MS tick, so a fresh ⌘T sits invisible
+        // for up to 1.5 s and a closed tab lingers as a ghost row just as
+        // long. One extra tick per tab event is cheap compared to that lag.
+        this.app.tabsChanged$.subscribe(() => { void this.tick() })
     }
 
     ngOnDestroy (): void {
@@ -360,7 +382,13 @@ export class TabMonitor implements OnDestroy {
     }
 
     private async tick (): Promise<void> {
-        if (this.busy) return
+        if (this.busy) {
+            // Record that someone wanted a tick — finally-block re-fires once
+            // after the in-flight tick completes. Idempotent: N events during
+            // one tick still collapse to one re-fire.
+            this.pendingTick = true
+            return
+        }
         this.busy = true
         try {
             const tabs = this.collectTerminalTabs()
@@ -382,6 +410,10 @@ export class TabMonitor implements OnDestroy {
             console.error('[glanceterm] tick failed:', e)
         } finally {
             this.busy = false
+            if (this.pendingTick) {
+                this.pendingTick = false
+                void this.tick()
+            }
         }
     }
 
