@@ -470,29 +470,23 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
         .row[data-status="no_ai"] { opacity: 0.52; }
         .row[data-status="no_ai"]:hover { opacity: 0.75; }
 
-        /* needs_permission rail — inset shadow always; orange wash only when not active
-           so the blue "you are here" surface still wins on an active perm row. */
+        /* needs_permission rail — inset shadow only; no background tint.
+           Per the row-background policy, only normal / pinned / active
+           change the row background. The orange ring is enough to draw
+           the eye, doesn't need a wash fighting the pinned/active surfaces. */
         .row[data-status="needs_permission"] {
             box-shadow: inset 0 0 0 1px rgba(255, 159, 69, 0.35);
         }
-        .row[data-status="needs_permission"]:not(.active) {
-            background: rgba(255, 159, 69, 0.07);
-        }
 
         /* Done row — agent finished, user hasn't engaged with it yet.
-           Quieter than needs_permission (no animated indicator), louder than
-           idle (tinted background). All done styling is gated on :not(.active):
-           an active+done row is common now — attention-notifier fires
-           markReady + chime on every working→idle transition regardless of
-           focus state (see AttentionNotifierService docstring), so even the
-           focused active tab gets marked unread. In that case the blue "you
-           are here" surface wins visually until the user actually engages
-           with the terminal content (scroll, type, or click into the body —
-           see UnreadService docstring for the IM-style engagement model).
-           Tab focus alone does NOT clear unread — that's intentional. */
-        .row[data-status="done"]:not(.active) {
+           Same policy as needs_permission: inset ring carries the signal,
+           no background tint. The dot color + status label "done" are the
+           primary cues; the ring is the secondary one. Active+done rows
+           still get the blue "you are here" wash from .row.active below,
+           which is the intended winner when focus and done coincide
+           (markReady fires regardless of focus, see AttentionNotifierService). */
+        .row[data-status="done"] {
             box-shadow: inset 0 0 0 1px rgba(255, 82, 82, 0.3);
-            background: rgba(255, 82, 82, 0.06);
         }
 
         .row.active { background: var(--gt-st-active-bg); }
