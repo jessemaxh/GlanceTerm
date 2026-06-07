@@ -1,3 +1,12 @@
+// Standalone build config — used when running `npm run build` inside
+// this plugin folder for fast dev iteration. The sibling `.mjs` is used
+// by the monorepo build pipeline (scripts/build-modules.mjs) when
+// packaging the final .dmg / .exe / .AppImage. The two configs use
+// different toolchains by design: this `.js` runs plain `ts-loader`
+// for speed; the `.mjs` goes through `webpack.plugin.config.mjs` which
+// adds `@ngtools/webpack` for the Angular template compile path.
+// Both exist on purpose; webpack-cli picks the `.js` first when run
+// from this directory. Same pattern as tabby-plugin-ai-sidebar.
 const path = require('path')
 
 module.exports = {

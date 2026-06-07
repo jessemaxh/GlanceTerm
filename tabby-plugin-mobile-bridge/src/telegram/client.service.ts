@@ -37,6 +37,21 @@ export class TelegramClientService implements OnDestroy {
     private running = false
     private loopPromise: Promise<void> | null = null
     private abort: AbortController | null = null
+    /**
+     * Serializes start/stop/start sequences. Without it: caller A enters
+     * with running=false, sets running=true; caller B observes running
+     * and awaits stop(); a concurrent C enters with running=false (B's
+     * stop hasn't finished resetting it yet) and starts a parallel
+     * loop. The single loopPromise field then can't track both. The
+     * queue forces start/stop to run one at a time end-to-end.
+     */
+    private lifecycleQueue: Promise<void> = Promise.resolve()
+    /**
+     * Resolved by stop() so backoff sleeps in the poll loop can wake
+     * up immediately on shutdown instead of completing one more poll
+     * with a stale (potentially rotated) token after stop() returns.
+     */
+    private stopSignal: { promise: Promise<void>; resolve: () => void } | null = null
     private updatesSubject = new Subject<TgUpdate>()
     private inboundSubject = new Subject<TgInboundMessage>()
 
@@ -52,21 +67,32 @@ export class TelegramClientService implements OnDestroy {
 
     /**
      * Begin long-polling with `token`. Idempotent: calling start() twice
-     * with the same token is a no-op; calling with a different token stops
-     * the current loop and restarts.
+     * with the same token is a no-op; calling with a different token
+     * stops the current loop and restarts. Serialized via lifecycleQueue
+     * so concurrent start/stop/start sequences don't leak parallel loops.
      */
-    async start (token: string): Promise<void> {
-        if (this.running && this.token === token) return
-        if (this.running) await this.stop()
-        this.token = token
-        this.running = true
-        this.loopPromise = this.loop()
+    start (token: string): Promise<void> {
+        return this.enqueueLifecycle(async () => {
+            if (this.running && this.token === token) return
+            if (this.running) await this.haltLoop()
+            this.token = token
+            this.running = true
+            this.stopSignal = this.newStopSignal()
+            this.loopPromise = this.loop()
+        })
     }
 
-    /** Halt polling. Resolves once the in-flight request unblocks. */
-    async stop (): Promise<void> {
+    /** Halt polling. Resolves once the in-flight request unblocks.
+     *  Serialized via lifecycleQueue. */
+    stop (): Promise<void> {
+        return this.enqueueLifecycle(() => this.haltLoop())
+    }
+
+    private async haltLoop (): Promise<void> {
+        if (!this.running) return
         this.running = false
         this.abort?.abort()
+        this.stopSignal?.resolve()
         try {
             await this.loopPromise
         } catch {
@@ -74,6 +100,19 @@ export class TelegramClientService implements OnDestroy {
         }
         this.loopPromise = null
         this.abort = null
+        this.stopSignal = null
+    }
+
+    private enqueueLifecycle (fn: () => Promise<void>): Promise<void> {
+        const next = this.lifecycleQueue.then(fn)
+        this.lifecycleQueue = next.then(() => undefined, () => undefined)
+        return next
+    }
+
+    private newStopSignal (): { promise: Promise<void>; resolve: () => void } {
+        let resolveFn: () => void = () => undefined
+        const promise = new Promise<void>(r => { resolveFn = r })
+        return { promise, resolve: resolveFn }
     }
 
     ngOnDestroy (): void {
@@ -173,7 +212,17 @@ export class TelegramClientService implements OnDestroy {
                     '[mobile-bridge:telegram] poll error, backing off:',
                     redactToken(err instanceof Error ? err.message : String(err)),
                 )
-                await new Promise(r => setTimeout(r, TelegramClientService.RETRY_MS))
+                // Race the backoff sleep against stop(): if stop() arrives
+                // mid-sleep we want to exit the loop before the timer fires,
+                // otherwise the next iteration would poll one more time with
+                // a potentially rotated token before noticing running=false.
+                const stopPromise = this.stopSignal?.promise ?? new Promise<void>(() => undefined)
+                let timer: ReturnType<typeof setTimeout> | null = null
+                await Promise.race([
+                    new Promise<void>(r => { timer = setTimeout(r, TelegramClientService.RETRY_MS) }),
+                    stopPromise,
+                ])
+                if (timer) clearTimeout(timer)
             }
         }
     }

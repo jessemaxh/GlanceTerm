@@ -42,6 +42,15 @@ export class TopicService {
     private loaded = false
     private loadPromise: Promise<void> | null = null
     private saveTimer: ReturnType<typeof setTimeout> | null = null
+    /**
+     * In-flight `createForumTopic` dedup. Two concurrent callers for the
+     * same (bindingId, tabUuid) used to both issue createForumTopic to
+     * Telegram, leaking orphan topics. Worse: in chats near the 250
+     * active-topics ceiling, the second create would 4xx and burn the
+     * retryWithBackoff budget. Now the second caller shares the first
+     * caller's promise.
+     */
+    private inFlight = new Map<string, Promise<number>>()
 
     constructor (private telegram: TelegramClientService) {}
 
@@ -49,10 +58,9 @@ export class TopicService {
      * Resolve the thread_id for `(binding, identity)`, creating the
      * Forum Topic on Telegram if we've never seen this tab before.
      *
-     * Concurrency note: if two callers race for the same (bindingId,
-     * tabUuid), both could end up calling createForumTopic — we'd
-     * leak one orphan topic per race. v0 accepts this; in practice
-     * event sources are serialized through a single RxJS subscription.
+     * Concurrent calls for the same key share a single createForumTopic
+     * via the inFlight map — see field comment for why this matters
+     * even though event sources are normally serialized.
      */
     async ensureTopic (binding: ChannelBinding, identity: TabIdentity): Promise<number> {
         await this.load()
@@ -68,11 +76,22 @@ export class TopicService {
             })
             return cached.threadId
         }
-        const name = this.formatTitle(identity)
-        const created = await this.telegram.createForumTopic(Number(binding.chatId), name)
-        this.cache.set(key, { threadId: created.message_thread_id, lastTitle: name })
-        this.scheduleSave()
-        return created.message_thread_id
+        const inFlight = this.inFlight.get(key)
+        if (inFlight) return inFlight
+
+        const promise = (async () => {
+            try {
+                const name = this.formatTitle(identity)
+                const created = await this.telegram.createForumTopic(Number(binding.chatId), name)
+                this.cache.set(key, { threadId: created.message_thread_id, lastTitle: name })
+                this.scheduleSave()
+                return created.message_thread_id
+            } finally {
+                this.inFlight.delete(key)
+            }
+        })()
+        this.inFlight.set(key, promise)
+        return promise
     }
 
     /**
