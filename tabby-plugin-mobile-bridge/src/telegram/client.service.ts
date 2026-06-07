@@ -1,7 +1,8 @@
 import { Injectable, OnDestroy } from '@angular/core'
 import { Observable, Subject } from 'rxjs'
 
-import { TgForumTopic, TgInboundMessage, TgMessage, TgUpdate } from './types'
+import { TgForumTopic, TgInboundMessage, TgMessage, TgUpdate, TgUser } from './types'
+import { redactToken } from '../audit-log'
 
 /**
  * Long-poll Telegram Bot API. Outbound-only HTTPS — no public URL, no
@@ -168,7 +169,10 @@ export class TelegramClientService implements OnDestroy {
             } catch (err) {
                 if (!this.running) return
                 // eslint-disable-next-line no-console
-                console.warn('[mobile-bridge:telegram] poll error, backing off:', err)
+                console.warn(
+                    '[mobile-bridge:telegram] poll error, backing off:',
+                    redactToken(err instanceof Error ? err.message : String(err)),
+                )
                 await new Promise(r => setTimeout(r, TelegramClientService.RETRY_MS))
             }
         }
@@ -200,15 +204,25 @@ export class TelegramClientService implements OnDestroy {
         for (const [k, v] of Object.entries(body)) {
             if (v !== undefined && v !== null) clean[k] = v
         }
-        const res = await fetch(
-            `${TelegramClientService.API}/bot${this.token}/${method}`,
-            {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(clean),
-                signal,
-            },
-        )
+        let res: Response
+        try {
+            res = await fetch(
+                `${TelegramClientService.API}/bot${this.token}/${method}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(clean),
+                    signal,
+                },
+            )
+        } catch (err) {
+            // fetch() rejections (DNS, TLS, abort) stringify with the full URL
+            // which contains the bot token. Redact before re-throwing or the
+            // upstream `console.warn(..., err)` / appendAudit({ error }) will
+            // persist the token to disk / devtools.
+            const msg = err instanceof Error ? err.message : String(err)
+            throw new Error(`Telegram ${method}: ${redactToken(msg)}`)
+        }
         const data = await res.json() as { ok: boolean; result?: T; description?: string; error_code?: number }
         if (!data.ok) {
             throw new TelegramApiError(method, data.error_code, data.description ?? 'unknown error')

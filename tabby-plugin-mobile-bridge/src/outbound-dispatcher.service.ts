@@ -9,7 +9,7 @@ import { ChannelBinding } from './binding/types'
 import { TopicService } from './telegram/topic.service'
 import { TelegramClientService } from './telegram/client.service'
 import { retryWithBackoff } from './retry'
-import { appendAudit } from './audit-log'
+import { appendAudit, redactToken } from './audit-log'
 
 /** Event types pushed to phones. Aligned with the per-event-type filter
  *  defaults documented in docs/todo-mobile-bridge.md. */
@@ -47,7 +47,6 @@ export class OutboundDispatcherService implements OnDestroy {
     private static readonly DEFAULT_FILTER: BridgeEventType[] = ['needs_permission', 'task_completed', 'task_failed']
 
     private prevStatus = new WeakMap<object, TabStatus>()
-    private bootstrapped = false
     private subs: Subscription[] = []
 
     constructor (
@@ -76,7 +75,10 @@ export class OutboundDispatcherService implements OnDestroy {
                 await this.telegram.start(active.botToken)
             } catch (err) {
                 // eslint-disable-next-line no-console
-                console.warn('[mobile-bridge:dispatch] telegram start failed:', err)
+                console.warn(
+                    '[mobile-bridge:dispatch] telegram start failed:',
+                    redactToken(err instanceof Error ? err.message : String(err)),
+                )
             }
         } else {
             // No enabled Telegram binding — stop the loop so we're not
@@ -85,6 +87,18 @@ export class OutboundDispatcherService implements OnDestroy {
         }
     }
 
+    /**
+     * First-sight handling: a tab whose `prev` we have not seen before is
+     * recorded silently — no event fires. This avoids the launch-time spam
+     * where TabMonitor's BehaviorSubject seeds with `[]` then immediately
+     * emits the real-but-not-yet-prev-tracked state for every existing
+     * tab, which without this guard would fire a `needs_permission` push
+     * for every tab already in that state.
+     *
+     * The cost: a tab that opens directly into NeedsPermission (rare —
+     * usually a resumed session) won't notify until its NEXT transition.
+     * Acceptable: we prefer silence over spam at launch.
+     */
     private diff (states: TabState[]): void {
         for (const s of states) {
             // Key on innerTab object identity — split panes have distinct inner
@@ -93,13 +107,10 @@ export class OutboundDispatcherService implements OnDestroy {
             const key = s.innerTab as unknown as object
             const prev = this.prevStatus.get(key)
             this.prevStatus.set(key, s.status)
-            if (!this.bootstrapped) continue
+            if (prev === undefined) continue
             if (prev === s.status) continue
             this.detect(s, prev)
         }
-        // Skip the very first emission — every tab "transitions" into its
-        // first state on app launch, and we don't want to push history.
-        this.bootstrapped = true
     }
 
     private detect (s: TabState, prev: TabStatus | undefined): void {
@@ -153,8 +164,9 @@ export class OutboundDispatcherService implements OnDestroy {
                 })
             })
         } catch (err) {
+            const safeMessage = redactToken(err instanceof Error ? err.message : String(err))
             // eslint-disable-next-line no-console
-            console.warn('[mobile-bridge:dispatch] send failed after retries:', err)
+            console.warn('[mobile-bridge:dispatch] send failed after retries:', safeMessage)
             await appendAudit({
                 kind: 'outbound-drop',
                 bindingId: binding.id,
@@ -162,7 +174,7 @@ export class OutboundDispatcherService implements OnDestroy {
                 eventType,
                 tabUuid: identity.uuid,
                 tabIndex: identity.displayIndex,
-                error: err instanceof Error ? err.message : String(err),
+                error: safeMessage,
             })
         }
     }
