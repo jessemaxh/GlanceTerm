@@ -30,6 +30,13 @@ import { ScreenshotPasteService } from './screenshot/paste.service'
 import { ImagePasteHookService } from './image-paste-hook.service'
 import { SplitShellService } from './split-shell.service'
 
+// Public exports for cross-plugin consumers (currently
+// tabby-plugin-mobile-bridge). Surface kept deliberately narrow — every
+// added export becomes a contract that downstream plugins compile and
+// link against. Removing or renaming requires touching every importer.
+export { TabMonitor, TabStatus } from './tab-monitor'
+export type { TabState, AiTool } from './tab-monitor'
+
 const BASE_ICON_INNER = `
   <rect x="1" y="2" width="5" height="12" rx="1" fill="currentColor" opacity="0.85"/>
   <rect x="7" y="2" width="8" height="3" rx="1" fill="currentColor" opacity="0.55"/>

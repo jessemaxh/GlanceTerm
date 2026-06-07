@@ -7,6 +7,7 @@ import { TelegramClientService } from './telegram/client.service'
 import { TopicService } from './telegram/topic.service'
 import { BindingStoreService } from './binding/store.service'
 import { PairingService } from './binding/pairing.service'
+import { OutboundDispatcherService } from './outbound-dispatcher.service'
 
 @NgModule({
     imports: [CommonModule],
@@ -16,6 +17,7 @@ import { PairingService } from './binding/pairing.service'
         TopicService,
         BindingStoreService,
         PairingService,
+        OutboundDispatcherService,
     ],
 })
 export default class MobileBridgeModule {
@@ -33,6 +35,11 @@ export default class MobileBridgeModule {
         // for `/bind <code>` — must be alive at app launch so a pending
         // pairing started by the UI doesn't miss the user's confirmation.
         _pairing: PairingService,
+        // OutboundDispatcher subscribes to TabMonitor.states$ at construct
+        // time. Eager-inject so transitions are observed from launch — a
+        // permission prompt that fires before the first sidebar read
+        // wouldn't notify otherwise.
+        _dispatcher: OutboundDispatcherService,
     ) {
         // eslint-disable-next-line no-console
         console.log('[glanceterm:mobile-bridge] plugin loaded')
