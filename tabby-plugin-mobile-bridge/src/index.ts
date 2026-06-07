@@ -1,6 +1,8 @@
 /* eslint-disable @typescript-eslint/no-extraneous-class */
 import { NgModule } from '@angular/core'
 import { CommonModule } from '@angular/common'
+import { FormsModule } from '@angular/forms'
+import { SettingsTabProvider } from 'tabby-settings'
 
 import { TabIdentityService } from './tab-identity.service'
 import { TelegramClientService } from './telegram/client.service'
@@ -10,9 +12,12 @@ import { PairingService } from './binding/pairing.service'
 import { OutboundDispatcherService } from './outbound-dispatcher.service'
 import { InboundRouterService } from './inbound-router.service'
 import { KeystrokeAdapterRegistry } from './pty-keystroke/registry'
+import { BridgeSettingsComponent } from './settings/settings.component'
+import { BridgeSettingsTabProvider } from './settings/settings.provider'
 
 @NgModule({
-    imports: [CommonModule],
+    imports: [CommonModule, FormsModule],
+    declarations: [BridgeSettingsComponent],
     providers: [
         TabIdentityService,
         TelegramClientService,
@@ -22,6 +27,7 @@ import { KeystrokeAdapterRegistry } from './pty-keystroke/registry'
         OutboundDispatcherService,
         InboundRouterService,
         KeystrokeAdapterRegistry,
+        { provide: SettingsTabProvider, useClass: BridgeSettingsTabProvider, multi: true },
     ],
 })
 export default class MobileBridgeModule {
