@@ -36,7 +36,17 @@ export class TelegramClientService implements OnDestroy {
     private offset = 0
     private running = false
     private loopPromise: Promise<void> | null = null
+    /** Per-iteration abort used by `loop()` for the 35 s long-poll deadline. */
     private abort: AbortController | null = null
+    /**
+     * Session-lived abort. start() creates it; haltLoop() aborts it.
+     * Passed by default to every outbound `call()` so a stop() while a
+     * sendMessage / createForumTopic / editForumTopic is in flight tears
+     * the fetch down instead of leaving it hanging — otherwise stop()
+     * would return but a hung outbound would keep the token live in
+     * an open TCP connection.
+     */
+    private sessionAbort: AbortController | null = null
     /**
      * Serializes start/stop/start sequences. Without it: caller A enters
      * with running=false, sets running=true; caller B observes running
@@ -78,6 +88,7 @@ export class TelegramClientService implements OnDestroy {
             this.token = token
             this.running = true
             this.stopSignal = this.newStopSignal()
+            this.sessionAbort = new AbortController()
             this.loopPromise = this.loop()
         })
     }
@@ -92,6 +103,7 @@ export class TelegramClientService implements OnDestroy {
         if (!this.running) return
         this.running = false
         this.abort?.abort()
+        this.sessionAbort?.abort()
         this.stopSignal?.resolve()
         try {
             await this.loopPromise
@@ -100,6 +112,7 @@ export class TelegramClientService implements OnDestroy {
         }
         this.loopPromise = null
         this.abort = null
+        this.sessionAbort = null
         this.stopSignal = null
     }
 
@@ -216,7 +229,11 @@ export class TelegramClientService implements OnDestroy {
                 // mid-sleep we want to exit the loop before the timer fires,
                 // otherwise the next iteration would poll one more time with
                 // a potentially rotated token before noticing running=false.
-                const stopPromise = this.stopSignal?.promise ?? new Promise<void>(() => undefined)
+                // stopSignal is non-null whenever this iteration runs — start()
+                // initialises it before launching loop(). Assert to make the
+                // invariant explicit; a non-resolving fallback promise would
+                // wedge the loop if the invariant ever broke silently.
+                const stopPromise = this.stopSignal!.promise
                 let timer: ReturnType<typeof setTimeout> | null = null
                 await Promise.race([
                     new Promise<void>(r => { timer = setTimeout(r, TelegramClientService.RETRY_MS) }),
@@ -253,6 +270,11 @@ export class TelegramClientService implements OnDestroy {
         for (const [k, v] of Object.entries(body)) {
             if (v !== undefined && v !== null) clean[k] = v
         }
+        // Default to the session-wide abort so a stop() tears down
+        // in-flight outbound calls (sendMessage / createForumTopic etc.)
+        // alongside the long-poll. Loop already passes its per-iteration
+        // signal explicitly, overriding this default.
+        const effectiveSignal = signal ?? this.sessionAbort?.signal
         let res: Response
         try {
             res = await fetch(
@@ -261,7 +283,7 @@ export class TelegramClientService implements OnDestroy {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(clean),
-                    signal,
+                    signal: effectiveSignal,
                 },
             )
         } catch (err) {

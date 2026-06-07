@@ -71,7 +71,8 @@ export class BindingStoreService {
 
     /**
      * Add a new binding. Mints a fresh internal id; returns it for the
-     * caller's records. Serialized.
+     * caller's records. Serialized, and rewinds the in-memory state if
+     * save() rejects so disk and BehaviorSubject stay consistent.
      */
     add (partial: Omit<ChannelBinding, 'id' | 'createdAt'>): Promise<ChannelBinding> {
         return this.serialize(async () => {
@@ -81,13 +82,11 @@ export class BindingStoreService {
                 id: randomUUID(),
                 createdAt: Date.now(),
             }
-            this.bindingsSubject.next([...this.current, binding])
-            await this.save()
-            return binding
+            return this.applyOrRewind([...this.current, binding], () => binding)
         })
     }
 
-    /** Mutate a binding by id. Throws if not found. Serialized. */
+    /** Mutate a binding by id. Throws if not found. Serialized + rewind. */
     update (id: string, patch: Partial<Omit<ChannelBinding, 'id'>>): Promise<ChannelBinding> {
         return this.serialize(async () => {
             await this.load()
@@ -95,18 +94,15 @@ export class BindingStoreService {
             if (idx < 0) throw new Error(`BindingStore: no binding with id=${id}`)
             const next = [...this.current]
             next[idx] = { ...next[idx], ...patch }
-            this.bindingsSubject.next(next)
-            await this.save()
-            return next[idx]
+            return this.applyOrRewind(next, () => next[idx])
         })
     }
 
-    /** Serialized. */
+    /** Serialized + rewind. */
     remove (id: string): Promise<void> {
         return this.serialize(async () => {
             await this.load()
-            this.bindingsSubject.next(this.current.filter(b => b.id !== id))
-            await this.save()
+            await this.applyOrRewind(this.current.filter(b => b.id !== id), () => undefined as void)
         })
     }
 
@@ -121,6 +117,28 @@ export class BindingStoreService {
         const next = this.writeQueue.then(fn)
         this.writeQueue = next.then(() => undefined, () => undefined)
         return next
+    }
+
+    /**
+     * Two-phase publish: tentatively next() the new state so reactive
+     * consumers see it, then save to disk; if save fails, rewind the
+     * BehaviorSubject to the prior snapshot and rethrow. Without this
+     * a save failure would leave disk and memory permanently diverged —
+     * the next add() would build on the unpersisted state, the user
+     * would see "everything is fine" in the UI, and a relaunch would
+     * silently revert. The transient bad state is acceptable; the
+     * permanent divergence isn't.
+     */
+    private async applyOrRewind<T> (next: ChannelBinding[], result: () => T): Promise<T> {
+        const snapshot = this.current
+        this.bindingsSubject.next(next)
+        try {
+            await this.save()
+        } catch (err) {
+            this.bindingsSubject.next(snapshot)
+            throw err
+        }
+        return result()
     }
 
     /** Find by platform — v0 caps platform to one, so this returns
