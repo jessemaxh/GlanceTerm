@@ -1,4 +1,4 @@
-import { Component, ElementRef, HostListener, NgZone, OnDestroy, OnInit, TemplateRef, ViewChild, ViewEncapsulation } from '@angular/core'
+import { Component, ElementRef, HostListener, NgZone, OnDestroy, OnInit, TemplateRef, ViewChild } from '@angular/core'
 import { Subscription } from 'rxjs'
 import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import * as os from 'os'
@@ -534,6 +534,21 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             margin-right: 5px;
             flex: none;
             line-height: 1;
+            /* Explicit CSS sizing reinforces the inline SVG width/height
+               attributes. Without these, a stylesheet that lands later in
+               the cascade (Bootstrap's reset, an OS-event-triggered re-
+               layout after returning from System Settings, …) can make the
+               SVG inflate to the parent's content box. Observed on macOS
+               returning from System Settings → Privacy & Security: the
+               pin icon grew to ~200px square. Attribute-only sizing on
+               <svg> is not enough; CSS dimensions are. */
+            width: 11px;
+            height: 11px;
+        }
+        .pin-mark > svg, svg.pin-mark {
+            width: 11px;
+            height: 11px;
+            flex: none;
         }
 
         /* ---- subordinate row (extra leaf inside a SplitTabComponent) ----
@@ -988,15 +1003,23 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
         .action-btn.settings-btn { margin-left: auto; }
 
         /* ============================================================
-           Settings modal — rendered inside NgbModal's wrapper. Styles
-           target our own .gt-* classes only so we don't fight Tabby's
-           own modal CSS (NgbModal injects .modal-content/.modal-body
-           around our template; we use those slots' default look and
-           layer our content on top).
+           Settings modal — rendered by NgbModal as an EmbeddedView from
+           our template ref and then RELOCATED into a portal at <body>
+           level. The relocated nodes still carry the [_ngcontent-*]
+           attribute Angular's emulated encapsulation injected, so these
+           selectors STILL match — but the nodes are no longer DOM-
+           descendants of our component's host, so CSS-variable
+           inheritance for :host scoped CSS variables does NOT reach them.
+           Every value here is therefore spelled out literally; no
+           var(--gt-*) lookups across the gap. (Layout / size / flex
+           still work through the matching attribute.) Each rule is
+           prefixed with a .gt-* class to avoid colliding with Tabby's
+           own modal styles, since these rules are effectively global
+           in the relocated-view sense.
            ============================================================ */
         .gt-settings-modal {
-            background: var(--gt-surface-1);
-            color: var(--gt-text);
+            background: #1C1F23;
+            color: #E7E9EC;
             border-radius: 12px;
             overflow: hidden;
             font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, sans-serif;
@@ -1012,20 +1035,20 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             margin: 0;
             font-size: 16px;
             font-weight: 600;
-            color: var(--gt-text);
+            color: #E7E9EC;
         }
         .gt-settings-close {
             background: transparent;
             border: none;
-            color: var(--gt-text-faint);
+            color: #6B7178;
             padding: 4px;
             border-radius: 6px;
             cursor: pointer;
             transition: background 0.12s ease, color 0.12s ease;
         }
         .gt-settings-close:hover {
-            background: var(--gt-surface-2);
-            color: var(--gt-text);
+            background: rgba(255, 255, 255, 0.04);
+            color: #E7E9EC;
         }
         .gt-settings-body {
             padding: 8px 4px;
@@ -1041,7 +1064,7 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             transition: background 0.12s ease;
         }
         .gt-setting-row:hover {
-            background: var(--gt-surface-2);
+            background: rgba(255, 255, 255, 0.04);
         }
         .gt-setting-text {
             flex: 1;
@@ -1050,19 +1073,16 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
         .gt-setting-title {
             font-size: 14px;
             font-weight: 500;
-            color: var(--gt-text);
+            color: #E7E9EC;
             margin-bottom: 4px;
         }
         .gt-setting-desc {
             font-size: 12.5px;
             line-height: 1.5;
-            color: var(--gt-text-faint);
+            color: #6B7178;
         }
 
-        /* iOS-style toggle. Native checkbox is hidden in place
-           (opacity:0, full-size hit area) so the row label and the
-           switch share one click target, and a11y / form association
-           stays correct. */
+        /* iOS-style toggle. Native checkbox, native a11y. */
         .gt-switch {
             appearance: none;
             -webkit-appearance: none;
@@ -1089,13 +1109,13 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
         }
         .gt-switch:checked {
-            background: var(--gt-accent);
+            background: #FFAA55;
         }
         .gt-switch:checked::after {
             transform: translateX(16px);
         }
         .gt-switch:focus-visible {
-            outline: 2px solid var(--gt-accent);
+            outline: 2px solid #FFAA55;
             outline-offset: 2px;
         }
 
@@ -1105,14 +1125,6 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             .gt-switch, .gt-switch::after { transition: none !important; }
         }
     `],
-    /* The modal template gets rendered by NgbModal into <body>, OUTSIDE
-       this component's emulated-encapsulation scope, so Angular's
-       attribute-rewriting strips the `[_ngcontent-…]` selector match.
-       ViewEncapsulation.None disables that rewriting entirely so our
-       .gt-* rules reach the relocated DOM. All rules above are scoped
-       with .gt-* / .sb-* / .row / .dot prefixes that don't collide with
-       Tabby's own component styles. */
-    encapsulation: ViewEncapsulation.None,
 })
 export class AiSidebarComponent implements OnInit, OnDestroy {
     states: TabState[] = []
