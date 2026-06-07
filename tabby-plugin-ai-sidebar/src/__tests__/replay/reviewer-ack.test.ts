@@ -39,7 +39,7 @@ describe('reviewer-ack regression', () => {
 
     it('drops phantom SubagentStop, pops on the real one', () => {
         const harness = new ReplayHarness()
-        const events = loadFixture(import.meta.url, 'fixtures/reviewer-ack-bug.ndjson')
+        const events = loadFixture('reviewer-ack-bug.ndjson')
 
         // After PreToolUse(Agent): no spawn yet (that fires on PostToolUse
         // when tool_response.agentId is available).

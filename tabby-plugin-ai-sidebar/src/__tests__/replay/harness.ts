@@ -21,9 +21,7 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
-import { fileURLToPath } from 'url'
 
-import type { HookAdapter } from '../../hook-adapters/adapter'
 import { HookAdapterRegistry } from '../../hook-adapters/registry'
 import type { HookRuntimeService } from '../../hook-runtime.service'
 import { HookWatcherService, HookSnapshot } from '../../hook-watcher.service'
@@ -69,8 +67,8 @@ export interface TraceEvent {
  *     field. Returns the same `changed` boolean processEvent does so
  *     a future test can assert "this event was a no-op for state".
  */
-class ReplayWatcher extends HookWatcherService {
-    override async start (): Promise<void> {
+class ReplayWatcher extends (HookWatcherService as any) {
+    async start (): Promise<void> {
         // Intentionally empty — see class docstring.
     }
 
@@ -78,14 +76,15 @@ class ReplayWatcher extends HookWatcherService {
         super(registry, runtime)
         // Force-zero the staleness gate. Done in the subclass constructor
         // because the parent set it from Date.now() before this body runs;
-        // overwriting `private readonly` is a deliberate test seam.
+        // overwriting `private readonly` here is a deliberate test seam.
         ;(this as any).startupTs = 0
     }
 
     replay (parsed: TraceEvent): boolean {
-        const adapter = this.registry.forTool(parsed.agent as any)
+        const reg = (this as any).registry as HookAdapterRegistry
+        const adapter = reg.forTool(parsed.agent as any)
         if (!adapter) return false
-        return (this as any).processEvent(parsed, adapter as HookAdapter)
+        return (this as any).processEvent(parsed, adapter)
     }
 
     /** Direct read of the per-tab live-id set for assertions that go
@@ -141,14 +140,19 @@ export class ReplayHarness {
 }
 
 /**
- * Load and parse an NDJSON fixture file. Path is resolved relative to
- * the test file's directory so spec authors write `loadFixture(import.meta.url, 'foo.ndjson')`
- * instead of computing absolute paths by hand. Skips blank lines so
- * fixtures can be visually grouped with empty separators.
+ * Load and parse an NDJSON fixture file by name. Fixtures live in a
+ * fixed location relative to the package root (`src/__tests__/replay/
+ * fixtures/`); vitest runs from the package directory so process.cwd()
+ * resolves correctly. Skips blank lines so fixtures can be visually
+ * grouped with empty separators.
+ *
+ * Authoring choice over import.meta-relative resolution: the root
+ * tsconfig still targets module=es2015 for the production bundle,
+ * which forbids import.meta. A fixed lookup directory keeps tests
+ * portable across both the bundler-built and ts-node-direct paths.
  */
-export function loadFixture (specUrl: string, relPath: string): TraceEvent[] {
-    const specDir = path.dirname(fileURLToPath(specUrl))
-    const fullPath = path.resolve(specDir, relPath)
+export function loadFixture (name: string): TraceEvent[] {
+    const fullPath = path.resolve(process.cwd(), 'src/__tests__/replay/fixtures', name)
     const raw = fs.readFileSync(fullPath, 'utf8')
     return raw
         .split('\n')
