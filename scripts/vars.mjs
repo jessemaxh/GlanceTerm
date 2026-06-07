@@ -33,6 +33,7 @@ export const builtinPlugins = [
     'tabby-linkifier',
     'tabby-auto-sudo-password',
     'tabby-plugin-ai-sidebar',  // GlanceTerm AI sidebar — bundled by default
+    'tabby-plugin-mobile-bridge',  // GlanceTerm mobile bridge — Telegram + 飞书
 ]
 
 export const packagesWithDocs = [
