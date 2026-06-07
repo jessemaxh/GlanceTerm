@@ -81,7 +81,7 @@ export class InboundRouterService implements OnDestroy {
             return
         }
 
-        const tabUuid = this.topics.findByThread(binding.id, msg.topicId)
+        const tabUuid = await this.topics.findByThread(binding.id, msg.topicId)
         if (!tabUuid) {
             await this.audit(msg, 'topic-not-bound')
             return

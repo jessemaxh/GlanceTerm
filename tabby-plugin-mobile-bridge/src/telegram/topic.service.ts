@@ -136,8 +136,15 @@ export class TopicService {
      * scan of the cache — fine for v0 (cache size = # of tabs ever
      * messaged, expected dozens at most). Promote to a reverse map if
      * the scan ever shows up in a profile.
+     *
+     * Awaits `load()` so a fresh process whose first activity is an
+     * inbound reply (rather than an outbound event) doesn't read an
+     * empty cache and silently drop the message as `topic-not-bound`.
+     * load() is idempotent and gated by `loadPromise` so concurrent
+     * inbound + outbound paths share the same disk read.
      */
-    findByThread (bindingId: string, threadId: number): string | undefined {
+    async findByThread (bindingId: string, threadId: number): Promise<string | undefined> {
+        await this.load()
         const prefix = `${bindingId}|`
         for (const [k, v] of this.cache) {
             if (v.threadId === threadId && k.startsWith(prefix)) {

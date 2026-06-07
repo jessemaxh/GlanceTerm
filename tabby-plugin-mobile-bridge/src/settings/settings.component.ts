@@ -125,10 +125,10 @@ export class BridgeSettingsComponent implements OnDestroy {
         this.bindings$ = this.store.bindings$
         void this.store.load()
 
-        this.completedSub = this.pairingSvc.completedPairing$.subscribe(b => {
-            // RxJS BehaviorSubject also emits the initial `null` — guard so
-            // we only clear UI on a real completion.
-            if (!b) return
+        this.completedSub = this.pairingSvc.completedPairing$.subscribe(_b => {
+            // Plain Subject now (was BehaviorSubject) — no replay on
+            // resubscribe, so we don't need to guard against null
+            // initial emissions any more.
             this.zone.run(() => {
                 this.pairing = null
                 this.botToken = ''

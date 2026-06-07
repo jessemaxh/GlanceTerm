@@ -28,6 +28,14 @@ export class BindingStoreService {
     private bindingsSubject = new BehaviorSubject<ChannelBinding[]>([])
     private loaded = false
     private loadPromise: Promise<void> | null = null
+    /**
+     * Serializes all mutations through a single promise chain. Without
+     * this, two concurrent callers (e.g. settings UI toggle racing with
+     * PairingService.onTelegramInbound's store.add) both read the same
+     * BehaviorSubject snapshot, mutate, and the second writer wipes
+     * the first writer's change.
+     */
+    private writeQueue: Promise<unknown> = Promise.resolve()
 
     /** Stream of current bindings. Cold subscribers get the latest snapshot. */
     get bindings$ (): Observable<ChannelBinding[]> { return this.bindingsSubject }
@@ -63,36 +71,56 @@ export class BindingStoreService {
 
     /**
      * Add a new binding. Mints a fresh internal id; returns it for the
-     * caller's records.
+     * caller's records. Serialized.
      */
-    async add (partial: Omit<ChannelBinding, 'id' | 'createdAt'>): Promise<ChannelBinding> {
-        await this.load()
-        const binding: ChannelBinding = {
-            ...partial,
-            id: randomUUID(),
-            createdAt: Date.now(),
-        }
-        this.bindingsSubject.next([...this.current, binding])
-        await this.save()
-        return binding
+    add (partial: Omit<ChannelBinding, 'id' | 'createdAt'>): Promise<ChannelBinding> {
+        return this.serialize(async () => {
+            await this.load()
+            const binding: ChannelBinding = {
+                ...partial,
+                id: randomUUID(),
+                createdAt: Date.now(),
+            }
+            this.bindingsSubject.next([...this.current, binding])
+            await this.save()
+            return binding
+        })
     }
 
-    /** Mutate a binding by id. Throws if not found. */
-    async update (id: string, patch: Partial<Omit<ChannelBinding, 'id'>>): Promise<ChannelBinding> {
-        await this.load()
-        const idx = this.current.findIndex(b => b.id === id)
-        if (idx < 0) throw new Error(`BindingStore: no binding with id=${id}`)
-        const next = [...this.current]
-        next[idx] = { ...next[idx], ...patch }
-        this.bindingsSubject.next(next)
-        await this.save()
-        return next[idx]
+    /** Mutate a binding by id. Throws if not found. Serialized. */
+    update (id: string, patch: Partial<Omit<ChannelBinding, 'id'>>): Promise<ChannelBinding> {
+        return this.serialize(async () => {
+            await this.load()
+            const idx = this.current.findIndex(b => b.id === id)
+            if (idx < 0) throw new Error(`BindingStore: no binding with id=${id}`)
+            const next = [...this.current]
+            next[idx] = { ...next[idx], ...patch }
+            this.bindingsSubject.next(next)
+            await this.save()
+            return next[idx]
+        })
     }
 
-    async remove (id: string): Promise<void> {
-        await this.load()
-        this.bindingsSubject.next(this.current.filter(b => b.id !== id))
-        await this.save()
+    /** Serialized. */
+    remove (id: string): Promise<void> {
+        return this.serialize(async () => {
+            await this.load()
+            this.bindingsSubject.next(this.current.filter(b => b.id !== id))
+            await this.save()
+        })
+    }
+
+    /**
+     * Queue `fn` after any in-flight mutation. The queue tail is reset
+     * to a resolved promise after each step so a single failure
+     * doesn't poison every subsequent mutation; the returned promise
+     * still rejects with the original error for the caller of the
+     * failing op.
+     */
+    private serialize<T> (fn: () => Promise<T>): Promise<T> {
+        const next = this.writeQueue.then(fn)
+        this.writeQueue = next.then(() => undefined, () => undefined)
+        return next
     }
 
     /** Find by platform — v0 caps platform to one, so this returns
@@ -101,10 +129,24 @@ export class BindingStoreService {
         return this.current.find(b => b.platform === platform)
     }
 
+    /**
+     * Atomic write: tmp + rename. A crash mid-`writeFile` to the real
+     * path would truncate the bindings file; next launch's load would
+     * log "starting empty" and silently abandon every binding the user
+     * had set up, including bot tokens. Renaming from a fully-written
+     * tmp file collapses the failure window to the rename, which is
+     * atomic on POSIX filesystems.
+     *
+     * Tmp filename includes PID so two GlanceTerm instances writing
+     * concurrently (not a supported config, but cheap to defend
+     * against) don't trample each other's staging file.
+     */
     private async save (): Promise<void> {
         const dir = path.dirname(BindingStoreService.FILE)
         await fs.mkdir(dir, { recursive: true })
+        const tmp = `${BindingStoreService.FILE}.${process.pid}.tmp`
         const json = JSON.stringify(this.current, null, 2)
-        await fs.writeFile(BindingStoreService.FILE, json, { encoding: 'utf8', mode: 0o600 })
+        await fs.writeFile(tmp, json, { encoding: 'utf8', mode: 0o600 })
+        await fs.rename(tmp, BindingStoreService.FILE)
     }
 }

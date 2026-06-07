@@ -1,5 +1,5 @@
 import { Injectable, OnDestroy } from '@angular/core'
-import { BehaviorSubject, Observable, Subscription } from 'rxjs'
+import { BehaviorSubject, Observable, Subject, Subscription } from 'rxjs'
 
 import { TelegramClientService } from '../telegram/client.service'
 import { BindingStoreService } from './store.service'
@@ -34,7 +34,13 @@ export class PairingService implements OnDestroy {
     private static readonly SWEEP_MS = 30_000
 
     private pendingSubject = new BehaviorSubject<PendingPairing[]>([])
-    private completedSubject = new BehaviorSubject<ChannelBinding | null>(null)
+    /**
+     * Plain Subject (NOT BehaviorSubject): we DON'T want late subscribers
+     * to replay the last completion. The settings dialog can be opened
+     * a second time long after a pairing; with BehaviorSubject the
+     * dialog would re-run the "clear UI" handler on every reopen.
+     */
+    private completedSubject = new Subject<ChannelBinding>()
     private telegramSub: Subscription | null = null
     private sweepHandle: ReturnType<typeof setInterval> | null = null
 
@@ -53,8 +59,8 @@ export class PairingService implements OnDestroy {
     /** Currently-active pairing codes (with expiry). UI displays these. */
     get pending$ (): Observable<PendingPairing[]> { return this.pendingSubject }
 
-    /** Fires once when a `/bind` succeeds. UI listens to clear the spinner. */
-    get completedPairing$ (): Observable<ChannelBinding | null> { return this.completedSubject }
+    /** Fires once per `/bind` success. UI listens to clear the spinner. */
+    get completedPairing$ (): Observable<ChannelBinding> { return this.completedSubject }
 
     /**
      * Begin Telegram pairing. Starts the long-poll loop with the given
@@ -68,11 +74,17 @@ export class PairingService implements OnDestroy {
         await this.store.load()
 
         // Subscribe lazily so we only listen once even if pairing is
-        // retried multiple times within the same session.
+        // retried multiple times within the same session. Errors inside
+        // the handler (e.g. store.add() write failure) are surfaced
+        // through console.warn — the previous `void` swallowed them and
+        // left the user staring at a pairing UI that never completed.
         if (!this.telegramSub) {
-            this.telegramSub = this.telegram.inboundMessages$.subscribe(
-                msg => void this.onTelegramInbound(msg),
-            )
+            this.telegramSub = this.telegram.inboundMessages$.subscribe(msg => {
+                this.onTelegramInbound(msg).catch(err => {
+                    // eslint-disable-next-line no-console
+                    console.warn('[mobile-bridge:pairing] inbound handler failed:', err)
+                })
+            })
         }
 
         await this.telegram.start(botToken)
@@ -92,6 +104,24 @@ export class PairingService implements OnDestroy {
     /** Cancel a still-pending code (UI "back" button). */
     cancelPending (code: string): void {
         this.pendingSubject.next(this.pendingSubject.value.filter(p => p.code !== code))
+        void this.maybeStopTransport()
+    }
+
+    /**
+     * Stop the Telegram long-poll if there's no enabled binding AND no
+     * remaining pending pairing for that platform. Without this, an
+     * abandoned pairing leaves the bot polling api.telegram.org forever
+     * with no binding to deliver messages to.
+     *
+     * Safe to call repeatedly: TelegramClient.stop() is idempotent.
+     * OutboundDispatcher.syncTransport will (re-)start the loop on the
+     * next bindings$ emission if a binding becomes enabled.
+     */
+    private async maybeStopTransport (): Promise<void> {
+        const stillNeeded =
+            this.store.current.some(b => b.platform === 'telegram' && b.enabled)
+            || this.pendingSubject.value.some(p => p.platform === 'telegram')
+        if (!stillNeeded) await this.telegram.stop()
     }
 
     private async onTelegramInbound (msg: { chatId: number; senderId: number; text: string; senderUsername?: string }): Promise<void> {
@@ -125,6 +155,7 @@ export class PairingService implements OnDestroy {
         const live = this.pendingSubject.value.filter(p => p.expiresAt > now)
         if (live.length !== this.pendingSubject.value.length) {
             this.pendingSubject.next(live)
+            void this.maybeStopTransport()
         }
     }
 
