@@ -8,6 +8,7 @@ import { TopicService } from './telegram/topic.service'
 import { BindingStoreService } from './binding/store.service'
 import { PairingService } from './binding/pairing.service'
 import { OutboundDispatcherService } from './outbound-dispatcher.service'
+import { InboundRouterService } from './inbound-router.service'
 
 @NgModule({
     imports: [CommonModule],
@@ -18,6 +19,7 @@ import { OutboundDispatcherService } from './outbound-dispatcher.service'
         BindingStoreService,
         PairingService,
         OutboundDispatcherService,
+        InboundRouterService,
     ],
 })
 export default class MobileBridgeModule {
@@ -40,6 +42,10 @@ export default class MobileBridgeModule {
         // permission prompt that fires before the first sidebar read
         // wouldn't notify otherwise.
         _dispatcher: OutboundDispatcherService,
+        // InboundRouter subscribes to TelegramClient.inboundMessages$ at
+        // construct time. Eager-inject so a reply that arrives before
+        // anything else reads the service still routes to the PTY.
+        _router: InboundRouterService,
     ) {
         // eslint-disable-next-line no-console
         console.log('[glanceterm:mobile-bridge] plugin loaded')

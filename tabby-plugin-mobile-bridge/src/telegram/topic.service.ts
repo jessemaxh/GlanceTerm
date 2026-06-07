@@ -130,6 +130,23 @@ export class TopicService {
         return this.cache.get(this.key(bindingId, tabUuid))?.threadId
     }
 
+    /**
+     * Reverse lookup: given a Telegram thread_id seen on an inbound
+     * message, find the originating tab UUID for that binding. Linear
+     * scan of the cache — fine for v0 (cache size = # of tabs ever
+     * messaged, expected dozens at most). Promote to a reverse map if
+     * the scan ever shows up in a profile.
+     */
+    findByThread (bindingId: string, threadId: number): string | undefined {
+        const prefix = `${bindingId}|`
+        for (const [k, v] of this.cache) {
+            if (v.threadId === threadId && k.startsWith(prefix)) {
+                return k.substring(prefix.length)
+            }
+        }
+        return undefined
+    }
+
     private key (bindingId: string, tabUuid: string): string {
         return `${bindingId}|${tabUuid}`
     }
