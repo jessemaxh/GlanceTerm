@@ -114,6 +114,35 @@ TOOL_NAME=$(extract tool_name)
 CWD=$(extract cwd)
 TS=$(date +%s)
 
+# Subagent identity fields. Source of truth for the id-based pairing in
+# hook-watcher.service.ts — see processEvent() and the AGENT_ID lifecycle
+# notes there.
+#
+#   agent_id        present at TOP LEVEL on every hook event that fires inside
+#                   a subagent's own turn (subagent's PreToolUse/PostToolUse,
+#                   subagent's SubagentStop). Absent on the main agent's own
+#                   events. We use it as the "which subagent is this for"
+#                   key and as a passive liveness signal: any hook event with
+#                   agent_id=X proves subagent X is still running, so we add
+#                   X to the live set even without seeing an explicit spawn.
+#   agent_type      present alongside agent_id ("general-purpose", "Explore",
+#                   etc.). Mostly informational — kept so the sidebar can show
+#                   "Reviewing… (Explore)" instead of just "working".
+#   spawn_agent_id  extracted from PostToolUse(Agent)'s tool_response.agentId —
+#                   that's where Claude returns the id of a freshly-launched
+#                   subagent. Authoritative spawn signal: the moment we read
+#                   it, that id is live. Note the camelCase: top-level
+#                   subagent fields are snake_case (agent_id) and the nested
+#                   tool_response from the Agent tool uses camelCase
+#                   (agentId). \`extract\` matches on key literal so the two
+#                   don't collide.
+AGENT_ID=$(extract agent_id)
+AGENT_TYPE=$(extract agent_type)
+SPAWN_AGENT_ID=""
+if [ "\$EVENT" = "PostToolUse" ] && [ "\$TOOL_NAME" = "Agent" ]; then
+    SPAWN_AGENT_ID=$(extract agentId)
+fi
+
 # Background-shell indicator: set BG=1 when this is a PreToolUse for the
 # Bash tool with tool_input.run_in_background == true. Used downstream by
 # TabMonitor to definitively credit a new child PID as a backgrounded
@@ -161,8 +190,8 @@ OUT="$STATE_DIR/$TAB_ID.log"
 # other concurrent appenders. Our records are ~250 bytes — well under the
 # limit — so two handler processes firing simultaneously cannot interleave
 # bytes mid-record.
-printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","ts":%s,"bg":%s}\\n' \\
-    "$TAB_ID" "$AGENT" "$EVENT" "$MATCHER" "$TOOL_NAME" "$SESSION_ID" "$CWD" "$TS" "$BG" \\
+printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","ts":%s,"bg":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s"}\\n' \\
+    "$TAB_ID" "$AGENT" "$EVENT" "$MATCHER" "$TOOL_NAME" "$SESSION_ID" "$CWD" "$TS" "$BG" "$AGENT_ID" "$AGENT_TYPE" "$SPAWN_AGENT_ID" \\
     >> "$OUT" 2>/dev/null
 
 exit 0
@@ -209,6 +238,21 @@ if ($json.matcher -and ($json.matcher -is [string])) { $matcher = [string]$json.
 $toolName = ""
 if ($json.tool_name -and ($json.tool_name -is [string])) { $toolName = [string]$json.tool_name }
 
+# Subagent identity — see the HANDLER_SH equivalent block for the full
+# contract. PowerShell can hit nested fields directly via ConvertFrom-Json,
+# so the spawn-id extraction is just $json.tool_response.agentId — no
+# regex fishing in the raw payload.
+$agentId = ""
+if ($json.agent_id -and ($json.agent_id -is [string])) { $agentId = [string]$json.agent_id }
+$agentType = ""
+if ($json.agent_type -and ($json.agent_type -is [string])) { $agentType = [string]$json.agent_type }
+$spawnAgentId = ""
+if ([string]$json.hook_event_name -eq "PostToolUse" -and $toolName -eq "Agent") {
+    if ($json.tool_response -and $json.tool_response.agentId) {
+        $spawnAgentId = [string]$json.tool_response.agentId
+    }
+}
+
 # Background-shell indicator — see HANDLER_SH for the rationale. PowerShell
 # has native JSON parsing so we can read tool_input.run_in_background
 # directly rather than regex-matching the raw payload.
@@ -220,15 +264,18 @@ if ([string]$json.hook_event_name -eq "PreToolUse" -and $toolName -eq "Bash") {
 }
 
 $out = [ordered]@{
-    tab_id     = [string]$tabId
-    agent      = [string]$Agent
-    event      = [string]$json.hook_event_name
-    matcher    = $matcher
-    tool_name  = $toolName
-    session_id = [string]$json.session_id
-    cwd        = [string]$json.cwd
-    ts         = [int][double]::Parse((Get-Date -UFormat %s))
-    bg         = [int]$bg
+    tab_id          = [string]$tabId
+    agent           = [string]$Agent
+    event           = [string]$json.hook_event_name
+    matcher         = $matcher
+    tool_name       = $toolName
+    session_id      = [string]$json.session_id
+    cwd             = [string]$json.cwd
+    ts              = [int][double]::Parse((Get-Date -UFormat %s))
+    bg              = [int]$bg
+    agent_id        = $agentId
+    agent_type      = $agentType
+    spawn_agent_id  = $spawnAgentId
 }
 
 # Auto-approve permission prompts (Claude only, P0) — mirror of the POSIX

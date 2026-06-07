@@ -33,6 +33,26 @@ interface HookStatusFile {
      *  bg job". Older log lines (pre-feature) lack the field; the
      *  watcher treats absent/0 as "not a bg invocation". */
     bg?: 0 | 1
+    /** Top-level `agent_id` from the raw Claude hook payload. Present on
+     *  every hook event fired inside a subagent's own turn — the subagent's
+     *  own PreToolUse / PostToolUse / SubagentStop. Absent on the main
+     *  agent's own events. Drives id-based subagent pairing in
+     *  `processEvent`: SubagentStop with this id matching a tracked live
+     *  agent → real completion (pop). Mismatch → phantom (ignore).
+     *  Older log lines (pre-feature) lack the field. */
+    agent_id?: string
+    /** Companion to `agent_id` — the subagent's declared agent_type
+     *  ("general-purpose", "Explore", ...). Informational; the sidebar
+     *  can show it inline as "Reviewing (Explore)" instead of a generic
+     *  "working". Pairing logic doesn't depend on it. */
+    agent_type?: string
+    /** Authoritative spawn signal — extracted by the handler from
+     *  `PostToolUse(Agent).tool_response.agentId`, the field Claude
+     *  uses to return the id of a freshly-launched subagent (both
+     *  background and foreground). Once we read this id we know the
+     *  subagent is live until a SubagentStop with matching `agent_id`
+     *  arrives. Empty on every other event. */
+    spawn_agent_id?: string
 }
 
 /** Per-tab snapshot the rest of the plugin consumes. */
@@ -90,79 +110,61 @@ const BG_ARRIVAL_TTL_MS = 10_000
 const HOOK_LOG_RETENTION_MS = 7 * 24 * 60 * 60_000
 
 /**
- * Subagent pairing window — when a SubagentStop fires, only the queued
- * spawns whose age (eventAt − spawnTs) sits inside this band are eligible
- * to be popped as the "completion" of that Stop. Outside the band the
- * Stop is treated as Claude noise and dropped.
+ * Tagged union for the per-tab subagent-id set reducer.
  *
- * MIN_AGE = 30s: in observed Claude Code 2026-06 traces, every
- *   `PreToolUse(Agent)` is followed by a SubagentStop within ~16s, even
- *   when the spawned subagent goes on to do minutes of work. Treat that
- *   first close-on-the-heels Stop as an instant-ACK on the spawn and
- *   drop it; the next real Stop will pair correctly once age > MIN.
- * MAX_AGE = 4min: SubagentStops fired more than 4 minutes after the
- *   oldest unpaired spawn are kept as "spawn is still long-running, this
- *   Stop is probably main-agent noise" rather than paired. Looking at
- *   real traces, fast subagents finish within 3-4 minutes and we want to
- *   pair those; backgrounded reviewers commonly run 10+ minutes and we'd
- *   rather over-display "1 agent" (FP) for one we can't tell is done
- *   than under-display "0 agents" (FN) for one that's still chewing.
- *   Stale queue entries clear at SessionStart/End.
- *
- * Picked over MAX=5min because under that wider band, real traces showed
- * spurious Stops slipping through and decrementing real backgrounded
- * agents to 0 — re-creating the bug we set out to fix.
- */
-export const SUBAGENT_PAIR_MIN_AGE_MS = 30_000
-export const SUBAGENT_PAIR_MAX_AGE_MS = 4 * 60_000
-
-/**
- * Single subagent-event tagged union that `reduceSubagentQueue` operates on.
  * Crosses the boundary between hook-event parsing (which knows about
- * `PreToolUse`, `SubagentStop`, etc.) and the pairing reducer (which only
- * cares about spawn / stop / reset). Decoupled this way so the reducer
- * stays a pure function and can be exhaustively unit-tested without a hook
- * event JSON harness.
+ * `PostToolUse(Agent)`, `SubagentStop`, etc.) and the set reducer (which
+ * only cares about add / remove / reset). Decoupled this way so the
+ * reducer stays a pure function and can be exhaustively unit-tested
+ * without a hook event JSON harness.
  */
 export type SubagentEvent =
-    | { kind: 'spawn'; at: number }
-    | { kind: 'stop'; at: number }
+    | { kind: 'spawn'; agentId: string }
+    | { kind: 'stop'; agentId: string }
     | { kind: 'reset' }
 
 /**
- * Pure-function reduction over the per-tab subagent in-flight queue.
+ * Pure-function reduction over the per-tab live-subagent set.
  *
- * Returns the next queue state. Caller owns persistence; we never mutate
+ * Returns the next set state. Caller owns persistence; we never mutate
  * the input. Extracted from `HookWatcherService.processEvent` so the
- * pairing semantics can be unit-tested without standing up the DI graph
- * and so a future tweak to the pairing window can be locked behind tests.
+ * pairing semantics can be unit-tested without standing up the DI graph.
  *
  * Semantics:
- *   - `spawn`: append `at` to the queue.
- *   - `stop`: pop the oldest queued spawn IFF its age (now - oldest) is
- *     in the closed band [SUBAGENT_PAIR_MIN_AGE_MS, SUBAGENT_PAIR_MAX_AGE_MS].
- *     Outside the band → no change. See `subagentInFlight` doc on the
- *     class for the empirical rationale on these numbers.
- *   - `reset`: clear the queue (used on SessionStart / SessionEnd to
- *     prevent stale spawns from a prior session pinning the row).
+ *   - `spawn`: add `agentId` to the set. Idempotent — re-adding an id
+ *     already present is a no-op (returns the same reference). Lets the
+ *     processEvent caller pass BOTH the authoritative spawn signal
+ *     (PostToolUse(Agent).tool_response.agentId) AND the passive liveness
+ *     signal (any hook event with top-level agent_id set) through the
+ *     same path without double-counting.
+ *   - `stop`: remove `agentId` from the set. No-op (identity-preserving)
+ *     if the id wasn't tracked — that's how we drop "phantom" SubagentStop
+ *     events Claude Code fires for subagents we never observed spawning
+ *     (orphan ids from internal CC lifecycle, or pre-startup spawns whose
+ *     PostToolUse(Agent) sits in a stale log line).
+ *   - `reset`: clear the set (used on SessionStart / SessionEnd to drop
+ *     stale ids from prior sessions).
  *
- * Identity-preserving on no-op: returns the same array reference when
- * the event doesn't change state, so callers can cheaply detect "no
- * change" via reference equality if they care.
+ * Identity-preserving on no-op: returns the same Set reference when the
+ * event doesn't change state, so callers can cheaply detect "no change"
+ * via reference equality.
  */
-export function reduceSubagentQueue (
-    queue: readonly number[],
+export function reduceSubagentSet (
+    set: ReadonlySet<string>,
     ev: SubagentEvent,
-): readonly number[] {
-    if (ev.kind === 'reset') return queue.length === 0 ? queue : []
-    if (ev.kind === 'spawn') return [...queue, ev.at]
-    // ev.kind === 'stop'
-    if (queue.length === 0) return queue
-    const ageMs = ev.at - queue[0]
-    if (ageMs >= SUBAGENT_PAIR_MIN_AGE_MS && ageMs <= SUBAGENT_PAIR_MAX_AGE_MS) {
-        return queue.slice(1)
+): ReadonlySet<string> {
+    if (ev.kind === 'reset') return set.size === 0 ? set : new Set()
+    if (ev.kind === 'spawn') {
+        if (set.has(ev.agentId)) return set
+        const next = new Set(set)
+        next.add(ev.agentId)
+        return next
     }
-    return queue
+    // ev.kind === 'stop'
+    if (!set.has(ev.agentId)) return set
+    const next = new Set(set)
+    next.delete(ev.agentId)
+    return next
 }
 
 /**
@@ -202,60 +204,54 @@ export class HookWatcherService implements OnDestroy {
     readonly snapshots$: Observable<Map<string, HookSnapshot>> = this.subject.asObservable()
 
     /**
-     * Per-tab queue of in-flight subagent spawn timestamps (ms since epoch).
-     * Array length = how many subagents we believe are currently running.
-     * TabMonitor consults this length to override raw `idle` to `working`
-     * while > 0, which fixes the "main agent's Stop fired but a backgrounded
-     * subagent is still chewing tokens" case where the row would otherwise
-     * read as ready.
+     * Per-tab set of currently-live subagent agent_ids. Set size = how
+     * many subagents we believe are running. TabMonitor consults this
+     * count to override raw `idle` to `working` while > 0, which fixes
+     * the "main agent's Stop fired but a backgrounded subagent is still
+     * chewing tokens" case where the row would otherwise read as ready.
      *
-     * Why an array of timestamps instead of a plain count:
+     * Why id-based instead of the older timestamp-window heuristic:
      *
-     *   Claude Code (as of June 2026) fires `SubagentStop` LIBERALLY —
-     *   in observed traces we counted as many as 15 SubagentStop events
-     *   for 4 PreToolUse(Agent) spawns in a single session, AND tabs with
-     *   0 Agent spawns receiving 4 SubagentStops in the same session.
-     *   Many SubagentStops fire shortly after every `Stop` event (3-180s
-     *   after) regardless of whether a real subagent was spawned. The
-     *   pre-fix plain count `--` on every SubagentStop floored the
-     *   counter to 0 even while real subagents were still running, so
-     *   "backgrounded reviewer in progress" tabs displayed as ready.
+     *   Claude Code 2026-06 fires SubagentStop LIBERALLY. Observed
+     *   traces include phantom SubagentStops for subagents we never
+     *   spawned (orphan agent_ids from internal CC lifecycle, possibly
+     *   Skill internals or session-housekeeping subagents), AND ACK-
+     *   pattern SubagentStops fired 1-5s after every main Stop
+     *   regardless of whether a real subagent was running. The previous
+     *   heuristic — "drop SubagentStop if its age relative to the oldest
+     *   queued spawn is outside [30s, 4min]" — was a guess that fell
+     *   apart when the ACK arrived just outside the window: a 35s gap
+     *   from spawn to ACK passed the band check and decremented a real
+     *   spawn that was still 2 minutes from finishing. The row dropped
+     *   to "ready" while the background reviewer kept working.
      *
-     *   Storing per-spawn timestamps lets us reject obviously-spurious
-     *   SubagentStops on age:
+     *   The raw payload, however, IS deterministic. The handler now
+     *   extracts:
+     *     `agent_id`        — present on every hook event fired inside
+     *                         a subagent's own turn (its tool calls,
+     *                         its SubagentStop). Absent on main-agent
+     *                         events.
+     *     `spawn_agent_id`  — from PostToolUse(Agent).tool_response.agentId,
+     *                         the id Claude returns for a freshly-launched
+     *                         subagent.
      *
-     *     SUBAGENT_PAIR_MIN_AGE_MS  — Stops that fire <30s after a spawn
-     *       are usually Claude's immediate-ACK on the spawn, not a real
-     *       completion (real subagents do at least one Bash/Read/etc.,
-     *       which takes >>30s for any non-trivial task).
-     *     SUBAGENT_PAIR_MAX_AGE_MS  — Stops that fire >5min after a
-     *       spawn that's still queued are more likely spurious noise
-     *       from later main-agent Stop events than a real completion of
-     *       that long-running spawn. Trade-off: a genuinely long-running
-     *       backgrounded agent's eventual real Stop is missed, so the
-     *       counter stays inflated until SessionStart/End resets it.
+     *   That gives us a real identity to track instead of a timestamp
+     *   to bracket. SubagentStop with `agent_id` in our set → real
+     *   completion, remove it. SubagentStop with `agent_id` NOT in our
+     *   set → phantom, ignore.
      *
-     * FP/FN trade-off picked here is FP > FN: better to occasionally
-     * show "1 agent" after the agent finished than to show "ready" while
-     * a real backgrounded agent is still running (which is what users
-     * actually noticed and reported).
+     * Passive-liveness add: ANY hook event with a non-empty top-level
+     * `agent_id` adds that id to the set, idempotently. Handles the
+     * case where we missed the spawn signal (stale-log cold-load, or
+     * a future CC version that doesn't surface tool_response.agentId).
+     * The subagent's first tool call gives us its id; SubagentStop
+     * pairs against the same id.
      *
-     * Reset on SessionStart/SessionEnd so stale spawns from a prior
-     * Claude session (crashed before Stop, or older than the FP-tolerable
-     * window) don't pin the row to working forever.
-     *
-     * KNOWN LIMITATIONS:
-     *
-     *   - Long-running backgrounded agents (>SUBAGENT_PAIR_MAX_AGE_MS in
-     *     uptime) won't have their real completion paired; counter stays
-     *     elevated until SessionStart/End.
-     *   - Some Claude background-agent UX flows (the `/agents` slash
-     *     command, named agents in ~/.claude/agents/) may not fire
-     *     PreToolUse(Agent) at all — in which case we cannot detect
-     *     them via hooks. Process-tree detection doesn't help: Claude's
-     *     background agents run in the same process, not as child PIDs.
+     * Reset on SessionStart/SessionEnd so stale ids from a prior
+     * Claude session (crashed before Stop) don't pin the row to working
+     * forever.
      */
-    private readonly subagentInFlight = new Map<string, number[]>()
+    private readonly liveAgentIds = new Map<string, Set<string>>()
 
     /**
      * Per-tab FIFO queue of timestamps for PreToolUse(Bash,
@@ -349,7 +345,7 @@ export class HookWatcherService implements OnDestroy {
      *  SubagentStop for them yet. TabMonitor uses this to keep the row
      *  green even after the main agent fires Stop. */
     getSubagentInFlight (tabId: string): number {
-        return this.subagentInFlight.get(tabId)?.length ?? 0
+        return this.liveAgentIds.get(tabId)?.size ?? 0
     }
 
     /**
@@ -608,10 +604,10 @@ export class HookWatcherService implements OnDestroy {
     /** Drop every per-tab map keyed by tab_id. Returns true if any held state. */
     private dropTabState (tabId: string): boolean {
         const snapshotDropped = this.map.delete(tabId)
-        const counterDropped = this.subagentInFlight.delete(tabId)
+        const liveDropped = this.liveAgentIds.delete(tabId)
         const offsetDropped = this.tailOffset.delete(tabId)
         const bgDropped = this.pendingBgArrivals.delete(tabId)
-        return snapshotDropped || counterDropped || offsetDropped || bgDropped
+        return snapshotDropped || liveDropped || offsetDropped || bgDropped
     }
 
     /**
@@ -627,37 +623,57 @@ export class HookWatcherService implements OnDestroy {
         let changed = false
 
         if (eventAt >= this.startupTs) {
-            // Subagent in-flight queue. Three hook events map to three queue
-            // ops, all reduced through the pure `reduceSubagentQueue`:
-            //   PreToolUse(tool_name=Task|Agent) → spawn
-            //   SubagentStop                     → stop (conditional pop)
-            //   SessionStart / SessionEnd        → reset
+            // Id-based live-subagent tracking. Hook events map to set ops,
+            // all reduced through the pure `reduceSubagentSet`:
+            //   PostToolUse(Agent) w/ tool_response.agentId → spawn (authoritative)
+            //   ANY event with top-level agent_id          → spawn (passive liveness)
+            //   SubagentStop w/ matching agent_id          → stop
+            //   SessionStart / SessionEnd                  → reset
             //
-            // Pairing semantics — when a `stop` actually pops, when it gets
-            // dropped on the floor — live entirely in the reducer; see
-            // `reduceSubagentQueue` JSDoc for the band [MIN, MAX] rationale
-            // and `subagentInFlight` field-doc for why we don't blindly 1:1
-            // pair against this Claude Code version's liberal SubagentStop
-            // emission.
+            // The passive-liveness spawn handles the case where we missed
+            // the authoritative PostToolUse(Agent) — stale cold-load,
+            // future CC tweaks, etc. — by treating any tool call inside
+            // the subagent's own turn (it carries top-level agent_id) as
+            // proof the subagent is running. Add-set semantics make it
+            // idempotent against the spawn-event path: same id → no-op.
+            //
+            // SubagentStop with an agent_id we don't recognize is dropped
+            // on the floor — that's how we ignore the phantom SubagentStops
+            // Claude Code fires for subagents we never observed.
             //
             // tool_name: Claude renamed the subagent-spawning tool from
-            // `Task` to `Agent`. Match both so older installs keep working;
-            // if Anthropic adds a third name we'll need a registry, but two
-            // strings doesn't earn one.
-            const queueEvent: SubagentEvent | null =
-                parsed.event === 'PreToolUse' && (parsed.tool_name === 'Task' || parsed.tool_name === 'Agent')
-                    ? { kind: 'spawn', at: eventAt }
-                    : parsed.event === 'SubagentStop'
-                        ? { kind: 'stop', at: eventAt }
-                        : (parsed.event === 'SessionStart' || parsed.event === 'SessionEnd')
-                            ? { kind: 'reset' }
-                            : null
-            if (queueEvent) {
-                const prev = this.subagentInFlight.get(parsed.tab_id) ?? []
-                const next = reduceSubagentQueue(prev, queueEvent)
+            // `Task` to `Agent`. The spawn signal here is the agent_id
+            // from tool_response, not the tool_name; tool_name only gates
+            // which event we read tool_response on.
+            const events: SubagentEvent[] = []
+            if (
+                parsed.event === 'PostToolUse'
+                && (parsed.tool_name === 'Agent' || parsed.tool_name === 'Task')
+                && parsed.spawn_agent_id
+            ) {
+                events.push({ kind: 'spawn', agentId: parsed.spawn_agent_id })
+            }
+            if (parsed.agent_id) {
+                // Passive liveness — any hook event from inside a subagent's
+                // turn carries its agent_id. Re-adding the same id is a no-op
+                // in the reducer, so this is safe even when PostToolUse(Agent)
+                // already added it above.
+                if (parsed.event === 'SubagentStop') {
+                    events.push({ kind: 'stop', agentId: parsed.agent_id })
+                } else {
+                    events.push({ kind: 'spawn', agentId: parsed.agent_id })
+                }
+            }
+            if (parsed.event === 'SessionStart' || parsed.event === 'SessionEnd') {
+                events.push({ kind: 'reset' })
+            }
+            if (events.length > 0) {
+                const prev = this.liveAgentIds.get(parsed.tab_id) ?? new Set<string>()
+                let next: ReadonlySet<string> = prev
+                for (const ev of events) next = reduceSubagentSet(next, ev)
                 if (next !== prev) {
-                    if (next.length === 0) this.subagentInFlight.delete(parsed.tab_id)
-                    else this.subagentInFlight.set(parsed.tab_id, next.slice())
+                    if (next.size === 0) this.liveAgentIds.delete(parsed.tab_id)
+                    else this.liveAgentIds.set(parsed.tab_id, next as Set<string>)
                     changed = true
                 }
             }
