@@ -9,6 +9,7 @@ import { BindingStoreService } from './binding/store.service'
 import { PairingService } from './binding/pairing.service'
 import { OutboundDispatcherService } from './outbound-dispatcher.service'
 import { InboundRouterService } from './inbound-router.service'
+import { KeystrokeAdapterRegistry } from './pty-keystroke/registry'
 
 @NgModule({
     imports: [CommonModule],
@@ -20,6 +21,7 @@ import { InboundRouterService } from './inbound-router.service'
         PairingService,
         OutboundDispatcherService,
         InboundRouterService,
+        KeystrokeAdapterRegistry,
     ],
 })
 export default class MobileBridgeModule {

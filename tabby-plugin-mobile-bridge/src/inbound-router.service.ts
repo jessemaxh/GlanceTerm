@@ -11,6 +11,7 @@ import { TelegramClientService } from './telegram/client.service'
 import { TopicService } from './telegram/topic.service'
 import { BindingStoreService } from './binding/store.service'
 import { TabIdentityService } from './tab-identity.service'
+import { KeystrokeAdapterRegistry } from './pty-keystroke/registry'
 import { TgInboundMessage } from './telegram/types'
 
 /**
@@ -47,6 +48,7 @@ export class InboundRouterService implements OnDestroy {
         private store: BindingStoreService,
         private identity: TabIdentityService,
         private monitor: TabMonitor,
+        private keystrokes: KeystrokeAdapterRegistry,
     ) {
         this.subs.push(
             this.telegram.inboundMessages$.subscribe(msg => void this.route(msg)),
@@ -106,11 +108,12 @@ export class InboundRouterService implements OnDestroy {
             return
         }
 
-        // v0: raw text + Enter. Per-agent translation (Codex `y` etc.)
-        // lives in task #9 — this call site will be wrapped with the
-        // adapter once that exists.
+        // Per-agent translation via registry. v0 every adapter is the
+        // default (text + '\r'); the structure exists so dogfood-driven
+        // specialisations land in one place.
+        const ptyBytes = this.keystrokes.forTool(state.aiTool).translate(msg.text)
         try {
-            inner.sendInput(msg.text + '\r')
+            inner.sendInput(ptyBytes)
         } catch (err) {
             // eslint-disable-next-line no-console
             console.warn('[mobile-bridge:inbound] sendInput failed:', err)
