@@ -1,5 +1,6 @@
-import { Component, ElementRef, HostListener, NgZone, OnDestroy, OnInit, ViewChild } from '@angular/core'
+import { Component, ElementRef, HostListener, NgZone, OnDestroy, OnInit, TemplateRef, ViewChild, ViewEncapsulation } from '@angular/core'
 import { Subscription } from 'rxjs'
+import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import * as os from 'os'
 
 import { AppService, BaseTabComponent, ConfigService, MenuItemOptions, NotificationsService, PlatformService } from 'tabby-core'
@@ -194,69 +195,74 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
                         <rect x="8.5" y="2.5" width="6" height="11" rx="1"/>
                     </svg>
                 </button>
-                <!-- Settings cluster — collapsed from the previous two icon
-                     toggles into a single gear button + popover. Pattern mirrors
-                     the screenshot-options split: a .action-menu opens upward
-                     above the toolbar so it never clips behind the sidebar
-                     footer. .right-anchored flips the menu anchor edge so it
-                     doesn't overflow the sidebar's right boundary. -->
-                <div class="split-action settings-action" #settingsSplit>
-                    <button type="button"
-                            class="action-btn settings-btn"
-                            [class.open]="settingsMenuOpen"
-                            (click)="toggleSettingsMenu($event)"
-                            title="AI sidebar settings"
-                            aria-label="Open AI sidebar settings"
-                            [attr.aria-expanded]="settingsMenuOpen"
-                            aria-haspopup="menu">
-                        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                            <!-- Cog: center bearing + 8 evenly-spaced teeth pairs
-                                 drawn as short radial strokes. Pure-stroke render
-                                 reads as "settings" on dark + light backgrounds
-                                 alike, and the inner circle doubles as a focus
-                                 anchor for hover state. -->
-                            <circle cx="8" cy="8" r="2.4" stroke="currentColor" stroke-width="1.2" fill="none"/>
-                            <path d="M8 1.5 V3.4 M8 12.6 V14.5 M1.5 8 H3.4 M12.6 8 H14.5
-                                     M3.4 3.4 L4.7 4.7 M11.3 11.3 L12.6 12.6
-                                     M3.4 12.6 L4.7 11.3 M11.3 4.7 L12.6 3.4"
-                                  stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
-                        </svg>
-                    </button>
-                    <div *ngIf="settingsMenuOpen" class="action-menu right-anchored" role="menu">
-                        <button type="button"
-                                class="action-menu-item"
-                                role="menuitemcheckbox"
-                                [attr.aria-checked]="soundOnReady"
-                                (click)="toggleSoundOnReady()">
-                            <svg class="check" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                                <path *ngIf="soundOnReady" d="M3 8.5 L6.5 12 L13 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-                            </svg>
-                            <span class="lbl">Chime on agent done</span>
-                        </button>
-                        <button type="button"
-                                class="action-menu-item"
-                                role="menuitemcheckbox"
-                                [attr.aria-checked]="autoApprovePermissions"
-                                (click)="toggleAutoApprove()">
-                            <svg class="check" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                                <path *ngIf="autoApprovePermissions" d="M3 8.5 L6.5 12 L13 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-                            </svg>
-                            <span class="lbl">Auto-approve permission prompts</span>
-                        </button>
-                        <button type="button"
-                                class="action-menu-item"
-                                role="menuitemcheckbox"
-                                [attr.aria-checked]="hideTabsWithoutAgent"
-                                (click)="toggleHideTabsWithoutAgent()">
-                            <svg class="check" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                                <path *ngIf="hideTabsWithoutAgent" d="M3 8.5 L6.5 12 L13 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-                            </svg>
-                            <span class="lbl">Hide tabs without an AI agent</span>
-                        </button>
-                    </div>
-                </div>
+                <!-- Settings button — Material-Design-style gear that
+                     opens a centered modal dialog. The previous popover
+                     anchored above the toolbar gave each row only one
+                     line for a label, which left no room for explanatory
+                     copy and forced settings to be either self-evident or
+                     misunderstood. The modal pattern fits a title +
+                     description + toggle per setting cleanly, and reuses
+                     ng-bootstrap's NgbModal so escape/backdrop dismissal
+                     and a11y focus-trap are handled for us. -->
+                <button type="button"
+                        class="action-btn settings-btn"
+                        (click)="openSettingsModal()"
+                        title="AI sidebar settings"
+                        aria-label="Open AI sidebar settings"
+                        aria-haspopup="dialog">
+                    <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                        <!-- Material Design "settings" gear: outer 8-toothed
+                             ring with a clear circular bore. Universally
+                             recognisable as "settings" — beats the previous
+                             radial-stroke shape that read as a sun on first
+                             glance. -->
+                        <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 0 0 .12-.61l-1.92-3.32a.488.488 0 0 0-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 0 0-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94 0 .31.02.64.07.94l-2.03 1.58a.49.49 0 0 0-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 0 1 8.4 12c0-1.98 1.62-3.6 3.6-3.6s3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>
+                    </svg>
+                </button>
             </div>
         </div>
+
+        <!-- Settings modal template. Lives in the same component template
+             so it has direct access to the host's setters; opened via
+             NgbModal.open(this.settingsModalTpl) on gear click. Each row
+             is a self-contained card with title / description / toggle.
+             The toggles are native checkboxes styled as iOS-style
+             switches via the gt-switch utility further down in styles. -->
+        <ng-template #settingsModalTpl let-modal>
+            <div class="gt-settings-modal">
+                <div class="gt-settings-header">
+                    <h4 class="gt-settings-title">AI sidebar settings</h4>
+                    <button type="button" class="gt-settings-close" aria-label="Close" (click)="modal.dismiss()">
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                            <path d="M3 3 L13 13 M13 3 L3 13" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                        </svg>
+                    </button>
+                </div>
+                <div class="gt-settings-body">
+                    <label class="gt-setting-row">
+                        <div class="gt-setting-text">
+                            <div class="gt-setting-title">Chime on agent done</div>
+                            <div class="gt-setting-desc">Play a short tone whenever an AI agent finishes a turn, so you don't have to keep an eye on the sidebar to know when a reply is ready.</div>
+                        </div>
+                        <input type="checkbox" class="gt-switch" [checked]="soundOnReady" (change)="toggleSoundOnReady()" aria-label="Chime on agent done"/>
+                    </label>
+                    <label class="gt-setting-row">
+                        <div class="gt-setting-text">
+                            <div class="gt-setting-title">Auto-approve permission prompts</div>
+                            <div class="gt-setting-desc">When Claude asks for permission to run a tool (e.g. a Bash command), GlanceTerm approves it silently instead of pausing for you. Off by default — only enable if you trust what the agent is doing.</div>
+                        </div>
+                        <input type="checkbox" class="gt-switch" [checked]="autoApprovePermissions" (change)="toggleAutoApprove()" aria-label="Auto-approve permission prompts"/>
+                    </label>
+                    <label class="gt-setting-row">
+                        <div class="gt-setting-text">
+                            <div class="gt-setting-title">Hide tabs without an AI agent</div>
+                            <div class="gt-setting-desc">Suppress plain shells (no Claude / Codex / Gemini running in them) from the sidebar list. Pinned tabs always show through regardless of this setting.</div>
+                        </div>
+                        <input type="checkbox" class="gt-switch" [checked]="hideTabsWithoutAgent" (change)="toggleHideTabsWithoutAgent()" aria-label="Hide tabs without an AI agent"/>
+                    </label>
+                </div>
+            </div>
+        </ng-template>
     `,
     styles: [`
         :host {
@@ -976,25 +982,137 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             white-space: nowrap;
         }
 
-        /* Settings cluster lives at the right end of the action row, pushed
-           right via margin-left:auto on its split-action wrapper. Wrapping in
-           a .split-action keeps the gear button + popover positioning
-           identical to the screenshot menu pattern. */
-        .split-action.settings-action { margin-left: auto; }
-        /* Open state mirrors the screenshot caret's open style: accent wash
-           + accent border + accent color, so it visibly reads as "menu is up"
-           the same way across the toolbar. */
-        .action-btn.settings-btn.open {
-            background: var(--gt-accent-soft);
-            border-color: rgba(255, 170, 85, 0.55);
-            color: var(--gt-accent);
+        /* Gear button sits at the right end of the action row. No popover
+           wrapping anymore — the button is a single tap target that opens
+           a modal — so margin-left:auto goes directly on the button. */
+        .action-btn.settings-btn { margin-left: auto; }
+
+        /* ============================================================
+           Settings modal — rendered inside NgbModal's wrapper. Styles
+           target our own .gt-* classes only so we don't fight Tabby's
+           own modal CSS (NgbModal injects .modal-content/.modal-body
+           around our template; we use those slots' default look and
+           layer our content on top).
+           ============================================================ */
+        .gt-settings-modal {
+            background: var(--gt-surface-1);
+            color: var(--gt-text);
+            border-radius: 12px;
+            overflow: hidden;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, sans-serif;
+        }
+        .gt-settings-header {
+            display: flex;
+            align-items: center;
+            padding: 16px 20px 14px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+        }
+        .gt-settings-title {
+            flex: 1;
+            margin: 0;
+            font-size: 16px;
+            font-weight: 600;
+            color: var(--gt-text);
+        }
+        .gt-settings-close {
+            background: transparent;
+            border: none;
+            color: var(--gt-text-faint);
+            padding: 4px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.12s ease, color 0.12s ease;
+        }
+        .gt-settings-close:hover {
+            background: var(--gt-surface-2);
+            color: var(--gt-text);
+        }
+        .gt-settings-body {
+            padding: 8px 4px;
+        }
+        .gt-setting-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 16px;
+            padding: 14px 18px;
+            margin: 0;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.12s ease;
+        }
+        .gt-setting-row:hover {
+            background: var(--gt-surface-2);
+        }
+        .gt-setting-text {
+            flex: 1;
+            min-width: 0;
+        }
+        .gt-setting-title {
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--gt-text);
+            margin-bottom: 4px;
+        }
+        .gt-setting-desc {
+            font-size: 12.5px;
+            line-height: 1.5;
+            color: var(--gt-text-faint);
+        }
+
+        /* iOS-style toggle. Native checkbox is hidden in place
+           (opacity:0, full-size hit area) so the row label and the
+           switch share one click target, and a11y / form association
+           stays correct. */
+        .gt-switch {
+            appearance: none;
+            -webkit-appearance: none;
+            width: 38px;
+            height: 22px;
+            background: rgba(255, 255, 255, 0.16);
+            border-radius: 11px;
+            position: relative;
+            cursor: pointer;
+            transition: background 0.16s ease;
+            flex: none;
+            margin-top: 2px;
+        }
+        .gt-switch::after {
+            content: "";
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 18px;
+            height: 18px;
+            border-radius: 50%;
+            background: #fff;
+            transition: transform 0.16s ease;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+        }
+        .gt-switch:checked {
+            background: var(--gt-accent);
+        }
+        .gt-switch:checked::after {
+            transform: translateX(16px);
+        }
+        .gt-switch:focus-visible {
+            outline: 2px solid var(--gt-accent);
+            outline-offset: 2px;
         }
 
         @media (prefers-reduced-motion: reduce) {
             .dot[data-status="working"],
             .attn { animation: none !important; }
+            .gt-switch, .gt-switch::after { transition: none !important; }
         }
     `],
+    /* The modal template gets rendered by NgbModal into <body>, OUTSIDE
+       this component's emulated-encapsulation scope, so Angular's
+       attribute-rewriting strips the `[_ngcontent-…]` selector match.
+       ViewEncapsulation.None disables that rewriting entirely so our
+       .gt-* rules reach the relocated DOM. All rules above are scoped
+       with .gt-* / .sb-* / .row / .dot prefixes that don't collide with
+       Tabby's own component styles. */
+    encapsulation: ViewEncapsulation.None,
 })
 export class AiSidebarComponent implements OnInit, OnDestroy {
     states: TabState[] = []
@@ -1026,9 +1144,8 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     private home = os.homedir()
     capturing = false
     screenshotMenuOpen = false
-    settingsMenuOpen = false
     @ViewChild('screenshotSplit', { static: false }) private screenshotSplitEl?: ElementRef<HTMLElement>
-    @ViewChild('settingsSplit',   { static: false }) private settingsSplitEl?:   ElementRef<HTMLElement>
+    @ViewChild('settingsModalTpl', { static: false }) private settingsModalTpl?: TemplateRef<unknown>
 
     /**
      * Sort-position pin for the just-clicked row. When you click a `done` row,
@@ -1114,6 +1231,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         private notifications: NotificationsService,
         private zone: NgZone,
         private autoApprove: AutoApproveService,
+        private ngbModal: NgbModal,
     ) {}
 
     /**
@@ -1209,27 +1327,28 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         // (e.g. a row-click handler on `.sb-actions`) intercepting the event.
         ev.stopPropagation()
         this.screenshotMenuOpen = !this.screenshotMenuOpen
-        if (this.screenshotMenuOpen) this.settingsMenuOpen = false
     }
 
     /**
-     * Toggle the global-settings popover. Mutual-exclusion: opening this
-     * closes the screenshot menu (and vice versa) — two popovers stacked
-     * upward in the same row of the sidebar would overlap. stopPropagation
-     * for the same reason as toggleScreenshotMenu.
+     * Open the AI-sidebar settings modal. Uses ng-bootstrap's NgbModal so
+     * escape/backdrop dismissal, focus trap, and ARIA wiring come for
+     * free; `centered: true` matches the visual treatment Tabby uses for
+     * its own "edit profile" / "transfers" dialogs.
+     *
+     * Why a modal rather than the previous popover: each setting needs a
+     * one-sentence description (off vs on isn't obvious for auto-approve
+     * and hide-no-AI), and a popover anchored above the sidebar toolbar
+     * has nowhere to put body copy without overflowing the side rail.
      */
-    toggleSettingsMenu (ev: MouseEvent): void {
-        ev.stopPropagation()
-        this.settingsMenuOpen = !this.settingsMenuOpen
-        if (this.settingsMenuOpen) this.screenshotMenuOpen = false
+    openSettingsModal (): void {
+        if (!this.settingsModalTpl) return
+        this.ngbModal.open(this.settingsModalTpl, { centered: true, size: 'md' })
     }
 
     /**
-     * Close the popover when the user clicks anywhere outside the
-     * split-action group. We let clicks INSIDE the group through (the caret
-     * toggle and the menu items handle their own state) — contains() covers
-     * both the buttons and the menu, which is rendered as a child of the
-     * group.
+     * Close the screenshot popover when the user clicks anywhere outside
+     * the split-action group. (The settings menu is now a modal that
+     * NgbModal manages on its own — no inline dismissal needed here.)
      */
     @HostListener('document:click', ['$event'])
     onDocumentClick (ev: MouseEvent): void {
@@ -1238,20 +1357,12 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
             const inside = host && ev.target instanceof Node && host.contains(ev.target)
             if (!inside) this.zone.run(() => { this.screenshotMenuOpen = false })
         }
-        if (this.settingsMenuOpen) {
-            const host = this.settingsSplitEl?.nativeElement
-            const inside = host && ev.target instanceof Node && host.contains(ev.target)
-            if (!inside) this.zone.run(() => { this.settingsMenuOpen = false })
-        }
     }
 
     @HostListener('document:keydown.escape')
     onEscape (): void {
         if (this.screenshotMenuOpen) {
             this.zone.run(() => { this.screenshotMenuOpen = false })
-        }
-        if (this.settingsMenuOpen) {
-            this.zone.run(() => { this.settingsMenuOpen = false })
         }
     }
 
