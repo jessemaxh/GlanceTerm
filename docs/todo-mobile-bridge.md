@@ -1,18 +1,18 @@
 # TODO — Mobile Bridge
 
-Push agent status to phone, control tabs remotely.
+Bidirectional remote control of GlanceTerm tabs from a phone IM.
 
-**Status:** scoped, not started · **Added:** 2026-06-06
+**Status:** scoped, not started · **Added:** 2026-06-06 · **Revised:** 2026-06-07
 
 Naming convention: one file per scoped feature, `todo-<feature-slug>.md`.
 Records the constraints / decisions reached during scoping so a future read
 doesn't have to rebuild the context.
 
 ### One-liner
-Let users get notified on their phone when an AI agent in any GlanceTerm tab
-needs attention (permission prompt, completion, crash), and let them approve /
-reply / send commands back to that specific tab from the phone — without
-GlanceTerm running any server-side infrastructure.
+Each GlanceTerm tab gets a 1-to-1 surface in a phone IM (Telegram Forum
+Topic / 飞书 互动卡片). When the agent needs attention the surface lights up;
+the user replies in that same surface and it goes back to the right tab.
+BYO bot, no server, outbound-only.
 
 ### Why this might be worth building
 - `AttentionNotifierService` already exists for desktop notifications →
@@ -25,141 +25,208 @@ GlanceTerm running any server-side infrastructure.
   (mobile ack), Cursor agents.cursor.com (cloud-agent dashboard).
 
 ### Why it might be over-imagined
-- Composing real coding prompts on a phone keyboard is awful — bidirectional
-  send-input from phone may be 80% imagined.
-- Single-tab users (probably the majority) don't have the "which tab is
-  asking me" pain that motivates the multi-tab UX.
+- Single-tab users (probably the majority) don't get the "which tab is
+  asking me" pain that motivates the per-tab UX.
 - Cloud agents (Cursor, Devin) sidestep the problem entirely by hosting the
   agent. Our target users specifically chose desktop over cloud — that
   filter shrinks the audience.
+- Phone keyboard composition is slow → users may approve buttons happily
+  but rarely compose real prompts on phone. That's fine — the value is
+  unblocking long-running agents, not full remote coding.
 
-### Validation plan (before committing to T1+)
+### Validation plan
 1. Search Reddit / Twitter / HN for `Claude Code notification mobile`,
    `Claude permission phone`, `coding agent remote approve`. ≥20 raw
    complaints → A is real. <10 → audience is thinner than assumed.
 2. Check GlanceTerm GitHub issues for independent requests. ≥2 organic
    asks → go.
-3. Ship T0 (single-direction push) → measure activation. >30% of installed
-   users configure a webhook within 4 weeks → invest in T1. <10% → stop
-   at T0.
+3. Ship T0 (Telegram bidirectional MVP) → measure activation. >30% of
+   installed users configure a bot within 4 weeks → invest in T1 (飞书).
+   <10% → stop after T0.
 
-### Hard architectural constraints (decided 2026-06-06)
+### Hard architectural constraints (decided 2026-06-06, refined 2026-06-07)
 1. **No server we run.** Zero ongoing ops cost. Aligned with GlanceTerm's
    "your code stays local" positioning.
 2. **No bot we create.** Every supported platform is BYO bot — user
    creates the bot, pastes credentials into GlanceTerm.
 3. Bidirectional transport must work behind NAT / firewall (outbound
    connections only).
+4. **Per-tab surface uses the platform's native primitive** — Telegram
+   Forum Topics, 飞书 互动卡片. Do NOT invent a command system (`/use 3`,
+   `/list`, `/tab`) on top. If the platform can't express "this message
+   belongs to tab X" natively, it's the wrong platform.
+5. **Tabs identified by session-stable UUID, not tabIndex.** Display uses
+   `#<index> · <name>`; routing uses UUID. Reorder is invisible to the IM
+   side; UUID is regenerated only when a tab is closed and a new one
+   opened.
+6. **Text-first interaction; buttons only where text is ambiguous.** In
+   a Forum Topic, the user types in the topic to talk to that tab. We do
+   NOT translate "approve" into an InlineKeyboard button on Telegram —
+   user types `y` (or whatever the agent expects). Buttons are reserved
+   for 飞书 cards where the card *is* the surface.
+7. **Whitelist senders, silently drop the rest.** Only `approvedSenders`
+   IDs (set up during pairing) have their input routed to the PTY.
+   Unknown senders are dropped without acknowledgement and noted in
+   `~/.glanceterm/mobile-bridge.log` for the owner to audit. Silence
+   denies attackers signal about whether a binding exists.
+8. **Each binding is independently togglable but per-tab toggling is
+   not a thing.** A tab is either bound to mobile (because the global +
+   platform + event-type filter says so) or it's not. Want to silence
+   a specific kind of tab? Use the per-event-type filter, or turn the
+   binding off.
 
 ### Feature tiers
 
-#### T0 — Single-direction push (`tabby-plugin-mobile-notify`)
-**Goal:** verify "users want phone notifications for agent events" before
-investing in bidirectional.
+#### T0 — Telegram bidirectional MVP (`tabby-plugin-mobile-bridge`)
+**Goal:** validate "users want bidirectional phone control of agent tabs"
+on the lowest-friction platform.
 
-- Subscribe to `AttentionNotifierService` + `TabMonitor.states$` transitions
-  + hook events.
-- POST a structured JSON payload to a user-configured webhook URL.
-- Built-in templates for: ntfy.sh, Pushover, Bark, Slack webhook, Discord
-  webhook, Telegram bot direct, Feishu 群机器人, 企业微信 群机器人,
-  钉钉 群机器人, generic JSON.
-- Per-event include/exclude filters.
-- "Send test" button in settings.
-- Retry with exponential backoff; offline queue.
-- **Effort:** ~44h / 1.5 weeks.
+**UX:**
+- User creates bot via @BotFather (~1 minute), creates a super-group with
+  Topics enabled, adds bot as admin (~1 minute).
+- GlanceTerm long-polls `getUpdates` (outbound only, no public URL).
+- For each GlanceTerm tab: one Forum Topic, auto-created on first event,
+  titled `#<index> · <tab-name>`, suffixed with last 4 chars of UUID for
+  disambiguation. Topic stays even if the tab closes (history).
+- Agent-attention events post to the topic as a plain message.
+- User reply in the topic → routed to the originating tab's PTY input.
+  No command prefix. No state machine. Text in = text in.
+- State transitions (running → idle, completed, crashed) post a one-line
+  status update to the topic.
 
-#### T1 — Telegram BYO bidirectional (full remote control)
-**Trigger:** T0 shows ≥30% activation within 4 weeks.
+**Built:**
+- Telegram bot client (getUpdates long-polling, outbound only).
+- Per-tab UUID system + display index synchronization.
+- Forum Topic create / edit / archive lifecycle keyed by UUID.
+- Event → topic message: `PreToolUse(Bash)` permission prompts, hook
+  events from `HookWatcherService`, state transitions from
+  `TabMonitor.states$`, attention triggers from `AttentionNotifierService`.
+- Topic → PTY input router (UUID → tab → PTY write).
+- Per-AI-tool keystroke adapter: Claude (Enter), Codex (`y` / `n`),
+  Aider (TBD), opencode (TBD). Empirically verified, version-pinned.
+- `/bind <code>` pairing flow that locks `chatId`, `ownerUserId`,
+  and seeds `approvedSenders = [ownerUserId]`.
+- Bot token stored via keytar (system keychain), never in settings.json.
+- Sender whitelist enforced at the inbound router; drops + logs unknown
+  senders to `~/.glanceterm/mobile-bridge.log`.
+- Cross-binding "resolved elsewhere" sync: when agent state moves past
+  a prompt, post a short `✓ resolved via <platform> at <time>` to other
+  active bindings so the user doesn't double-answer.
+- Quiet hours: configurable window (e.g. 23:00–07:00); during quiet
+  only `task_failed` passes through.
+- Settings panel: bindings list (add/remove/edit), per-platform on/off,
+  per-event-type filter, quiet-hours window, approved-senders editor,
+  "send test" button.
+- Retry with exponential backoff (~5 attempts, max ~1 min). On final
+  failure, drop the event and log. No persistent queue, no replay.
+  Rationale below in Open questions #2.
 
-- User creates bot via @BotFather (1 minute).
-- GlanceTerm long-polls `getUpdates` — no relay, no public URL.
-- 1-on-1 chat with bot (user can also opt into Forum-Topics-per-tab mode
-  if they want).
-- InlineKeyboard buttons for approve / reject / reply-to-tab.
-- ForceReply + state machine + `/use <n>` command for free-text send-input.
-- Per-AI-tool `approveKeystroke()` / `rejectKeystroke()` in adapter
-  registry — Claude / Codex / Aider each needs its own mapping verified
-  empirically.
-- editMessage to mark "✓ approved by you @ 12:34:51".
-- `/list`, `/tab`, `/help`, `/use`, `/exit` commands.
-- **Effort:** ~70h / 2.5 weeks (vs. 124h with hosted relay — BYO saves the
-  Cloudflare Worker tier).
+**Effort:** ~60h / 2 weeks.
 
-#### T2 — Feishu BYO bidirectional
-**Trigger:** Chinese-user demand from T0/T1 metrics.
+#### T1 — 飞书 bidirectional (互动卡片)
+**Trigger:** T0 activation ≥30% within 4 weeks.
 
-- User creates 1-person 飞书企业 + 自建应用 + enables
-  长连接事件订阅（WebSocket mode, no public URL needed — same idea as
-  Slack Socket Mode).
-- GlanceTerm uses 飞书 Node SDK to connect outbound and receive events.
-- Interactive cards (the killer feature here): action buttons + dropdowns +
-  embedded text inputs all in one card.
-- In-place card update for "approved" / "rejected" state transitions.
-- 1-on-1 chat with bot (no group / topic requirement).
-- Configuration wizard with screenshots (the 飞书企业 setup is the friction
-  point — needs hand-holding).
-- **Effort:** ~60-70h / 2 weeks.
+**UX:**
+- User creates 1-person 飞书企业 + 自建应用 + enables 长连接事件订阅
+  (WebSocket mode, no public URL — same idea as Slack Socket Mode).
+- For each tab: one interactive card per event (not per tab). A card
+  carries: title (`#<index> · <tab-name>`), status chip (running / waiting
+  / done), the prompt or status detail, action buttons (approve / reject
+  where applicable), and an embedded text input.
+- User taps approve → routed to that tab. Types in the card's input →
+  routed to that tab. Card updates in-place with `editMessage` to show
+  resolution.
 
-#### T3 — Other platforms (add by demand signal)
+**Built:**
+- 飞书 Node SDK + 长连接 connection.
+- Reuses T0's UUID system, PTY input router, keystroke adapter, settings
+  framework, sender whitelist, pairing flow, quiet hours, cross-binding
+  "resolved elsewhere" sync.
+- Card designer (template per event type).
+- Card action callback → PTY router.
+- In-place card update for resolution states.
+- Configuration wizard with screenshots — 飞书企业 + 自建应用 + 长连接
+  is the friction point; needs hand-holding.
 
-| Platform | Mechanism | Effort | When to add |
+**Effort:** ~50h / 2 weeks (T0 builds the shared infra).
+
+#### T2 — Other platforms (add by demand signal)
+
+| Platform | Native per-tab primitive | Mechanism | Effort | When |
+|---|---|---|---|---|
+| Discord BYO | Threads | Gateway WebSocket | ~30h | Western OSS community signal |
+| Slack BYO | Threads | Socket Mode | ~30h | Enterprise/team-use signal |
+| 钉钉 BYO | 互动卡片 | Stream API (2024+) | ~30h | Chinese enterprise signal |
+| 企业微信 | (push-only, no per-tab reply) | webhook | — | parked, breaks bidirectional rule |
+| WhatsApp / 公众号 / 个人微信 | — | — | — | parked, see notes |
+
+### Platform capability summary (under "BYO + no server + bidirectional + per-tab native primitive")
+
+| Platform | Bidirectional? | Per-tab primitive | Verdict |
 |---|---|---|---|
-| Discord BYO | Gateway WebSocket | ~30h | Western open-source community signal |
-| Slack BYO | Socket Mode | ~30h | Enterprise/team-use signal |
-| 钉钉 BYO | Stream API (2024+) | ~30h | Chinese enterprise users |
-| 企业微信 群机器人 | webhook (one-way only) | already in T0 | covered |
-| WhatsApp | requires Business API + server | — | parked, breaks no-server rule |
-| 微信公众号 | webhook + heavy quota limits | — | parked, can't push reliably |
-| 个人微信 | no official API | — | won't do (封号 risk) |
-
-### Platform capability summary (under "BYO + no server" constraint)
-
-| Platform | Bidirectional? | Why |
-|---|---|---|
-| Telegram | ✅ | `getUpdates` long polling |
-| Feishu | ✅ | 长连接 event subscription |
-| Discord | ✅ | Gateway WebSocket |
-| Slack | ✅ | Socket Mode |
-| 钉钉 | ✅ | Stream API |
-| 企业微信 | ❌ push-only | webhook-only event delivery |
-| WhatsApp / LINE / 公众号 | ❌ | webhook-only |
-| ntfy / Pushover / Bark | ❌ by design | one-way push services |
+| Telegram | ✅ | Forum Topic | **T0** |
+| 飞书 | ✅ | 互动卡片 | **T1** |
+| Discord | ✅ | Thread | T2 candidate |
+| Slack | ✅ | Thread | T2 candidate |
+| 钉钉 | ✅ | 互动卡片 | T2 candidate |
+| 企业微信 | ❌ push-only | — | excluded |
+| WhatsApp / LINE / 公众号 | ❌ | — | excluded |
+| ntfy / Pushover / Bark | ❌ by design | — | excluded |
 
 ### Open design questions
 1. **Per-agent approve keystroke mapping** — Claude (Enter), Codex (`y`),
    Aider (?), Gemini (?), opencode (?). Need empirical verification per
-   tool version. Document version pins as we go.
-2. **Offline queue semantics** — GlanceTerm offline for hours. Do we
-   replay all missed `needs_permission` events on reconnect (might be
-   stale), or only events <N minutes old?
-3. **Multi-device sync** — two phones get same `needs_permission` push.
-   First one approves. Second one's card updates to "already handled by
-   other device"? Requires extra round-trip; might not be worth it for v1.
-4. **Sensitive-data redaction** — terminal output may contain tokens,
-   secrets. Default policy: push only structured semantic events
-   (`PreToolUse(Bash, ...)`), not raw stdout. Raw stdout only via explicit
-   "look detail" pull.
-5. **Tab numbering stability** — `#3` in the phone UI is sidebar
-   `tabIndex(s)`. If user reorders tabs mid-session, what does "/use 3"
-   mean? Snapshot the ID at message send time vs. resolve live?
+   tool version. Document version pins as we go. Even with text-first
+   interaction, the router still needs to know what a user-typed "yes"
+   becomes at the PTY layer (might be Enter, might be `y\n`, might be
+   `1\n` for numbered prompts).
+2. ~~Offline queue policy~~ — **decided 2026-06-07: no queue.** Retry
+   with exponential backoff covers desktop network jitter. Long desktop
+   outage means cloud agents (claude/codex/gemini) also can't run, so
+   no events are produced. Phone-side outage is handled by the IM
+   platform syncing on reconnect. Desktop shutdown deliberately drops
+   state — new session on relaunch.
+3. **Multi-device sync** — two phones in the same Telegram group both
+   see the same prompt; either device can reply. No special handling
+   needed because the underlying IM already syncs state across the
+   user's devices. Free.
+4. **Sensitive-data redaction** — push structured semantic events
+   (`PreToolUse(Bash, command=...)`), not raw stdout. Raw stdout only on
+   explicit user request (e.g. reply `show output` in the topic).
+5. ~~Tab numbering stability~~ — **decided 2026-06-07**: session-stable
+   UUID for routing; display `#<index> · <name>` for human-reading;
+   reorder is invisible to the IM side.
 
 ### Files this would touch / create
-- New plugin: `tabby-plugin-mobile-notify` (T0) + `tabby-plugin-mobile-bridge` (T1+)
+- New plugin: `tabby-plugin-mobile-bridge` (both T0 + T1 live here)
 - Hook into existing: `AttentionNotifierService`, `TabMonitor.states$`,
   `HookWatcherService`, per-adapter `approveKeystroke()`
 - New settings panel in tabby-settings
+- New `TabIdentityService` (UUID provisioning + reorder-aware index)
 - No changes to core Tabby
 
 ### Carry-over notes from scoping conversation
-- Original sketch considered a Cloudflare Worker relay → dropped because
-  it violates "no server" rule. Saved ~38h of work + ongoing ops.
-- 微信 个人 was discussed and ruled out (no official API). 微信 公众号
-  ruled out (no message buttons + push quota limits). 企业微信 stays as
-  one-way bot fallback.
+- Original sketch (2026-06-06) considered a Cloudflare Worker relay →
+  dropped because it violates "no server" rule. Saved ~38h of work +
+  ongoing ops.
+- 微信 个人 ruled out (no official API, 封号 risk). 公众号 ruled out
+  (no message buttons + push quota limits). 企业微信 ruled out under
+  bidirectional rule (webhook-only event delivery).
 - OpenClaw (the reference the user started with) is a different product
   shape — it's "AI assistant routed through messengers", not "remote
-  control of desktop agents". Not a direct competitor; can be a downstream
-  integration target if it ever exposes a skill plugin model we can hook.
+  control of desktop agents". Not a direct competitor; can be a
+  downstream integration target if it ever exposes a skill plugin model
+  we can hook.
+- Original T0 was "single-direction webhook push" (44h). **Killed
+  2026-06-07** — its code (webhook templates, payload schema, retry/queue
+  framework) does not meaningfully carry into bidirectional, and the
+  product is bidirectional. Going straight to bidirectional T0 = saves
+  44h dead-code investment.
+- Original T1 was "Telegram bidirectional + InlineKeyboard + ForceReply
+  state machine + `/use 3` command set" (70h). **Simplified 2026-06-07**
+  to Forum Topics + text-only (~56h). Reasons: Forum Topics give us
+  per-tab context for free; no command system needed; no state machine
+  needed; no button-to-keystroke translation needed.
 
 ### Decision log
 - 2026-06-06: scoped feature; agreed on T0-first validation approach.
@@ -167,3 +234,26 @@ investing in bidirectional.
   the architectural rule going forward.
 - 2026-06-06: Feishu 长连接 mode confirmed viable under BYO + no-server
   rule (earlier doc revision incorrectly assumed Feishu was push-only).
+- 2026-06-07: bidirectional is the v1 target (no single-direction tier).
+  Old T0 (webhook push) killed.
+- 2026-06-07: first two platforms are Telegram (T0, ~56h) and 飞书
+  (T1, ~46h). Discord / Slack / 钉钉 demoted to T2-by-signal.
+- 2026-06-07: per-tab UX uses the platform's native primitive (Forum
+  Topic / 互动卡片). No command system, no state machine, no button →
+  keystroke translation layer.
+- 2026-06-07: per-tab routing keyed by session-stable UUID, not tabIndex.
+- 2026-06-07: dropped the offline queue. None of the realistic outage
+  scenarios actually need one — see Open questions #2.
+- 2026-06-07: control / security model decided:
+  - 4-level switch hierarchy (global · per-platform · per-event-type ·
+    quiet hours). Per-tab toggle deliberately omitted — too noisy for
+    the gain; per-event-type filter or disabling the binding covers
+    real needs.
+  - Multiple bindings allowed simultaneously, fan-out delivery.
+    v1 cap: one binding per platform (Telegram + 飞书 = 2 max).
+  - `/bind <code>` pairing flow replaces "user types group id".
+  - `approvedSenders` whitelist; unknown senders silently dropped +
+    logged to `~/.glanceterm/mobile-bridge.log`.
+  - Quiet hours in v1 (only `task_failed` passes through).
+  - Cross-binding "resolved elsewhere" sync via agent state observation,
+    not internal coordination locks.
