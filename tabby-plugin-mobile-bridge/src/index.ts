@@ -4,6 +4,7 @@ import { CommonModule } from '@angular/common'
 
 import { TabIdentityService } from './tab-identity.service'
 import { TelegramClientService } from './telegram/client.service'
+import { TopicService } from './telegram/topic.service'
 import { BindingStoreService } from './binding/store.service'
 import { PairingService } from './binding/pairing.service'
 
@@ -12,6 +13,7 @@ import { PairingService } from './binding/pairing.service'
     providers: [
         TabIdentityService,
         TelegramClientService,
+        TopicService,
         BindingStoreService,
         PairingService,
     ],
