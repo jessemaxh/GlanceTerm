@@ -1055,17 +1055,24 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     private readonly PIN_MS = 2000
 
     /**
-     * Cwds we've observed at least once during THIS session run — the gate
-     * that lets `prunePinnedCwds` distinguish "user closed this tab" (cwd
-     * was seen earlier, now gone → prune) from "session-restore hasn't
-     * brought the tab back yet" (cwd never seen yet this session → keep
-     * the pin, the tab may still load).
+     * Per-tab user-set pins. Keyed by the inner `BaseTabComponent` (the
+     * actual tab object Tabby creates) so a pin attaches to *this specific
+     * tab instance* — opening a brand-new tab in the same cwd does NOT
+     * inherit the pinned state.
      *
-     * Without this gate, restart would clear every pin on the very first
-     * tick before Tabby finished restoring tabs — the persisted set would
-     * be wiped by the same mechanism meant to clean up after a close.
+     * In-memory only. The previous design persisted a list of pinned
+     * `cwd`s via config so pins survived restart; that conflated "I want
+     * this folder favorited" with "I want this tab on top" and meant any
+     * fresh shell in a pinned folder showed up pre-pinned. The user filed
+     * that as a bug, so we drop the cwd persistence entirely — restart
+     * clears all pins, which is the lesser surprise than spurious pins on
+     * unrelated tabs.
+     *
+     * Entries are cleaned up at every tick by `prunePinnedTabs(states)`
+     * once their BaseTabComponent disappears from the live tab list, so
+     * the Set never holds dangling refs to closed tabs.
      */
-    private seenPinCwdsThisSession = new Set<string>()
+    private pinnedInnerTabs = new Set<BaseTabComponent>()
 
     /**
      * Two attention buckets float to the top — that's the whole point of the
@@ -1544,12 +1551,12 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      *     EVERY leaf in the outer tab is no_ai. A SplitTab with one AI leaf
      *     still has the AI as primary and passes.
      *
-     *   - User-pinned cwds bypass the filter. Pin status is checked across
+     *   - User-pinned tabs bypass the filter. Pin status is checked across
      *     EVERY leaf in the group, not just the primary — if the user
      *     right-clicked a non-primary shell leaf to pin it, that pin gesture
      *     should still keep the whole group visible. (`isPinned` is keyed
-     *     on cwd, so pinning a subordinate doesn't propagate to the primary
-     *     by itself.)
+     *     on the inner BaseTabComponent, so pinning a subordinate doesn't
+     *     propagate to the primary by itself.)
      */
     private groupPassesNoAiFilter (group: TabState[], primary: TabState): boolean {
         if (!this.hideTabsWithoutAgent) return true
@@ -1633,40 +1640,25 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
                 }
             }
         }
-        // Drop user-pinned cwds for tabs that have disappeared from the
-        // live state list (close removes pin per the v1.1 requirement).
-        // The "seen-this-session" gate prevents over-eager pruning during
-        // app startup, when Tabby's session-restore hasn't yet repopulated
-        // the tab list but the persisted pinnedCwds are already loaded.
-        this.prunePinnedCwds(states)
+        // Drop pin entries for tabs that have disappeared from the live
+        // state list (close removes pin). No startup-grace gate needed —
+        // pins are in-memory only, so a fresh process starts with the
+        // Set empty and there's nothing to over-eagerly clear.
+        this.prunePinnedTabs(states)
     }
 
     /**
-     * Two-phase prune of the persisted pinnedCwds list:
-     *   1. Mark every live tab's cwd as "seen this session" so future
-     *      ticks can confidently prune it on disappearance.
-     *   2. For each persisted pinned cwd: if we've seen it this session
-     *      AND it's no longer in the live list, it's been closed → drop
-     *      from config. If we've never seen it this session, leave it —
-     *      a restored tab may bring it back later.
-     *
-     * Writes to config only when the list actually shrinks, to avoid a
-     * spurious ConfigService.changed$ emit per poll (which would re-fire
-     * AutoApproveService's flag sync, sound-chime config readers, etc.).
+     * Drop pinned tab references whose inner BaseTabComponent has
+     * disappeared from the live state list (user closed the tab).
+     * Idempotent and cheap — early-out on empty Set.
      */
-    private prunePinnedCwds (states: TabState[]): void {
-        const liveCwds = new Set<string>()
-        for (const s of states) {
-            if (s.cwd) liveCwds.add(s.cwd)
+    private prunePinnedTabs (states: TabState[]): void {
+        if (this.pinnedInnerTabs.size === 0) return
+        const live = new Set<BaseTabComponent>()
+        for (const s of states) live.add(s.innerTab)
+        for (const tab of this.pinnedInnerTabs) {
+            if (!live.has(tab)) this.pinnedInnerTabs.delete(tab)
         }
-        for (const cwd of liveCwds) this.seenPinCwdsThisSession.add(cwd)
-
-        const current = this.pinnedCwds
-        if (current.length === 0) return
-        const kept = current.filter(cwd => liveCwds.has(cwd) || !this.seenPinCwdsThisSession.has(cwd))
-        if (kept.length === current.length) return
-        this.config.store.ai.pinnedCwds = kept
-        void this.config.save()
     }
 
     /** Set or toggle the filter. Clicking the active pill resets to 'all'. */
@@ -1906,31 +1898,16 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      * wants on a row: rename, copy the path, jump to it in Finder, or
      * spawn another shell at the same cwd.
      */
-    /** Persisted pin list. Read-only accessor — mutations go through
-     *  togglePin() / prunePinnedCwds() so a config save always pairs with
-     *  the in-memory change. */
-    get pinnedCwds (): string[] {
-        return this.config.store?.ai?.pinnedCwds ?? []
-    }
-
     isPinned (s: TabState): boolean {
-        return s.cwd != null && this.pinnedCwds.includes(s.cwd)
+        return this.pinnedInnerTabs.has(s.innerTab)
     }
 
-    async togglePin (s: TabState): Promise<void> {
-        // No cwd → no stable persistence key. The context menu disables the
-        // item in this case, but guard here too in case someone wires a
-        // hotkey to togglePin later.
-        if (!s.cwd) return
-        const list = [...this.pinnedCwds]
-        const i = list.indexOf(s.cwd)
-        if (i >= 0) {
-            list.splice(i, 1)
+    togglePin (s: TabState): void {
+        if (this.pinnedInnerTabs.has(s.innerTab)) {
+            this.pinnedInnerTabs.delete(s.innerTab)
         } else {
-            list.push(s.cwd)
+            this.pinnedInnerTabs.add(s.innerTab)
         }
-        this.config.store.ai.pinnedCwds = list
-        await this.config.save()
     }
 
     async onContextMenu (s: TabState, ev: MouseEvent): Promise<void> {
@@ -1941,10 +1918,10 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         const items: MenuItemOptions[] = [
             {
                 label: pinned ? 'Unpin from top' : 'Pin to top',
-                // Need a cwd to persist against. Tabs that haven't reported
-                // one yet (fresh local shell pre-OSC-7) can't be pinned.
-                enabled: !!cwd,
-                click: () => { void this.togglePin(s) },
+                // Pin keys off the BaseTabComponent reference now, not cwd —
+                // any tab can be pinned, including a fresh local shell that
+                // hasn't yet sent OSC-7.
+                click: () => this.togglePin(s),
             },
             { type: 'separator' },
             {
