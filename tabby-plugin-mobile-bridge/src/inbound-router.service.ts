@@ -1,8 +1,5 @@
 import { Injectable, OnDestroy } from '@angular/core'
 import { Subscription } from 'rxjs'
-import * as fs from 'fs/promises'
-import * as path from 'path'
-import * as os from 'os'
 
 import { BaseTerminalTabComponent } from 'tabby-terminal'
 import { TabMonitor } from 'tabby-plugin-ai-sidebar'
@@ -13,6 +10,7 @@ import { BindingStoreService } from './binding/store.service'
 import { TabIdentityService } from './tab-identity.service'
 import { KeystrokeAdapterRegistry } from './pty-keystroke/registry'
 import { TgInboundMessage } from './telegram/types'
+import { appendAudit, AUDIT_LOG_PATH } from './audit-log'
 
 /**
  * Route inbound Telegram messages → originating tab's PTY input.
@@ -38,8 +36,6 @@ import { TgInboundMessage } from './telegram/types'
  */
 @Injectable()
 export class InboundRouterService implements OnDestroy {
-    private static readonly LOG_FILE = path.join(os.homedir(), '.glanceterm', 'mobile-bridge.log')
-
     private subs: Subscription[] = []
 
     constructor (
@@ -122,14 +118,15 @@ export class InboundRouterService implements OnDestroy {
     }
 
     /**
-     * Append-only JSONL audit. Body kept compact — we log routing
-     * decisions, not the user's actual message content (no point
-     * mirroring what's already in Telegram, and the text could contain
-     * secrets even on the inbound side).
+     * Append-only JSONL audit (delegates to shared audit-log helper).
+     * Body kept compact — we log routing decisions, not the user's
+     * actual message content (no point mirroring what's already in
+     * Telegram, and the text could contain secrets even on the inbound
+     * side).
      */
     private async audit (msg: TgInboundMessage, reason: string): Promise<void> {
-        const line = JSON.stringify({
-            ts: new Date().toISOString(),
+        await appendAudit({
+            kind: 'inbound-drop',
             reason,
             chatId: msg.chatId,
             senderId: msg.senderId,
@@ -137,12 +134,9 @@ export class InboundRouterService implements OnDestroy {
             topicId: msg.topicId,
             textLen: msg.text.length,
         })
-        try {
-            const dir = path.dirname(InboundRouterService.LOG_FILE)
-            await fs.mkdir(dir, { recursive: true })
-            await fs.appendFile(InboundRouterService.LOG_FILE, line + '\n', { mode: 0o600 })
-        } catch {
-            // Audit log failure is non-fatal — the route was already taken.
-        }
     }
 }
+
+/** Re-export so consumers (settings UI etc.) can reference the path
+ *  without depending on the audit-log module directly. */
+export { AUDIT_LOG_PATH }

@@ -8,6 +8,8 @@ import { BindingStoreService } from './binding/store.service'
 import { ChannelBinding } from './binding/types'
 import { TopicService } from './telegram/topic.service'
 import { TelegramClientService } from './telegram/client.service'
+import { retryWithBackoff } from './retry'
+import { appendAudit } from './audit-log'
 
 /** Event types pushed to phones. Aligned with the per-event-type filter
  *  defaults documented in docs/todo-mobile-bridge.md. */
@@ -139,18 +141,29 @@ export class OutboundDispatcherService implements OnDestroy {
         eventType: BridgeEventType,
         body: string,
     ): Promise<void> {
+        const text = this.formatMessage(eventType, body)
         try {
-            const threadId = await this.topics.ensureTopic(binding, identity)
-            const text = this.formatMessage(eventType, body)
-            await this.telegram.sendMessage(Number(binding.chatId), text, {
-                messageThreadId: threadId,
+            await retryWithBackoff(async () => {
+                // ensureTopic is cached after first success, so retrying
+                // the whole pipeline is cheap on the topic side and
+                // re-attempts only the actual send.
+                const threadId = await this.topics.ensureTopic(binding, identity)
+                await this.telegram.sendMessage(Number(binding.chatId), text, {
+                    messageThreadId: threadId,
+                })
             })
         } catch (err) {
             // eslint-disable-next-line no-console
-            console.warn('[mobile-bridge:dispatch] send failed:', err)
-            // Task #12 will add the proper retry / drop-log pipeline. v0
-            // logs and drops so a single transient failure doesn't crash
-            // the entire bridge.
+            console.warn('[mobile-bridge:dispatch] send failed after retries:', err)
+            await appendAudit({
+                kind: 'outbound-drop',
+                bindingId: binding.id,
+                platform: binding.platform,
+                eventType,
+                tabUuid: identity.uuid,
+                tabIndex: identity.displayIndex,
+                error: err instanceof Error ? err.message : String(err),
+            })
         }
     }
 
