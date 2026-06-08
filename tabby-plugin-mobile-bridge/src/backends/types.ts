@@ -105,11 +105,36 @@ export interface InteractiveSpec {
 }
 
 /**
- * Platform-tagged credentials. Discriminated union so a binding's stored
- * credentials map 1:1 to the backend that consumes them, with no
- * "either-or" type guards needed at call sites.
+ * Pointer to an entry in {@link KeystoreService}. Replaces inline
+ * plaintext secrets in persisted records.
+ *
+ * `source: 'keystore'` is the only mode in v1. Future modes (env var,
+ * macOS Keychain, OS credential manager) drop in as additional tagged
+ * variants without changing call sites.
+ */
+export type SecretRef =
+    | { source: 'keystore'; id: string }
+
+/**
+ * Platform-tagged credentials AS PERSISTED. Secrets are
+ * {@link SecretRef} pointers, not plaintext — the backend resolves them
+ * via KeystoreService at start() time. Discriminated on `platform` so
+ * the backend implementation gets a narrow type without runtime guards.
+ *
+ * Public identifiers (Feishu's appId, region selector) stay inline —
+ * they're not secrets and surface in the settings UI.
  */
 export type BackendCredentials =
+    | { platform: 'telegram'; botToken: SecretRef }
+    | { platform: 'feishu'; appId: string; appSecret: SecretRef; region: 'feishu' | 'lark' }
+
+/**
+ * Plaintext counterpart of {@link BackendCredentials} accepted at the
+ * pairing boundary (settings UI / PairingService). BindingStoreService
+ * translates these to the SecretRef form before persisting — secrets
+ * never reach disk in plaintext after Phase 2.
+ */
+export type PlaintextBackendCredentials =
     | { platform: 'telegram'; botToken: string }
     | { platform: 'feishu'; appId: string; appSecret: string; region: 'feishu' | 'lark' }
 
@@ -155,7 +180,15 @@ export class MessagingError extends Error {
  * uniform interface lets callers ignore the difference.
  */
 export interface MessagingBackend {
-    start (creds: BackendCredentials): Promise<void>
+    /**
+     * Begin the backend's transport with the given credentials. Accepts
+     * either a persisted {@link BackendCredentials} (SecretRef pointers,
+     * resolved via KeystoreService) or {@link PlaintextBackendCredentials}
+     * straight from a pairing flow — the implementation transparently
+     * handles both so pairing doesn't need to write to keystore just to
+     * start a probe.
+     */
+    start (creds: BackendCredentials | PlaintextBackendCredentials): Promise<void>
     stop (): Promise<void>
 
     readonly running$: Observable<boolean>

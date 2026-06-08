@@ -5,7 +5,9 @@ import * as path from 'path'
 import * as os from 'os'
 import { randomUUID } from 'crypto'
 
-import { ChannelBinding, LegacyChannelBinding } from './types'
+import { BackendCredentials, PlaintextBackendCredentials, SecretRef } from '../backends/types'
+import { KeystoreService } from '../keystore.service'
+import { BindingDraft, ChannelBinding, LegacyChannelBinding, LegacyCredentials } from './types'
 
 /**
  * Persistent storage for {@link ChannelBinding}s. Writes through to a flat
@@ -37,6 +39,8 @@ export class BindingStoreService {
      */
     private writeQueue: Promise<unknown> = Promise.resolve()
 
+    constructor (private keystore: KeystoreService) {}
+
     /** Stream of current bindings. Cold subscribers get the latest snapshot. */
     get bindings$ (): Observable<ChannelBinding[]> { return this.bindingsSubject }
 
@@ -55,13 +59,21 @@ export class BindingStoreService {
             try {
                 const raw = await fs.readFile(BindingStoreService.FILE, 'utf8')
                 const parsed = JSON.parse(raw) as LegacyChannelBinding[]
-                const migrated = Array.isArray(parsed) ? parsed.map(b => this.migrate(b)) : []
+                if (!Array.isArray(parsed)) {
+                    this.bindingsSubject.next([])
+                    return
+                }
+                // Sequential migration so keystore writes don't pile up in
+                // an unbounded parallel fan-out; KeystoreService serialises
+                // saves internally but the JSON round-trip of each write
+                // dominates wall-clock anyway.
+                const results: Array<{ binding: ChannelBinding; changed: boolean }> = []
+                for (const raw of parsed) {
+                    results.push(await this.migrate(raw))
+                }
+                const migrated = results.map(r => r.binding)
                 this.bindingsSubject.next(migrated)
-                // Persist the migration if any record was rewritten — keeps
-                // the on-disk shape current so subsequent loads skip the
-                // migrate() path entirely. Best-effort; failure here just
-                // means the migration re-runs next launch.
-                if (migrated.some((m, i) => parsed[i]?.botToken !== undefined && !parsed[i]?.credentials)) {
+                if (results.some(r => r.changed)) {
                     await this.save().catch(err => {
                         // eslint-disable-next-line no-console
                         console.warn('[mobile-bridge:store] migration save failed:', err)
@@ -81,48 +93,143 @@ export class BindingStoreService {
     }
 
     /**
-     * Forward-only migration of pre-Phase-1 records. Pre-Phase-1 stored
-     * `botToken` at the top level (Telegram-only world); Phase 1 introduces
-     * the `credentials` discriminated union to support Feishu / Lark.
-     * Records without `credentials` are inferred from `platform` +
-     * `botToken`; the legacy field is dropped on the next save.
+     * Forward-only migration covering three on-disk shapes:
+     *   - Pre-Phase-1: top-level `botToken` (Telegram-only world)
+     *   - Phase 1: `credentials.botToken` as plaintext string
+     *   - Phase 2 (current): `credentials.botToken` as SecretRef
      *
-     * Records that already have `credentials` pass through unchanged.
+     * Any plaintext secret encountered is written to {@link KeystoreService}
+     * and replaced with a SecretRef pointer in the in-memory record.
+     * The returned `changed` flag drives the post-load save so the on-disk
+     * shape catches up to current.
+     *
+     * Keystore ids are DETERMINISTIC from the binding id + secret kind
+     * (`binding-${id}-bot-token`, etc.). On a save-failure → re-launch →
+     * re-migration cycle the second migration write hits the SAME
+     * keystore id and overwrites instead of accumulating; the previous
+     * version minted a fresh UUID per attempt and grew the encrypted
+     * file by N entries per failed launch.
      */
-    private migrate (raw: LegacyChannelBinding): ChannelBinding {
+    private async migrate (raw: LegacyChannelBinding): Promise<{ binding: ChannelBinding; changed: boolean }> {
         const { botToken, credentials, ...rest } = raw
-        // Already-migrated record: preserve the credentials we just
-        // destructured. The previous version returned `rest` here, which
-        // had stripped `credentials` along with `botToken` — every relaunch
-        // after the first migration would silently wipe the credentials,
-        // breaking telegram.start() on every subsequent boot.
-        if (credentials) {
-            return { ...rest, credentials } as unknown as ChannelBinding
-        }
-        if (raw.platform === 'telegram' && typeof botToken === 'string') {
+        // Migration assumes raw.id is present (every binding ever written
+        // since v0 had one). Defensive fallback to randomUUID for hand-
+        // edited records that somehow lost it — slightly worse for the
+        // orphan-protection invariant but better than crashing.
+        const rawId = (raw as unknown as { id?: unknown }).id
+        const bindingId = typeof rawId === 'string' ? rawId : randomUUID()
+
+        // Pre-Phase-1: legacy plaintext at top-level. Only ever telegram.
+        if (!credentials && raw.platform === 'telegram' && typeof botToken === 'string') {
+            const ref = await this.storeSecret(botToken, this.secretIdFor(bindingId, 'bot-token'))
             return {
-                ...(rest as unknown as Omit<ChannelBinding, 'credentials'>),
-                credentials: { platform: 'telegram', botToken },
+                binding: {
+                    ...(rest as unknown as Omit<ChannelBinding, 'credentials'>),
+                    credentials: { platform: 'telegram', botToken: ref },
+                },
+                changed: true,
             }
         }
-        // No legacy field and no credentials — record is unusable but we
-        // preserve it (the BindingStore's enabled toggle is the user's
-        // escape hatch). The runtime will throw when trying to start the
-        // backend with undefined credentials, surfacing the broken record.
-        return rest as unknown as ChannelBinding
+
+        if (credentials) {
+            const { creds: nextCreds, changed } = await this.migrateCredentials(bindingId, credentials)
+            return {
+                binding: { ...rest, credentials: nextCreds } as unknown as ChannelBinding,
+                changed,
+            }
+        }
+
+        // No usable credentials. Preserve the record so the user can
+        // disable / remove it via the UI; runtime will throw when trying
+        // to start the backend.
+        return {
+            binding: rest as unknown as ChannelBinding,
+            changed: false,
+        }
     }
 
     /**
-     * Add a new binding. Mints a fresh internal id; returns it for the
-     * caller's records. Serialized, and rewinds the in-memory state if
-     * save() rejects so disk and BehaviorSubject stay consistent.
+     * Translate {@link LegacyCredentials} (plaintext OR SecretRef secrets)
+     * into the current {@link BackendCredentials} shape (SecretRef only).
+     * If the input was already current the return is structurally
+     * identical and `changed` is false.
      */
-    add (partial: Omit<ChannelBinding, 'id' | 'createdAt'>): Promise<ChannelBinding> {
+    private async migrateCredentials (bindingId: string, creds: LegacyCredentials): Promise<{ creds: BackendCredentials; changed: boolean }> {
+        if (creds.platform === 'telegram') {
+            if (typeof creds.botToken === 'string') {
+                const ref = await this.storeSecret(creds.botToken, this.secretIdFor(bindingId, 'bot-token'))
+                return { creds: { platform: 'telegram', botToken: ref }, changed: true }
+            }
+            return { creds: { platform: 'telegram', botToken: creds.botToken }, changed: false }
+        }
+        // feishu
+        if (typeof creds.appSecret === 'string') {
+            const ref = await this.storeSecret(creds.appSecret, this.secretIdFor(bindingId, 'app-secret'))
+            return {
+                creds: { platform: 'feishu', appId: creds.appId, region: creds.region, appSecret: ref },
+                changed: true,
+            }
+        }
+        return {
+            creds: { platform: 'feishu', appId: creds.appId, region: creds.region, appSecret: creds.appSecret },
+            changed: false,
+        }
+    }
+
+    /** Stable keystore id from binding id + secret kind. Re-running a
+     *  migration writes back to the same key, preventing orphan growth. */
+    private secretIdFor (bindingId: string, kind: 'bot-token' | 'app-secret'): string {
+        return `binding-${bindingId}-${kind}`
+    }
+
+    /** Write a plaintext secret into the keystore under the given id and
+     *  return its reference. */
+    private async storeSecret (plaintext: string, id: string): Promise<SecretRef> {
+        await this.keystore.write(id, plaintext)
+        return { source: 'keystore', id }
+    }
+
+    /** Convert plaintext credentials (from pairing) to the SecretRef
+     *  form. Keystore ids derive from the binding id so save-failure +
+     *  user-retry doesn't leak unreferenced encrypted entries. */
+    private async credentialsFromPlaintext (bindingId: string, plain: PlaintextBackendCredentials): Promise<BackendCredentials> {
+        if (plain.platform === 'telegram') {
+            const ref = await this.storeSecret(plain.botToken, this.secretIdFor(bindingId, 'bot-token'))
+            return { platform: 'telegram', botToken: ref }
+        }
+        const ref = await this.storeSecret(plain.appSecret, this.secretIdFor(bindingId, 'app-secret'))
+        return { platform: 'feishu', appId: plain.appId, region: plain.region, appSecret: ref }
+    }
+
+    /**
+     * Add a new binding from a {@link BindingDraft}. Mints a fresh
+     * internal id; writes the plaintext secret(s) to keystore and stores
+     * the SecretRef pointer(s) in the record. Serialized + rewind so
+     * disk and BehaviorSubject stay consistent on save failure.
+     *
+     * If save() rejects after the keystore write succeeded, the keystore
+     * entry leaks (orphaned secret with no referring binding). Acceptable
+     * — `remove()` doesn't currently delete keystore entries either, and
+     * fixing that is a separate hygiene pass; the user can hand-edit
+     * the encrypted file or wait for the disk-space pressure that never
+     * actually arrives at the kilobyte scale these secrets occupy.
+     */
+    add (draft: BindingDraft): Promise<ChannelBinding> {
         return this.serialize(async () => {
             await this.load()
+            const id = randomUUID()
+            // Pass the binding id INTO credential creation so the keystore
+            // keys are derived from it (binding-{id}-bot-token etc.). On
+            // save failure the orphan keystore entry is bounded — at most
+            // one per add() click — and would be overwritten if the user
+            // somehow retries with the same id (impossible with a fresh
+            // uuid each call, but the discipline matches migrate()'s
+            // stable-id pattern).
+            const credentials = await this.credentialsFromPlaintext(id, draft.credentials)
             const binding: ChannelBinding = {
-                ...partial,
-                id: randomUUID(),
+                ...draft,
+                credentials,
+                id,
                 createdAt: Date.now(),
             }
             return this.applyOrRewind([...this.current, binding], () => binding)
@@ -141,12 +248,28 @@ export class BindingStoreService {
         })
     }
 
-    /** Serialized + rewind. */
+    /** Serialized + rewind. Also clears the keystore entries the removed
+     *  binding referenced — orphan secrets accumulating across disconnect/
+     *  reconnect cycles would be a slow-growing privacy leak. */
     remove (id: string): Promise<void> {
         return this.serialize(async () => {
             await this.load()
+            const target = this.current.find(b => b.id === id)
             await this.applyOrRewind(this.current.filter(b => b.id !== id), () => undefined as void)
+            if (target) {
+                for (const ref of this.secretRefsOf(target.credentials)) {
+                    await this.keystore.delete(ref.id).catch(err => {
+                        // eslint-disable-next-line no-console
+                        console.warn('[mobile-bridge:store] keystore delete failed:', err)
+                    })
+                }
+            }
         })
+    }
+
+    private secretRefsOf (creds: BackendCredentials): SecretRef[] {
+        if (creds.platform === 'telegram') return [creds.botToken]
+        return [creds.appSecret]
     }
 
     /**

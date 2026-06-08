@@ -18,6 +18,7 @@ import { PermissionModeService } from './permission-mode.service'
 import { PermissionRelayService } from './permission-relay.service'
 import { TopicSyncService } from './topic-sync.service'
 import { InstanceLockService } from './instance-lock.service'
+import { KeystoreService } from './keystore.service'
 import { BridgeSettingsComponent } from './settings/settings.component'
 
 @NgModule({
@@ -38,6 +39,7 @@ import { BridgeSettingsComponent } from './settings/settings.component'
         PermissionRelayService,
         TopicSyncService,
         InstanceLockService,
+        KeystoreService,
     ],
 })
 export default class MobileBridgeModule {

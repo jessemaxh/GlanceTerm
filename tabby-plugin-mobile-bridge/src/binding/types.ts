@@ -1,4 +1,4 @@
-import { BackendCredentials } from '../backends/types'
+import { BackendCredentials, PlaintextBackendCredentials, SecretRef } from '../backends/types'
 
 /**
  * Persisted binding records. One per (platform × chat) the user has linked.
@@ -6,12 +6,11 @@ import { BackendCredentials } from '../backends/types'
  * v0 MVP cap: one binding per platform. The list-of-records shape is
  * deliberate — extending to multi-binding later is no schema change.
  *
- * SECURITY NOTE: `credentials` carries the bot token / app secret in
- * plaintext as of Phase 1. The keystore work (Phase 2) moves them to
- * AES-256-GCM-encrypted storage with a `SecretRef` pointer in this record.
- * For dogfooding on the author's own machine the plain-file approach is
- * acceptable but anyone considering a public release should land Phase 2
- * first.
+ * Credentials hold {@link SecretRef} pointers (post-Phase-2); the actual
+ * bot tokens / app secrets live in {@link KeystoreService}'s
+ * AES-256-GCM-encrypted store under those ids. Inline plaintext is a
+ * thing of the past — Phase 2 migration moves any legacy record into
+ * the encrypted store on first load.
  */
 export interface ChannelBinding {
     /** Internal id — uuid. Distinct from the platform-side chat id. */
@@ -23,8 +22,8 @@ export interface ChannelBinding {
     platform: 'telegram' | 'feishu'
     /** Display label the user chose (or auto-generated from bot getMe). */
     label: string
-    /** Platform-tagged credentials. Discriminated union — TS narrows on
-     *  `.platform` at consumer sites. */
+    /** Platform-tagged credentials with SecretRef pointers to actual
+     *  secret material. */
     credentials: BackendCredentials
     /** Platform-side chat id this binding is locked to. Set at /bind time. */
     chatId: string
@@ -46,19 +45,20 @@ export interface ChannelBinding {
  * the user clicks "Add binding" in settings; expires after 5 minutes.
  * Matched against `/bind <code>` Telegram messages by PairingService.
  *
- * Holds the not-yet-confirmed credentials inline so the pairing flow has
- * everything it needs to start the bot loop before the user's /bind
- * message arrives. Once matched, these graduate to ChannelBinding.
+ * Holds the not-yet-confirmed plaintext credentials inline so the pairing
+ * flow has everything it needs to start the bot loop before the user's
+ * /bind message arrives. Once matched, BindingStoreService.add writes
+ * the secret to keystore and graduates the rest into a ChannelBinding.
  */
 export interface PendingPairing {
     /** 6 uppercase alphanumeric chars. */
     code: string
     /** Platform the user is binding. */
     platform: 'telegram' | 'feishu'
-    /** Credentials staged for the binding-to-be. Discriminated by
-     *  `platform`; the backend's `start(creds)` consumes the matching
-     *  variant. */
-    credentials: BackendCredentials
+    /** Plaintext credentials staged for the binding-to-be. Lives in
+     *  memory only — never persisted. BindingStoreService.add converts
+     *  to the SecretRef form before writing the binding record. */
+    credentials: PlaintextBackendCredentials
     /** Optional pre-fill for the binding label. */
     label?: string
     /** Wall-clock expiry (ms). */
@@ -66,14 +66,41 @@ export interface PendingPairing {
 }
 
 /**
- * Pre-Phase-1 on-disk shape. Used by BindingStoreService.load to detect
- * legacy records (have `botToken` at top level) and migrate them to the
- * `credentials`-tagged form. Only the fields needed for the migration
- * are typed; everything else is preserved as-is.
+ * Schema for {@link BindingStoreService.add}'s input — exactly a
+ * {@link ChannelBinding} minus the auto-generated id+createdAt, but with
+ * the credentials slot accepting plaintext. add() routes the plaintext
+ * through keystore and persists with a SecretRef.
+ */
+export interface BindingDraft {
+    platform: 'telegram' | 'feishu'
+    label: string
+    credentials: PlaintextBackendCredentials
+    chatId: string
+    ownerUserId: string
+    approvedSenders: string[]
+    enabled: boolean
+    eventFilter: string[]
+}
+
+/**
+ * Pre-migration shapes on disk. Used by BindingStoreService.load to
+ * detect legacy records and migrate them forward. Three shapes covered:
+ *
+ *   - Pre-Phase-1: top-level `botToken` (Telegram-only world)
+ *   - Phase 1: `credentials.botToken` as plaintext string
+ *   - Phase 2: `credentials.botToken` as SecretRef
+ *
+ * Only the fields needed for migration detection are typed; everything
+ * else passes through as-is.
  */
 export interface LegacyChannelBinding {
     botToken?: string
-    credentials?: BackendCredentials
+    credentials?: LegacyCredentials
     platform: 'telegram' | 'feishu'
     [k: string]: unknown
 }
+
+/** Union covering plaintext (Phase 1 form) and SecretRef (current). */
+export type LegacyCredentials =
+    | { platform: 'telegram'; botToken: string | SecretRef }
+    | { platform: 'feishu'; appId: string; appSecret: string | SecretRef; region: 'feishu' | 'lark' }

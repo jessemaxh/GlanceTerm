@@ -21,9 +21,11 @@ import {
     MessagingBackend,
     MessagingError,
     MessagingErrorKind,
+    PlaintextBackendCredentials,
     SendOptions,
     ThreadRef,
 } from '../types'
+import { KeystoreService } from '../../keystore.service'
 import { redactToken } from '../../audit-log'
 
 /**
@@ -76,6 +78,8 @@ export class TelegramBackend implements MessagingBackend, OnDestroy {
     private runningSubject = new BehaviorSubject<boolean>(false)
     private identitySubject = new BehaviorSubject<BotIdentity | null>(null)
 
+    constructor (private keystore: KeystoreService) {}
+
     get inbound$ (): Observable<InboundMessage> { return this.inboundSubject }
     get callbacks$ (): Observable<InboundCallback> { return this.callbackSubject }
     get running$ (): Observable<boolean> { return this.runningSubject }
@@ -83,14 +87,34 @@ export class TelegramBackend implements MessagingBackend, OnDestroy {
 
     // ── Lifecycle ───────────────────────────────────────────────────────
 
-    start (creds: BackendCredentials): Promise<void> {
+    start (creds: BackendCredentials | PlaintextBackendCredentials): Promise<void> {
         if (creds.platform !== 'telegram') {
             return Promise.reject(new Error(
                 `TelegramBackend.start: expected telegram credentials, got ${creds.platform}`,
             ))
         }
-        const token = creds.botToken
+        const tokenOrRef = creds.botToken
         return this.enqueueLifecycle(async () => {
+            // Resolve to plaintext at the lifecycle boundary — the token
+            // lives only in-memory inside this class. Plaintext from a
+            // pairing flow short-circuits keystore; SecretRef from a
+            // persisted binding goes through keystore.read. A decrypt
+            // failure (key rotation, missing salt) surfaces as
+            // MessagingError('auth_failed') so the dispatcher's retry
+            // policy treats it as fail-fast.
+            let token: string
+            if (typeof tokenOrRef === 'string') {
+                token = tokenOrRef
+            } else {
+                try {
+                    token = await this.keystore.read(tokenOrRef.id)
+                } catch (err) {
+                    throw new MessagingError(
+                        'auth_failed',
+                        `TelegramBackend: keystore read failed (re-pair to recover): ${err instanceof Error ? err.message : String(err)}`,
+                    )
+                }
+            }
             if (this.running && this.token === token) return
             if (this.running) await this.haltLoop()
             this.token = token
