@@ -135,6 +135,14 @@ export class FeishuBackend implements MessagingBackend, OnDestroy {
                 await channel.connect()
             } catch (err) {
                 this.detachHandlers()
+                // SDK may have started token-refresh timers / WS reconnect
+                // loops inside createLarkChannel/connect before throwing.
+                // Tear them down before bubbling the error so the next
+                // start() attempt doesn't race against an orphan loop.
+                // Best-effort: disconnect itself can throw on a half-init
+                // channel — swallow.
+                try { await channel.disconnect() } catch { /* ignore */ }
+                this.sessionKey = ''
                 throw this.translateLarkError(err, 'connect')
             }
             this.channel = channel

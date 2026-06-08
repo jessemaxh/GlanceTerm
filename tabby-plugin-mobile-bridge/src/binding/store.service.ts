@@ -217,6 +217,19 @@ export class BindingStoreService {
     add (draft: BindingDraft): Promise<ChannelBinding> {
         return this.serialize(async () => {
             await this.load()
+            // v0 cap: one binding per platform. Defence in depth — the
+            // settings UI only shows bindings[0] and only one pairing flow
+            // can be active at a time, but a duplicate /bind landing
+            // inside the keystore-write window of a previous /bind could
+            // pass the PairingService claim and reach here. Reject so we
+            // don't end up with an invisible second binding the user
+            // can't disconnect.
+            if (this.current.some(b => b.platform === draft.platform)) {
+                throw new Error(
+                    `BindingStore: a ${draft.platform} binding already exists. `
+                    + 'Disconnect the existing one before adding another.',
+                )
+            }
             const id = randomUUID()
             // Pass the binding id INTO credential creation so the keystore
             // keys are derived from it (binding-{id}-bot-token etc.). On

@@ -1,32 +1,31 @@
 import { Component, NgZone, OnDestroy } from '@angular/core'
 import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap'
-import { Observable, Subscription, combineLatest } from 'rxjs'
-import { map } from 'rxjs/operators'
+import { Observable, Subscription, combineLatest, of } from 'rxjs'
+import { map, switchMap } from 'rxjs/operators'
 
 import { BindingStoreService } from '../binding/store.service'
 import { PairingService } from '../binding/pairing.service'
-import { TelegramBackend } from '../backends/telegram/client.service'
+import { BackendRegistry } from '../backends/registry.service'
 import { TopicService } from '../topic.service'
 import { InstanceLockService } from '../instance-lock.service'
 import { ChannelBinding, PendingPairing } from '../binding/types'
 import { BotIdentity } from '../backends/types'
+
+type Platform = 'telegram' | 'feishu'
 
 /**
  * Settings panel for the Mobile Bridge plugin. Opened from the AI
  * sidebar's gear modal as an NgbModal — the plugin registers itself with
  * SidebarSettingsRegistry at module construct time (see index.ts).
  *
- * Post-rewrite scope (deliberately minimal): one bot, on/off, status.
- * The previous version exposed an event-type filter, an approved-senders
- * editor, and a separate permission-relay toggle — all artefacts of the
- * v0 "push per event type" model. With topic-sync (every tab mirrors as
- * a Forum Topic, permission requests always relay), those knobs collapsed
- * to a single concept: "is the bridge on or off."
- *
  * Three render states, mutually exclusive:
- *   - Not connected: bot token entry + pairing flow
- *   - Connected: bot identity + enabled toggle + disconnect button + stats
+ *   - Not connected: platform picker + per-platform pairing form
+ *   - Connected: bot identity + enabled toggle + disconnect + stats
  *   - Secondary instance: warning banner (lock held by another process)
+ *
+ * Per-platform pairing UX:
+ *   - Telegram: paste bot token → /bind in supergroup with Forum Topics
+ *   - Feishu: paste App ID + Secret + pick region → /bind in 话题模式 group
  */
 @Component({
     selector: 'bridge-settings',
@@ -39,9 +38,9 @@ import { BotIdentity } from '../backends/types'
             </div>
 
             <p class="text-muted small mb-3">
-                Every GlanceTerm tab mirrors to a Telegram Forum Topic on
-                your phone. Reply in the topic → injects into the tab.
-                Closing a tab archives its topic (history kept).
+                Every GlanceTerm tab mirrors to a topic / thread on your
+                phone. Reply in the topic → injects into the tab. Closing
+                a tab archives its topic (history kept).
             </p>
 
             <!-- Secondary-instance warning supersedes everything else -->
@@ -58,7 +57,7 @@ import { BotIdentity } from '../backends/types'
                         <strong>{{ statusLine$ | async }}</strong>
                     </div>
                     <div class="small text-muted mb-3">
-                        chat: {{ binding.chatId }} · {{ statsLine }}
+                        {{ platformLabel(binding.platform) }} · chat: {{ binding.chatId }} · {{ statsLine }}
                     </div>
                     <div class="d-flex align-items-center">
                         <label class="form-check-label me-3">
@@ -78,30 +77,102 @@ import { BotIdentity } from '../backends/types'
             <!-- Not connected: pairing flow -->
             <ng-template #notConnected>
                 <div *ngIf="!pairing" class="border rounded p-3 mb-3">
-                    <div class="form-group mb-2">
-                        <label class="small">Bot token (from @BotFather):</label>
-                        <input type="password" class="form-control" [(ngModel)]="botToken"
-                               placeholder="123456789:ABC..."/>
-                    </div>
                     <div class="form-group mb-3">
-                        <label class="small">Label (optional):</label>
-                        <input type="text" class="form-control" [(ngModel)]="label"
-                               placeholder="My Telegram"/>
+                        <label class="small d-block mb-1">Platform:</label>
+                        <div class="btn-group" role="group">
+                            <button type="button" class="btn btn-sm"
+                                    [class.btn-primary]="platform === 'telegram'"
+                                    [class.btn-outline-secondary]="platform !== 'telegram'"
+                                    (click)="platform = 'telegram'">
+                                Telegram
+                            </button>
+                            <button type="button" class="btn btn-sm"
+                                    [class.btn-primary]="platform === 'feishu'"
+                                    [class.btn-outline-secondary]="platform !== 'feishu'"
+                                    (click)="platform = 'feishu'">
+                                Feishu / Lark
+                            </button>
+                        </div>
                     </div>
-                    <button class="btn btn-primary" (click)="startPair()"
-                            [disabled]="!botToken || busy">
-                        Generate pairing code
-                    </button>
+
+                    <!-- Telegram form -->
+                    <ng-container *ngIf="platform === 'telegram'">
+                        <div class="form-group mb-2">
+                            <label class="small">Bot token (from &#64;BotFather):</label>
+                            <input type="password" class="form-control" [(ngModel)]="botToken"
+                                   placeholder="123456789:ABC..."/>
+                        </div>
+                        <div class="form-group mb-3">
+                            <label class="small">Label (optional):</label>
+                            <input type="text" class="form-control" [(ngModel)]="label"
+                                   placeholder="My Telegram"/>
+                        </div>
+                        <button class="btn btn-primary" (click)="startPair()"
+                                [disabled]="!canPair() || busy">
+                            Generate pairing code
+                        </button>
+                        <div class="text-muted small mt-3">
+                            ⓘ The bot must be admin in a supergroup with
+                            <strong>Forum Topics</strong> enabled
+                            (group settings → Topics).
+                        </div>
+                    </ng-container>
+
+                    <!-- Feishu / Lark form -->
+                    <ng-container *ngIf="platform === 'feishu'">
+                        <div class="form-group mb-2">
+                            <label class="small">Region:</label>
+                            <div class="btn-group btn-group-sm" role="group">
+                                <button type="button" class="btn"
+                                        [class.btn-primary]="region === 'feishu'"
+                                        [class.btn-outline-secondary]="region !== 'feishu'"
+                                        (click)="region = 'feishu'">
+                                    飞书 (CN)
+                                </button>
+                                <button type="button" class="btn"
+                                        [class.btn-primary]="region === 'lark'"
+                                        [class.btn-outline-secondary]="region !== 'lark'"
+                                        (click)="region = 'lark'">
+                                    Lark (Intl)
+                                </button>
+                            </div>
+                        </div>
+                        <div class="form-group mb-2">
+                            <label class="small">App ID:</label>
+                            <input type="text" class="form-control" [(ngModel)]="appId"
+                                   placeholder="cli_xxxxxxxxxxxx"/>
+                        </div>
+                        <div class="form-group mb-2">
+                            <label class="small">App Secret:</label>
+                            <input type="password" class="form-control" [(ngModel)]="appSecret"
+                                   placeholder="(from app settings)"/>
+                        </div>
+                        <div class="form-group mb-3">
+                            <label class="small">Label (optional):</label>
+                            <input type="text" class="form-control" [(ngModel)]="label"
+                                   placeholder="My Feishu"/>
+                        </div>
+                        <button class="btn btn-primary" (click)="startPair()"
+                                [disabled]="!canPair() || busy">
+                            Generate pairing code
+                        </button>
+                        <div class="text-muted small mt-3">
+                            ⓘ Create a self-built app at
+                            <strong>open.feishu.cn</strong> (or
+                            <strong>open.larksuite.com</strong>), add the bot
+                            to a group, and switch that group to
+                            <strong>话题模式 (Topic mode)</strong>.
+                        </div>
+                    </ng-container>
+
                     <div *ngIf="error" class="text-danger small mt-2">{{ error }}</div>
-                    <div class="text-muted small mt-3">
-                        ⓘ The bot must be an admin in a supergroup with
-                        <strong>Forum Topics enabled</strong> (group settings →
-                        Topics).
-                    </div>
                 </div>
 
                 <div *ngIf="pairing" class="alert alert-info">
-                    <p class="mb-2">In the supergroup's General topic, send:</p>
+                    <p class="mb-2">
+                        In the {{ platformLabel(pairing.platform) }} group's
+                        General topic, send:
+                    </p>
                     <pre class="bg-dark text-white p-2 rounded mb-2">/bind {{ pairing.code }}</pre>
                     <p class="small text-muted mb-2">
                         Expires in {{ remainingMin }} min.
@@ -117,10 +188,15 @@ import { BotIdentity } from '../backends/types'
 export class BridgeSettingsComponent implements OnDestroy {
     binding$: Observable<ChannelBinding | undefined>
     isPrimary$: Observable<boolean>
-    /** Renders as e.g. "@MyBot · connected" or "Idle". */
+    /** Renders as e.g. "@MyBot · connected" or "Idle". Reactive — derived
+     *  from the connected binding's platform-specific backend. */
     statusLine$: Observable<string>
 
+    platform: Platform = 'telegram'
     botToken = ''
+    appId = ''
+    appSecret = ''
+    region: 'feishu' | 'lark' = 'feishu'
     label = ''
     pairing: PendingPairing | null = null
     remainingMin = 0
@@ -133,29 +209,48 @@ export class BridgeSettingsComponent implements OnDestroy {
     constructor (
         private store: BindingStoreService,
         private pairingSvc: PairingService,
-        private telegram: TelegramBackend,
+        private backends: BackendRegistry,
         private topics: TopicService,
         private lock: InstanceLockService,
         private zone: NgZone,
         public modal: NgbActiveModal,
     ) {
-        // First (and only, given v0 single-binding cap) telegram binding.
-        // undefined → "not connected" template branch.
+        // The first (and only, given v0 single-binding cap) configured
+        // binding from either platform. undefined → "not connected"
+        // template branch.
         this.binding$ = this.store.bindings$.pipe(
-            map(bindings => bindings.find(b => b.platform === 'telegram')),
+            map(bindings => bindings[0]),
         )
         this.isPrimary$ = this.lock.isPrimary$
-        this.statusLine$ = combineLatest([this.telegram.running$, this.telegram.identity$]).pipe(
-            map(([running, identity]) => this.formatStatus(running, identity)),
+        // statusLine pulls from whichever backend the current binding
+        // points to. switchMap so the inner observable rebinds when the
+        // binding's platform changes (rare with one-binding cap but
+        // correct if the user disconnects and re-pairs on a different
+        // platform).
+        this.statusLine$ = this.binding$.pipe(
+            switchMap(binding => {
+                if (!binding) return of('Idle')
+                // Disabled is a user-driven state (toggle off) that's
+                // distinct from "backend not running" (which on a
+                // disabled binding is the syncTransport-driven
+                // consequence, not the cause). Showing "Idle" alongside
+                // an Enabled-unchecked checkbox makes the card look
+                // wrong; "Disabled" makes the cause explicit.
+                if (!binding.enabled) return of('Disabled')
+                const backend = this.backends.forPlatform(binding.platform)
+                return combineLatest([backend.running$, backend.identity$]).pipe(
+                    map(([running, identity]) => this.formatStatus(running, identity)),
+                )
+            }),
         )
         void this.store.load()
 
         this.completedSub = this.pairingSvc.completedPairing$.subscribe(_b => {
-            // PairingService.completedPairing$ is a plain Subject (no replay)
-            // so guarding against null initial emissions isn't required.
             this.zone.run(() => {
                 this.pairing = null
                 this.botToken = ''
+                this.appId = ''
+                this.appSecret = ''
                 this.label = ''
                 this.stopTicking()
             })
@@ -169,27 +264,41 @@ export class BridgeSettingsComponent implements OnDestroy {
 
     /**
      * Topic stats line. Recomputed on every change-detection pass by
-     * touching the TopicService cache — cheap (Map iteration over dozens
-     * of entries) and avoids subscribing to a per-mutation event stream
-     * we don't otherwise need. Empty string when no binding exists.
+     * touching the TopicService cache — cheap for the dozens-of-topics
+     * scale and avoids subscribing to a per-mutation event stream.
      */
     get statsLine (): string {
-        const current = this.store.current.find(b => b.platform === 'telegram')
+        const current = this.store.current[0]
         if (!current) return ''
         const { open, closed } = this.topics.getStatsForBinding(current.id)
         if (closed === 0) return `${open} topic${open === 1 ? '' : 's'}`
         return `${open} open · ${closed} archived`
     }
 
+    canPair (): boolean {
+        return this.platform === 'telegram'
+            ? this.botToken.length > 0
+            : this.appId.length > 0 && this.appSecret.length > 0
+    }
+
     async startPair (): Promise<void> {
-        if (!this.botToken || this.busy) return
+        if (!this.canPair() || this.busy) return
         this.busy = true
         this.error = ''
         try {
-            this.pairing = await this.pairingSvc.beginTelegramPairing(
-                this.botToken,
-                this.label || undefined,
-            )
+            if (this.platform === 'telegram') {
+                this.pairing = await this.pairingSvc.beginTelegramPairing(
+                    this.botToken,
+                    this.label || undefined,
+                )
+            } else {
+                this.pairing = await this.pairingSvc.beginFeishuPairing(
+                    this.appId,
+                    this.appSecret,
+                    this.region,
+                    this.label || undefined,
+                )
+            }
             this.tickRemaining()
             this.tickHandle = setInterval(() => this.tickRemaining(), 30_000)
         } catch (err: unknown) {
@@ -210,28 +319,22 @@ export class BridgeSettingsComponent implements OnDestroy {
         void this.store.update(b.id, { enabled: !b.enabled })
     }
 
-    /** Hard-disconnect = remove binding entirely. The previous UI separated
-     *  "disable" (binding stays, no traffic) from "remove" (binding deleted);
-     *  the simplified UI keeps both because they're different intents — but
-     *  surfaces Disconnect as the only destructive action since v0 caps us
-     *  at one binding (you'd add a fresh one from scratch).
-     *
-     *  Topic-cache cleanup: BindingStore.remove only drops the binding
-     *  record. Without forgetBinding the per-tab thread_id map under
-     *  ~/.glanceterm/mobile-bridge-topics.json grows unbounded across
-     *  disconnect/reconnect cycles (entries can't be re-addressed since
-     *  the new binding gets a fresh uuid, but they're never deleted
-     *  either). Done as fire-and-forget — forgetBinding is in-memory +
-     *  schedules a save, can't fail in a way the user can act on. */
+    /** Hard-disconnect = remove binding entirely. Also clears the
+     *  topic cache so an orphan map can't bloat the topics file across
+     *  disconnect/reconnect cycles. */
     disconnect (b: ChannelBinding): void {
         if (!confirm(
             `Disconnect "${b.label}"?\n\n`
-            + 'Existing Forum Topics in the supergroup are not deleted — '
-            + 'they become orphans (no new messages, history preserved). '
-            + 'Clean them up manually on Telegram if you want.',
+            + 'Existing topics in the group are not deleted — they '
+            + 'become orphans (no new messages, history preserved). '
+            + 'Clean them up manually on the platform if you want.',
         )) return
         void this.topics.forgetBinding(b.id)
         void this.store.remove(b.id)
+    }
+
+    platformLabel (p: Platform): string {
+        return p === 'telegram' ? 'Telegram' : 'Feishu / Lark'
     }
 
     private formatStatus (running: boolean, identity: BotIdentity | null): string {
