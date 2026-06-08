@@ -7,6 +7,35 @@ import { InboundMessage } from '../backends/types'
 import { BindingStoreService } from './store.service'
 import { ChannelBinding, PendingPairing } from './types'
 
+/** Single observation the settings UI surfaces during an active pairing.
+ *  Lets the user distinguish "bot received nothing" (network / wrong
+ *  group / bot not in chat) from "bot received my message but the code
+ *  didn't match" (typo / expired). */
+export interface PairingDiagnostic {
+    ts: number
+    platform: 'telegram' | 'feishu'
+    chatId: string
+    senderId: string
+    senderName?: string
+    /** First 60 chars of the message, sanitised. */
+    textPreview: string
+    result: PairingDiagnosticResult
+}
+
+export type PairingDiagnosticResult =
+    /** /bind <code> matched a pending entry → binding created. */
+    | 'matched'
+    /** /bind <code> but the code doesn't match any pending entry. */
+    | 'code-not-pending'
+    /** /bind <code> matched a pending entry but it had expired. */
+    | 'expired'
+    /** Message starts with /bind but the code-shape regex didn't match
+     *  (wrong length / illegal chars). */
+    | 'malformed-bind'
+    /** Doesn't look like /bind — user is chatting in the group. Surface
+     *  so the user can see "good, bot is in the right chat." */
+    | 'not-bind'
+
 /**
  * `/bind <code>` handshake. Replaces "user types chat id + sender id into
  * settings" with a confirmation flow that derives both from a real
@@ -48,6 +77,11 @@ export class PairingService implements OnDestroy {
      * dialog would re-run the "clear UI" handler on every reopen.
      */
     private completedSubject = new Subject<ChannelBinding>()
+    /** Live diagnostics stream — every inbound message observed during
+     *  the lifetime of the service, classified by what happened when we
+     *  tried to match it to a pending pairing. Settings UI buffers the
+     *  last few during an active pairing window. */
+    private diagnosticsSubject = new Subject<PairingDiagnostic>()
     private subs: Subscription[] = []
     private sweepHandle: ReturnType<typeof setInterval> | null = null
 
@@ -84,6 +118,13 @@ export class PairingService implements OnDestroy {
 
     /** Fires once per `/bind` success. UI listens to clear the spinner. */
     get completedPairing$ (): Observable<ChannelBinding> { return this.completedSubject }
+
+    /** Every inbound message observed during a pairing window, tagged
+     *  with what we did with it. Settings UI rolls this into a "recent
+     *  activity" log so the user can see whether the bot received their
+     *  /bind at all — the most common pairing failure mode is "bot isn't
+     *  actually in the chat" or "wrong group selected." */
+    get diagnostics$ (): Observable<PairingDiagnostic> { return this.diagnosticsSubject }
 
     /**
      * Begin Telegram pairing. Starts the long-poll loop with the given
@@ -160,8 +201,23 @@ export class PairingService implements OnDestroy {
     }
 
     private async onInbound (msg: InboundMessage, platform: 'telegram' | 'feishu'): Promise<void> {
-        const match = /^\/bind\s+([A-Z0-9]{4,12})\b/i.exec(msg.text.trim())
-        if (!match) return
+        // Diagnostics path runs FIRST so a stale-code or malformed /bind
+        // is still visible in the settings UI's recent-activity log.
+        // Skip if no pending pairing exists for this platform — we don't
+        // want to leak normal chat traffic onto the diagnostics stream
+        // outside of an active pairing window.
+        const hasPending = this.pendingSubject.value.some(p => p.platform === platform)
+
+        const trimmed = msg.text.trim()
+        const bindStart = /^\/bind\b/i.test(trimmed)
+        const match = /^\/bind\s+([A-Z0-9]{4,12})\b/i.exec(trimmed)
+
+        if (!match) {
+            if (hasPending) {
+                this.emitDiagnostic(msg, platform, bindStart ? 'malformed-bind' : 'not-bind')
+            }
+            return
+        }
         const code = match[1].toUpperCase()
 
         const now = Date.now()
@@ -169,7 +225,16 @@ export class PairingService implements OnDestroy {
         const candidate = value.find(
             p => p.code === code && p.platform === platform && p.expiresAt > now,
         )
-        if (!candidate) return
+        if (!candidate) {
+            // Distinguish "code never existed" from "code existed but
+            // expired" so the user knows whether to retry or generate
+            // a fresh code.
+            if (hasPending) {
+                const expiredMatch = value.find(p => p.code === code && p.platform === platform)
+                this.emitDiagnostic(msg, platform, expiredMatch ? 'expired' : 'code-not-pending')
+            }
+            return
+        }
 
         // Atomically claim the candidate by removing it from the pending
         // list BEFORE the async store.add. Two concurrent /bind messages
@@ -209,7 +274,26 @@ export class PairingService implements OnDestroy {
             this.pendingSubject.next([...this.pendingSubject.value, candidate])
             throw err
         }
+        this.emitDiagnostic(msg, platform, 'matched')
         this.completedSubject.next(binding)
+    }
+
+    private emitDiagnostic (
+        msg: InboundMessage,
+        platform: 'telegram' | 'feishu',
+        result: PairingDiagnosticResult,
+    ): void {
+        this.diagnosticsSubject.next({
+            ts: Date.now(),
+            platform,
+            chatId: msg.chatId,
+            senderId: msg.senderId,
+            senderName: msg.senderName,
+            // Limit preview length and strip newlines so the UI line
+            // doesn't wrap awkwardly.
+            textPreview: msg.text.replace(/\s+/g, ' ').slice(0, 60),
+            result,
+        })
     }
 
     private sweepExpired (): void {
