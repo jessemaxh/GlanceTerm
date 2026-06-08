@@ -57,6 +57,13 @@ export interface InboundMessage {
 
 /** Button-tap / structured callback (permission-relay verdict path). */
 export interface InboundCallback {
+    /** Which backend emitted this callback. The InboundRouter uses this
+     *  to ack via the right backend instance — TelegramBackend.ackCallback
+     *  hits the answerCallbackQuery API; FeishuBackend.ackCallback is a
+     *  no-op because Feishu auto-acks card actions on receipt. Mismatching
+     *  would silently fail-with-warn but the button on the user's phone
+     *  would spin until Telegram's ~30s timeout. */
+    platform: 'telegram' | 'feishu'
     /** Platform-supplied click event id. Pass to
      *  {@link MessagingBackend.ackCallback} so the user's button stops
      *  spinning. Telegram requires the ack within ~30s. */
@@ -195,8 +202,16 @@ export interface MessagingBackend {
     readonly identity$: Observable<BotIdentity | null>
 
     createThread (chatId: ChatRef, title: string): Promise<ThreadRef>
-    closeThread (chatId: ChatRef, threadId: ThreadRef): Promise<void>
-    reopenThread (chatId: ChatRef, threadId: ThreadRef): Promise<void>
+    /** `currentTitle` is the title the thread last displayed (caller's
+     *  cache). Backends that lack a native close API (Feishu) edit the
+     *  anchor message to "📕 ${currentTitle}" so the title is preserved
+     *  for re-open. Backends with native close (Telegram closeForumTopic)
+     *  ignore the param. */
+    closeThread (chatId: ChatRef, threadId: ThreadRef, currentTitle?: string): Promise<void>
+    /** `restoreTitle` mirrors `closeThread`'s currentTitle: backends that
+     *  emulated close via marker prefix use it to rewrite the anchor
+     *  back to the original title. */
+    reopenThread (chatId: ChatRef, threadId: ThreadRef, restoreTitle?: string): Promise<void>
     renameThread (chatId: ChatRef, threadId: ThreadRef, title: string): Promise<void>
 
     sendText (

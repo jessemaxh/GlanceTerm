@@ -6,6 +6,7 @@ import { SidebarSettingsRegistry } from 'tabby-plugin-ai-sidebar'
 
 import { TabIdentityService } from './tab-identity.service'
 import { TelegramBackend } from './backends/telegram/client.service'
+import { FeishuBackend } from './backends/feishu/client.service'
 import { BackendRegistry } from './backends/registry.service'
 import { TopicService } from './topic.service'
 import { BindingStoreService } from './binding/store.service'
@@ -27,6 +28,7 @@ import { BridgeSettingsComponent } from './settings/settings.component'
     providers: [
         TabIdentityService,
         TelegramBackend,
+        FeishuBackend,
         BackendRegistry,
         TopicService,
         BindingStoreService,

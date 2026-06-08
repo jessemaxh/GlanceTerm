@@ -1,6 +1,7 @@
 import { Injectable } from '@angular/core'
 
 import { TelegramBackend } from './telegram/client.service'
+import { FeishuBackend } from './feishu/client.service'
 import { MessagingBackend } from './types'
 import { ChannelBinding } from '../binding/types'
 
@@ -19,18 +20,13 @@ import { ChannelBinding } from '../binding/types'
 export class BackendRegistry {
     constructor (
         private tg: TelegramBackend,
+        private feishu: FeishuBackend,
     ) {}
 
     forPlatform (platform: ChannelBinding['platform']): MessagingBackend {
         switch (platform) {
             case 'telegram': return this.tg
-            case 'feishu':
-                // Phase 3 will wire a FeishuBackend here. Returning the
-                // TG backend would silently misroute outbound traffic,
-                // so we hard-throw — downstream callers gate their
-                // dispatch on binding.platform anyway, so a thrown error
-                // here means the gating is broken upstream.
-                throw new Error('BackendRegistry: feishu backend not implemented yet (Phase 3)')
+            case 'feishu':   return this.feishu
             default: {
                 // Exhaustiveness check: adding a new platform to the
                 // ChannelBinding union surfaces here as a TS error.
@@ -38,5 +34,12 @@ export class BackendRegistry {
                 throw new Error(`BackendRegistry: unknown platform ${exhaustive as string}`)
             }
         }
+    }
+
+    /** Snapshot of every concrete backend. Used by OutboundDispatcher's
+     *  single-instance guard to force-stop all backends without enumerating
+     *  platform tags by hand. */
+    all (): MessagingBackend[] {
+        return [this.tg, this.feishu]
     }
 }

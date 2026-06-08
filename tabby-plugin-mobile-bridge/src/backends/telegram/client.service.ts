@@ -193,14 +193,16 @@ export class TelegramBackend implements MessagingBackend, OnDestroy {
         return String(topic.message_thread_id)
     }
 
-    async closeThread (chatId: ChatRef, threadId: ThreadRef): Promise<void> {
+    async closeThread (chatId: ChatRef, threadId: ThreadRef, _currentTitle?: string): Promise<void> {
+        // Telegram has native closeForumTopic — currentTitle is ignored;
+        // the closed-state lock badge on the topic icon is enough.
         await this.call<true>('closeForumTopic', {
             chat_id: Number(chatId),
             message_thread_id: Number(threadId),
         })
     }
 
-    async reopenThread (chatId: ChatRef, threadId: ThreadRef): Promise<void> {
+    async reopenThread (chatId: ChatRef, threadId: ThreadRef, _restoreTitle?: string): Promise<void> {
         await this.call<true>('reopenForumTopic', {
             chat_id: Number(chatId),
             message_thread_id: Number(threadId),
@@ -367,6 +369,7 @@ export class TelegramBackend implements MessagingBackend, OnDestroy {
     private flattenCallback (q: TgCallbackQuery): InboundCallback | null {
         if (!q.message || !q.data) return null
         return {
+            platform: 'telegram',
             callbackId: q.id,
             chatId: String(q.message.chat.id),
             threadId: q.message.message_thread_id !== undefined

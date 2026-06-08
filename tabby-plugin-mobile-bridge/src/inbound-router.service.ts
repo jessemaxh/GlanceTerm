@@ -5,6 +5,7 @@ import { BaseTerminalTabComponent } from 'tabby-terminal'
 import { TabMonitor } from 'tabby-plugin-ai-sidebar'
 
 import { TelegramBackend } from './backends/telegram/client.service'
+import { FeishuBackend } from './backends/feishu/client.service'
 import { BackendRegistry } from './backends/registry.service'
 import { InboundCallback, InboundMessage } from './backends/types'
 import { TopicService } from './topic.service'
@@ -46,7 +47,8 @@ export class InboundRouterService implements OnDestroy {
     private subs: Subscription[] = []
 
     constructor (
-        private telegram: TelegramBackend,
+        telegram: TelegramBackend,
+        feishu: FeishuBackend,
         private backends: BackendRegistry,
         private topics: TopicService,
         private store: BindingStoreService,
@@ -55,15 +57,14 @@ export class InboundRouterService implements OnDestroy {
         private keystrokes: KeystrokeAdapterRegistry,
         private permissionRelay: PermissionRelayService,
     ) {
-        // Phase 1: subscribe to telegram backend directly. Phase 3 will
-        // merge inbound streams across all active backends (FeishuBackend
-        // becomes a second source).
-        this.subs.push(
-            this.telegram.inbound$.subscribe(msg => void this.route(msg)),
-        )
-        this.subs.push(
-            this.telegram.callbacks$.subscribe(cb => void this.routeCallback(cb)),
-        )
+        // Subscribe to every backend's inbound streams. Adding a backend
+        // is one entry. Each event carries enough context (chatId,
+        // senderId, platform) for the per-binding routing below to
+        // disambiguate platforms.
+        for (const backend of [telegram, feishu]) {
+            this.subs.push(backend.inbound$.subscribe(msg => void this.route(msg)))
+            this.subs.push(backend.callbacks$.subscribe(cb => void this.routeCallback(cb)))
+        }
     }
 
     ngOnDestroy (): void {
@@ -175,12 +176,11 @@ export class InboundRouterService implements OnDestroy {
         // the ack within ~30s or the inline-keyboard button spins forever
         // on the user's phone — even for callbacks we ultimately reject
         // (sender not whitelisted, binding disabled between send and tap).
-        // We received this callback over the live backend connection, so
-        // the same backend is reachable for the ack. Phase 1 hardcodes
-        // 'telegram' because that's the only backend with callbacks;
-        // Phase 3 will resolve from the callback's source backend once
-        // FeishuBackend.callbacks$ exists.
-        void this.backends.forPlatform('telegram')
+        // The platform field on InboundCallback routes the ack to the
+        // backend that originally received the click; FeishuBackend's
+        // ackCallback is a no-op (Feishu auto-acks card actions), but we
+        // call it for interface symmetry.
+        void this.backends.forPlatform(cb.platform)
             .ackCallback(cb.callbackId)
             .catch(err => {
                 // eslint-disable-next-line no-console

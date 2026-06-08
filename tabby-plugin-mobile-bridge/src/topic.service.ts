@@ -172,8 +172,11 @@ export class TopicService {
         if (!entry) return
         if (entry.status === 'closed') return
         try {
+            // Pass the last-known title so backends that emulate close
+            // via title-prefix (Feishu) can preserve the original. TG
+            // ignores the param.
             await this.backends.forPlatform(binding.platform)
-                .closeThread(binding.chatId, entry.threadId)
+                .closeThread(binding.chatId, entry.threadId, entry.lastTitle)
         } catch (err: unknown) {
             if (err instanceof MessagingError && err.kind === 'thread_not_found') {
                 this.cache.delete(key)
@@ -194,8 +197,11 @@ export class TopicService {
         if (!entry) return
         if (entry.status === 'open') return
         try {
+            // Restore the pre-close title so Feishu can strip its
+            // closed-marker prefix in one edit instead of waiting for
+            // syncRetitleTopic to overwrite with '(reopening)'.
             await this.backends.forPlatform(binding.platform)
-                .reopenThread(binding.chatId, entry.threadId)
+                .reopenThread(binding.chatId, entry.threadId, entry.lastTitle)
         } catch (err: unknown) {
             if (err instanceof MessagingError && err.kind === 'thread_not_found') {
                 this.cache.delete(key)

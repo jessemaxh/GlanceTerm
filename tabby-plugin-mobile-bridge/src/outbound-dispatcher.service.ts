@@ -92,25 +92,34 @@ export class OutboundDispatcherService implements OnDestroy {
         // routing flap between instances. Same logic applies to Feishu's
         // WebSocket stream — only one client per app should be alive.
         if (!await this.lock.isPrimary()) {
-            await this.backends.forPlatform('telegram').stop()
+            await Promise.all(this.backends.all().map(b => b.stop()))
             return
         }
-        // Phase 1: telegram-only. When FeishuBackend lands, expand this
-        // to iterate active platforms.
-        const active = bindings.find(b => b.platform === 'telegram' && b.enabled)
-        const telegram = this.backends.forPlatform('telegram')
+        // Drive lifecycle per platform — enabled binding starts the
+        // backend, absent enabled binding stops it. Adding a new platform
+        // is one entry in this list.
+        const platforms: Array<ChannelBinding['platform']> = ['telegram', 'feishu']
+        await Promise.all(platforms.map(p => this.syncBackend(p, bindings)))
+    }
+
+    private async syncBackend (
+        platform: ChannelBinding['platform'],
+        bindings: ChannelBinding[],
+    ): Promise<void> {
+        const backend = this.backends.forPlatform(platform)
+        const active = bindings.find(b => b.platform === platform && b.enabled)
         if (active) {
             try {
-                await telegram.start(active.credentials)
+                await backend.start(active.credentials)
             } catch (err) {
                 // eslint-disable-next-line no-console
                 console.warn(
-                    '[mobile-bridge:dispatch] telegram start failed:',
+                    `[mobile-bridge:dispatch] ${platform} start failed:`,
                     redactToken(err instanceof Error ? err.message : String(err)),
                 )
             }
         } else {
-            await telegram.stop()
+            await backend.stop()
         }
     }
 

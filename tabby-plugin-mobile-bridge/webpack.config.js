@@ -15,6 +15,13 @@ module.exports = {
     devtool: 'source-map',
     context: __dirname,
     mode: 'development',
+    // Silence the long-standing protobufjs "Critical dependency: the
+    // request of a dependency is an expression" — they use dynamic require
+    // for the `long` integer module which webpack can't statically analyse.
+    // The library works fine without it; warning has no runtime effect.
+    ignoreWarnings: [
+        /Critical dependency: the request of a dependency is an expression/,
+    ],
     output: {
         path: path.resolve(__dirname, 'dist'),
         filename: 'index.js',
@@ -43,6 +50,11 @@ module.exports = {
     externals: [
         'fs', 'path', 'os', 'child_process', 'crypto', 'http', 'https', 'net', 'tls',
         '@electron/remote',
+        // Optional native deps of `ws` (transitive of @larksuiteoapi/node-sdk).
+        // ws works without them — they're perf optimisations. Marking as
+        // externals stops webpack from chasing them and emitting "Module
+        // not found" warnings on every build.
+        'bufferutil', 'utf-8-validate',
         /^@angular/,
         /^@ng-bootstrap/,
         /^rxjs/,

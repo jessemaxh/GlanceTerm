@@ -103,7 +103,13 @@ export class TopicSyncService implements OnDestroy {
         if (!await this.lock.isPrimary()) return
         for (const binding of bindings) {
             if (!binding.enabled) continue
-            if (binding.platform !== 'telegram') continue
+            // No per-platform filter: reconcileBinding's actual ops go
+            // through BackendRegistry.forPlatform(binding.platform), so
+            // every backend that implements MessagingBackend handles its
+            // own thread lifecycle. A telegram-only guard here (Phase 1
+            // leftover) silently disabled sync for Feishu — bindings
+            // created topics on first lazy ensureTopic but tab close /
+            // rename never propagated.
             try {
                 await this.reconcileBinding(binding, identities)
             } catch (err) {
@@ -192,7 +198,7 @@ export class TopicSyncService implements OnDestroy {
             if (ops!.size === 0 && this.redoNeeded.has(bindingId)) {
                 this.redoNeeded.delete(bindingId)
                 const binding = this.store.current.find(b => b.id === bindingId)
-                if (binding && binding.enabled && binding.platform === 'telegram') {
+                if (binding && binding.enabled) {
                     try {
                         await this.reconcileBinding(binding, this.identity.current)
                     } catch (err) {
