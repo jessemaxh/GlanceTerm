@@ -23,7 +23,12 @@ module.exports = {
         devtoolModuleFilenameTemplate: 'webpack-tabby-plugin-mobile-bridge:///[resource-path]',
     },
     resolve: {
-        modules: ['.', 'src', 'node_modules'].map(x => path.join(__dirname, x)),
+        modules: [
+            ...['.', 'src', 'node_modules'].map(x => path.join(__dirname, x)),
+            // Resolve runtime helpers (tslib) and the ts-loader toolchain from
+            // the monorepo root — this plugin doesn't keep its own node_modules.
+            path.resolve(__dirname, '..', 'node_modules'),
+        ],
         extensions: ['.ts', '.js'],
     },
     module: {

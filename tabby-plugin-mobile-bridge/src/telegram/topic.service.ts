@@ -7,32 +7,44 @@ import { ChannelBinding } from '../binding/types'
 import { TabIdentity } from '../tab-identity.service'
 import { TelegramClientService, TelegramApiError } from './client.service'
 
-/** Persisted cache entry: which thread_id we created for a given tab,
- *  plus the title we last pushed so we can detect renames. */
-interface TopicEntry {
+/**
+ * Persisted cache entry: which thread_id we created for a given tab,
+ * the title we last pushed (rename detection), and the open/closed
+ * state mirror so we can tell "tab still alive" from "tab was closed,
+ * topic is archived." `closedAt` doubles as audit + future TTL hook.
+ */
+export interface TopicEntry {
     threadId: number
     lastTitle: string
+    /** 'open' = tab still alive (or freshly created); 'closed' = tab is gone,
+     *  topic is archived on Telegram's side. Defaults to 'open' for entries
+     *  written by pre-sync builds (see {@link TopicService.migrate}). */
+    status: 'open' | 'closed'
+    /** Wall-clock ms when we last flipped to 'closed'. Undefined for
+     *  entries that have never been closed. */
+    closedAt?: number
 }
 
 /**
- * Per-tab Forum Topic lifecycle, keyed by `(bindingId, tabUuid)`.
+ * Per-tab Forum Topic lifecycle cache, keyed by `(bindingId, tabUuid)`.
+ *
+ * Two writers:
+ *   - TopicSyncService — proactive create/close/reopen driven by diffs
+ *     between TabIdentityService.identities$ and this cache.
+ *   - Outbound dispatcher (via {@link ensureTopic}) — last-resort lazy
+ *     create + read-only lookup on the send path, for the early-launch
+ *     race window where sync hasn't reconciled yet.
  *
  * The Telegram Bot API has no "list topics" endpoint — once you create
  * a topic, you only know its thread_id by remembering it. So we persist
- * the (bindingId, tabUuid) → thread_id map to disk. Lose the cache,
- * lose the linkage: subsequent events would create *new* topics and
- * the old ones become orphans (still visible in the supergroup, just
- * not receiving messages). That's annoying but not data-loss; v0 wears it.
+ * the (bindingId, tabUuid) → entry map to disk. Lose the cache, lose the
+ * linkage: subsequent events create *new* topics and the old ones become
+ * orphans (still visible in the supergroup, just not receiving messages).
  *
- * Topic title format (per docs/todo-mobile-bridge.md):
+ * Topic title format:
  *     #<displayIndex> · <tab-name> · <uuid-suffix>
- * where uuid-suffix is the last 4 chars of the UUID for disambiguation
- * when two tabs share a name. We rebuild on every sync — if the user
- * reorders tabs, displayIndex drifts and we re-edit.
- *
- * Lazy-create: `ensureTopic` only creates a topic the first time we
- * actually need to send a message to that tab. Tabs that never emit
- * an event don't spam the supergroup with empty topics.
+ * where uuid-suffix is the last 4 chars of the UUID. We rebuild on every
+ * sync — if the user reorders tabs, displayIndex drifts and we re-edit.
  */
 @Injectable()
 export class TopicService {
@@ -58,9 +70,17 @@ export class TopicService {
      * Resolve the thread_id for `(binding, identity)`, creating the
      * Forum Topic on Telegram if we've never seen this tab before.
      *
-     * Concurrent calls for the same key share a single createForumTopic
-     * via the inFlight map — see field comment for why this matters
-     * even though event sources are normally serialized.
+     * Post-TopicSyncService era this path is a FALLBACK — sync normally
+     * creates the topic proactively when the tab appears. ensureTopic
+     * still creates as a safety net for the early-launch race where a
+     * send arrives before sync has reconciled, and for any path that
+     * doesn't go through sync (e.g. PermissionRelayService bypasses
+     * sync entirely today).
+     *
+     * If the cache entry is `closed`, we DON'T auto-reopen here — the
+     * caller (typically dispatcher) handles the TOPIC_CLOSED error
+     * explicitly so reopen is an informed decision, not a hidden side
+     * effect of a cache lookup.
      */
     async ensureTopic (binding: ChannelBinding, identity: TabIdentity): Promise<number> {
         await this.load()
@@ -83,7 +103,11 @@ export class TopicService {
             try {
                 const name = this.formatTitle(identity)
                 const created = await this.telegram.createForumTopic(Number(binding.chatId), name)
-                this.cache.set(key, { threadId: created.message_thread_id, lastTitle: name })
+                this.cache.set(key, {
+                    threadId: created.message_thread_id,
+                    lastTitle: name,
+                    status: 'open',
+                })
                 this.scheduleSave()
                 return created.message_thread_id
             } finally {
@@ -98,12 +122,6 @@ export class TopicService {
      * Update the topic title if the formatted title has changed since
      * we last sent one. Safe to call eagerly — it's a no-op when
      * nothing changed.
-     *
-     * Failure modes:
-     *   - Cache miss → no topic exists yet; do nothing (ensureTopic
-     *     will create with the current title next call).
-     *   - Telegram rejects the edit → log and clear the lastTitle so
-     *     we retry on next call.
      */
     async syncTitle (binding: ChannelBinding, identity: TabIdentity): Promise<void> {
         await this.load()
@@ -125,6 +143,117 @@ export class TopicService {
             }
             throw err
         }
+    }
+
+    // ---- TopicSyncService surface (proactive lifecycle) ----------------
+
+    /**
+     * Snapshot of all entries for one binding. Returned as a plain array
+     * of `{tabUuid, entry}` pairs so the sync service can diff against
+     * the current identities list without exposing the cache Map.
+     */
+    async snapshotForBinding (bindingId: string): Promise<Array<{ tabUuid: string; entry: TopicEntry }>> {
+        await this.load()
+        const prefix = `${bindingId}|`
+        const out: Array<{ tabUuid: string; entry: TopicEntry }> = []
+        for (const [k, v] of this.cache) {
+            if (!k.startsWith(prefix)) continue
+            out.push({ tabUuid: k.substring(prefix.length), entry: { ...v } })
+        }
+        return out
+    }
+
+    /**
+     * Idempotent create from the sync path. If we already have a cache
+     * entry (open or closed) we return its threadId without hitting
+     * Telegram — sync should call `reopenIfClosed` separately to flip
+     * status. If there's no entry, we create the topic and store it.
+     *
+     * Shares the same in-flight dedup as ensureTopic so a sync call and
+     * a parallel dispatch send don't both create.
+     */
+    async syncCreateTopic (binding: ChannelBinding, identity: TabIdentity): Promise<number> {
+        await this.load()
+        const key = this.key(binding.id, identity.uuid)
+        const cached = this.cache.get(key)
+        if (cached) return cached.threadId
+        const inFlight = this.inFlight.get(key)
+        if (inFlight) return inFlight
+
+        const promise = (async () => {
+            try {
+                const name = this.formatTitle(identity)
+                const created = await this.telegram.createForumTopic(Number(binding.chatId), name)
+                this.cache.set(key, {
+                    threadId: created.message_thread_id,
+                    lastTitle: name,
+                    status: 'open',
+                })
+                this.scheduleSave()
+                return created.message_thread_id
+            } finally {
+                this.inFlight.delete(key)
+            }
+        })()
+        this.inFlight.set(key, promise)
+        return promise
+    }
+
+    /**
+     * Called by sync when the topic's underlying tab vanished. Hits the
+     * Telegram closeForumTopic endpoint and flips the cache entry to
+     * 'closed' on success. No-op if the entry is already closed or
+     * doesn't exist (lost cache, nothing to archive).
+     */
+    async syncCloseTopic (binding: ChannelBinding, tabUuid: string): Promise<void> {
+        await this.load()
+        const key = this.key(binding.id, tabUuid)
+        const entry = this.cache.get(key)
+        if (!entry) return
+        if (entry.status === 'closed') return
+        try {
+            await this.telegram.closeForumTopic(Number(binding.chatId), entry.threadId)
+        } catch (err: unknown) {
+            // Topic already deleted user-side: drop the cache entry so a
+            // future create would mint a fresh thread instead of trying
+            // to address the dead one.
+            if (err instanceof TelegramApiError && err.code === 400) {
+                this.cache.delete(key)
+                this.scheduleSave()
+                return
+            }
+            throw err
+        }
+        entry.status = 'closed'
+        entry.closedAt = Date.now()
+        this.scheduleSave()
+    }
+
+    /**
+     * Reopen a closed topic. Called by sync when a tab with a closed
+     * cache entry comes back (e.g. relaunch + tab restore — though note
+     * tab restore mints a NEW uuid in TabIdentityService, so the typical
+     * trigger is dispatcher's TOPIC_CLOSED → reopen + retry race).
+     */
+    async syncReopenTopic (binding: ChannelBinding, tabUuid: string): Promise<void> {
+        await this.load()
+        const key = this.key(binding.id, tabUuid)
+        const entry = this.cache.get(key)
+        if (!entry) return
+        if (entry.status === 'open') return
+        try {
+            await this.telegram.reopenForumTopic(Number(binding.chatId), entry.threadId)
+        } catch (err: unknown) {
+            if (err instanceof TelegramApiError && err.code === 400) {
+                this.cache.delete(key)
+                this.scheduleSave()
+                return
+            }
+            throw err
+        }
+        entry.status = 'open'
+        entry.closedAt = undefined
+        this.scheduleSave()
     }
 
     /** Drop all cached topics for a binding — called when binding is removed. */
@@ -150,17 +279,36 @@ export class TopicService {
     }
 
     /**
+     * Sync count of (open, closed) entries for a binding. Used by the
+     * settings UI to show "12 open · 3 archived" without subscribing to
+     * a per-mutation event stream. Returns zeros if load() hasn't run
+     * yet — the UI tolerates the early-render gap (settings panel is
+     * usually opened well after launch).
+     */
+    getStatsForBinding (bindingId: string): { open: number; closed: number } {
+        const prefix = `${bindingId}|`
+        let open = 0
+        let closed = 0
+        for (const [k, v] of this.cache) {
+            if (!k.startsWith(prefix)) continue
+            if (v.status === 'closed') closed++
+            else open++
+        }
+        return { open, closed }
+    }
+
+    /** Lookup full entry (status-aware callers). */
+    getEntry (bindingId: string, tabUuid: string): TopicEntry | undefined {
+        const e = this.cache.get(this.key(bindingId, tabUuid))
+        return e ? { ...e } : undefined
+    }
+
+    /**
      * Reverse lookup: given a Telegram thread_id seen on an inbound
      * message, find the originating tab UUID for that binding. Linear
      * scan of the cache — fine for v0 (cache size = # of tabs ever
      * messaged, expected dozens at most). Promote to a reverse map if
      * the scan ever shows up in a profile.
-     *
-     * Awaits `load()` so a fresh process whose first activity is an
-     * inbound reply (rather than an outbound event) doesn't read an
-     * empty cache and silently drop the message as `topic-not-bound`.
-     * load() is idempotent and gated by `loadPromise` so concurrent
-     * inbound + outbound paths share the same disk read.
      */
     async findByThread (bindingId: string, threadId: number): Promise<string | undefined> {
         await this.load()
@@ -177,9 +325,38 @@ export class TopicService {
         return `${bindingId}|${tabUuid}`
     }
 
-    private formatTitle (identity: TabIdentity): string {
+    /** Public so TopicSyncService can compare against entry.lastTitle. */
+    formatTitle (identity: TabIdentity): string {
         const suffix = identity.uuid.slice(-4)
         return `#${identity.displayIndex} · ${identity.name} · ${suffix}`
+    }
+
+    /**
+     * Push a new title to Telegram for an existing topic and update the
+     * cache. Used by sync to react to displayIndex / name changes. Returns
+     * silently if the entry is gone or the title is already current.
+     */
+    async syncRetitleTopic (binding: ChannelBinding, identity: TabIdentity): Promise<void> {
+        await this.load()
+        const key = this.key(binding.id, identity.uuid)
+        const entry = this.cache.get(key)
+        if (!entry) return
+        const expected = this.formatTitle(identity)
+        if (entry.lastTitle === expected) return
+        try {
+            await this.telegram.editForumTopic(Number(binding.chatId), entry.threadId, expected)
+        } catch (err: unknown) {
+            if (err instanceof TelegramApiError && err.code === 400) {
+                // Topic deleted user-side. Drop the entry so the next
+                // sync tick re-creates from scratch.
+                this.cache.delete(key)
+                this.scheduleSave()
+                return
+            }
+            throw err
+        }
+        entry.lastTitle = expected
+        this.scheduleSave()
     }
 
     private async load (): Promise<void> {
@@ -188,8 +365,11 @@ export class TopicService {
         this.loadPromise = (async () => {
             try {
                 const raw = await fs.readFile(TopicService.FILE, 'utf8')
-                const parsed = JSON.parse(raw) as Record<string, TopicEntry>
-                this.cache = new Map(Object.entries(parsed))
+                const parsed = JSON.parse(raw) as Record<string, Partial<TopicEntry>>
+                this.cache = new Map()
+                for (const [k, v] of Object.entries(parsed)) {
+                    this.cache.set(k, this.migrate(v))
+                }
             } catch (err: unknown) {
                 if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
                     // eslint-disable-next-line no-console
@@ -201,6 +381,24 @@ export class TopicService {
             }
         })()
         return this.loadPromise
+    }
+
+    /**
+     * Schema migration for entries persisted by pre-sync builds. The
+     * status field didn't exist there — every persisted entry was
+     * implicitly "open" since closing wasn't possible. closedAt stays
+     * undefined; closing reopened topics is harmless.
+     *
+     * We tolerate Partial<TopicEntry> on the way in so a future hand-
+     * edit of the JSON file that drops a field doesn't crash load.
+     */
+    private migrate (raw: Partial<TopicEntry>): TopicEntry {
+        return {
+            threadId: raw.threadId ?? 0,
+            lastTitle: raw.lastTitle ?? '',
+            status: raw.status ?? 'open',
+            closedAt: raw.closedAt,
+        }
     }
 
     /**

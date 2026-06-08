@@ -1,5 +1,5 @@
 import { Injectable } from '@angular/core'
-import { BehaviorSubject, Observable } from 'rxjs'
+import { BehaviorSubject, Observable, Subscription } from 'rxjs'
 import { randomUUID } from 'crypto'
 
 import { AppService, BaseTabComponent } from 'tabby-core'
@@ -39,6 +39,15 @@ export class TabIdentityService {
     private uuidByTab = new WeakMap<BaseTabComponent, string>()
     private tabByUuid = new Map<string, BaseTabComponent>()
     private identitiesSubject = new BehaviorSubject<TabIdentity[]>([])
+    /**
+     * Per-tab title subscription. Without these, `identities$` would only
+     * re-emit on open/close/reorder — a user renaming a tab via the
+     * context menu wouldn't propagate to TopicSyncService, leaving the
+     * phone-side Forum Topic title stale until the tab list mutated for
+     * any other reason. Keyed on uuid (strong) so we can dispose on
+     * tabClosed$.
+     */
+    private titleSubs = new Map<string, Subscription>()
 
     constructor (private app: AppService) {
         for (const tab of app.tabs) this.assign(tab)
@@ -50,7 +59,11 @@ export class TabIdentityService {
         })
         app.tabClosed$.subscribe(tab => {
             const uuid = this.uuidByTab.get(tab)
-            if (uuid !== undefined) this.tabByUuid.delete(uuid)
+            if (uuid !== undefined) {
+                this.tabByUuid.delete(uuid)
+                this.titleSubs.get(uuid)?.unsubscribe()
+                this.titleSubs.delete(uuid)
+            }
             this.recompute()
         })
         // Reorder doesn't fire tabOpened/tabClosed — only tabsChanged. Without
@@ -74,11 +87,49 @@ export class TabIdentityService {
         return this.uuidByTab.get(tab)
     }
 
+    /**
+     * Resolve a GLANCETERM_TAB_ID (the env-injected uuid that flows into
+     * hook events and ~/.glanceterm/hooks/<id>.log filenames) to a sidebar
+     * identity. Used by the outbound dispatcher's transcript path, where
+     * the event source (TranscriptTailerService) keys on the hook tab id
+     * but bindings persist topics keyed on this service's identity uuid.
+     *
+     * Walks app.tabs AND each split's inner panes so that a split-pane's
+     * inner session is still resolvable; always returns the OUTER tab's
+     * identity since that's the granularity at which we mint identities
+     * (one row per app.tabs entry). For users without split panes — the
+     * common case — the inner == outer branch is the hot path.
+     *
+     * Returns `undefined` for unknown ids (tab closed, or pre-injection
+     * shell sessions that don't carry GLANCETERM_TAB_ID in env).
+     */
+    byHookTabId (hookTabId: string): TabIdentity | undefined {
+        for (const outer of this.app.tabs) {
+            const candidates: BaseTabComponent[] = [outer]
+            const splitLike = outer as unknown as { getAllTabs?: () => BaseTabComponent[] }
+            if (typeof splitLike.getAllTabs === 'function') {
+                for (const leaf of splitLike.getAllTabs()) candidates.push(leaf)
+            }
+            for (const c of candidates) {
+                const session = (c as unknown as { session?: { glancetermTabId?: string } }).session
+                if (session?.glancetermTabId === hookTabId) {
+                    const uuid = this.uuidByTab.get(outer)
+                    if (uuid) return this.identitiesSubject.value.find(i => i.uuid === uuid)
+                }
+            }
+        }
+        return undefined
+    }
+
     private assign (tab: BaseTabComponent): void {
         if (this.uuidByTab.has(tab)) return
         const uuid = randomUUID()
         this.uuidByTab.set(tab, uuid)
         this.tabByUuid.set(uuid, tab)
+        // titleChange$ is distinctUntilChanged on the BaseTabComponent
+        // side, so spurious re-emissions are already filtered. recompute()
+        // is cheap (rebuilds a small array + BehaviorSubject.next).
+        this.titleSubs.set(uuid, tab.titleChange$.subscribe(() => this.recompute()))
     }
 
     private recompute (): void {

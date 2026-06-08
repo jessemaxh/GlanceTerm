@@ -1,7 +1,16 @@
 import { Injectable, OnDestroy } from '@angular/core'
-import { Observable, Subject } from 'rxjs'
+import { BehaviorSubject, Observable, Subject } from 'rxjs'
 
-import { TgForumTopic, TgInboundMessage, TgMessage, TgUpdate, TgUser } from './types'
+import {
+    InlineKeyboardMarkup,
+    TgCallbackQuery,
+    TgForumTopic,
+    TgInboundCallback,
+    TgInboundMessage,
+    TgMessage,
+    TgUpdate,
+    TgUser,
+} from './types'
 import { redactToken } from '../audit-log'
 
 /**
@@ -36,6 +45,13 @@ export class TelegramClientService implements OnDestroy {
     private offset = 0
     private running = false
     private loopPromise: Promise<void> | null = null
+    /** Monotonic counter incremented on every successful start(). Used to
+     *  invalidate background work (the getMe identity probe) when a
+     *  concurrent stop()/start() rotates the session — without this, a
+     *  slow getMe response from session N would land in identitySubject
+     *  AFTER stop() cleared it via .next(null), reviving a stale "@bot
+     *  connected" in the settings UI. */
+    private startEpoch = 0
     /** Per-iteration abort used by `loop()` for the 35 s long-poll deadline. */
     private abort: AbortController | null = null
     /**
@@ -64,15 +80,41 @@ export class TelegramClientService implements OnDestroy {
     private stopSignal: { promise: Promise<void>; resolve: () => void } | null = null
     private updatesSubject = new Subject<TgUpdate>()
     private inboundSubject = new Subject<TgInboundMessage>()
+    private callbackSubject = new Subject<TgInboundCallback>()
+    /** Reactive flag for UI templates — true while a long-poll loop is
+     *  active. Updates inside start()/stop() so subscribers see the
+     *  transition atomically with the actual state change. */
+    private runningSubject = new BehaviorSubject<boolean>(false)
+    /** Bot identity (from `getMe`), refreshed once per start(). null until
+     *  the first start succeeds; cleared on stop so a stale identity from
+     *  a rotated token doesn't show in the settings UI. */
+    private identitySubject = new BehaviorSubject<TgUser | null>(null)
 
     /** Inbound user messages, flattened. Subscribers should filter on chatId. */
     get inboundMessages$ (): Observable<TgInboundMessage> {
         return this.inboundSubject
     }
 
+    /** Inbound callback-query taps (inline keyboard). Flattened the same
+     *  way inboundMessages$ is. Permission-relay verdicts arrive here. */
+    get callbackQueries$ (): Observable<TgInboundCallback> {
+        return this.callbackSubject
+    }
+
     /** Raw updates for advanced consumers. Most callers want inboundMessages$. */
     get rawUpdates$ (): Observable<TgUpdate> {
         return this.updatesSubject
+    }
+
+    /** True while a long-poll loop is alive. Reactive surface for the
+     *  settings UI to show "Connected" vs "Idle." */
+    get running$ (): Observable<boolean> {
+        return this.runningSubject
+    }
+
+    /** Bot identity from getMe, or null when not connected. */
+    get identity$ (): Observable<TgUser | null> {
+        return this.identitySubject
     }
 
     /**
@@ -90,6 +132,23 @@ export class TelegramClientService implements OnDestroy {
             this.stopSignal = this.newStopSignal()
             this.sessionAbort = new AbortController()
             this.loopPromise = this.loop()
+            this.startEpoch++
+            const epoch = this.startEpoch
+            this.runningSubject.next(true)
+            // Probe bot identity in the background. The epoch capture +
+            // check guards against a slow getMe response writing a stale
+            // identity AFTER a concurrent stop()/start() rotation has
+            // already cleared (or replaced) it. Failure here doesn't
+            // prevent polling — the long-poll loop hits the same
+            // bad-token error on first iteration and backs off.
+            void this.getMe().then(
+                me => {
+                    if (epoch === this.startEpoch) this.identitySubject.next(me)
+                },
+                () => {
+                    if (epoch === this.startEpoch) this.identitySubject.next(null)
+                },
+            )
         })
     }
 
@@ -114,6 +173,20 @@ export class TelegramClientService implements OnDestroy {
         this.abort = null
         this.sessionAbort = null
         this.stopSignal = null
+        // Bump epoch BEFORE clearing identity. An in-flight getMe from
+        // the start() that paired with this haltLoop may have already
+        // received its HTTP response (fetch can return before the
+        // sessionAbort lands if the body buffer fully arrived first),
+        // in which case its queued `.then` will run after this point.
+        // Without this bump, that microtask would see
+        // epoch === this.startEpoch and revive the stale identity AFTER
+        // we just cleared it — the exact bug the start-side epoch was
+        // supposed to fix, but only half-closed. Bumping here invalidates
+        // any in-flight probe regardless of whether a subsequent start()
+        // arrives.
+        this.startEpoch++
+        this.runningSubject.next(false)
+        this.identitySubject.next(null)
     }
 
     private enqueueLifecycle (fn: () => Promise<void>): Promise<void> {
@@ -134,12 +207,18 @@ export class TelegramClientService implements OnDestroy {
 
     /**
      * Send a text message. `messageThreadId` targets a specific Forum Topic
-     * inside a supergroup; omit for a generic chat.
+     * inside a supergroup; omit for a generic chat. `replyMarkup` attaches
+     * an inline keyboard (used by permission-relay for Allow/Deny taps).
      */
     sendMessage (
         chatId: number,
         text: string,
-        opts: { messageThreadId?: number; replyToMessageId?: number; parseMode?: 'MarkdownV2' | 'HTML' } = {},
+        opts: {
+            messageThreadId?: number
+            replyToMessageId?: number
+            parseMode?: 'MarkdownV2' | 'HTML'
+            replyMarkup?: InlineKeyboardMarkup
+        } = {},
     ): Promise<TgMessage> {
         return this.call<TgMessage>('sendMessage', {
             chat_id: chatId,
@@ -147,6 +226,7 @@ export class TelegramClientService implements OnDestroy {
             message_thread_id: opts.messageThreadId,
             reply_to_message_id: opts.replyToMessageId,
             parse_mode: opts.parseMode,
+            reply_markup: opts.replyMarkup,
         })
     }
 
@@ -168,20 +248,66 @@ export class TelegramClientService implements OnDestroy {
     }
 
     /**
+     * Close a Forum Topic — history is retained, but no new messages can be
+     * posted until reopen. On the phone the topic gets Telegram's native
+     * closed-state lock badge. Used by TopicSyncService when the underlying
+     * tab is closed: archive, don't delete.
+     */
+    closeForumTopic (chatId: number, messageThreadId: number): Promise<true> {
+        return this.call<true>('closeForumTopic', {
+            chat_id: chatId,
+            message_thread_id: messageThreadId,
+        })
+    }
+
+    /**
+     * Reopen a previously-closed Forum Topic. Triggered when (a) a tab
+     * with a cached-but-closed topic re-appears (e.g. tab restore on
+     * relaunch), or (b) an outbound send hits TOPIC_CLOSED because the
+     * sync service raced ahead.
+     */
+    reopenForumTopic (chatId: number, messageThreadId: number): Promise<true> {
+        return this.call<true>('reopenForumTopic', {
+            chat_id: chatId,
+            message_thread_id: messageThreadId,
+        })
+    }
+
+    /**
      * Edit an already-posted text message. Used by the cross-binding
-     * "resolved elsewhere" sync to swap `Waiting…` for `✓ resolved …`.
+     * "resolved elsewhere" sync to swap `Waiting…` for `✓ resolved …`,
+     * and by permission-relay to neutralise a prompt after either the
+     * phone OR the local fallback answers (passes `replyMarkup:
+     * { inline_keyboard: [] }` to drop the keyboard so the buttons
+     * stop "loading" forever after the verdict is captured).
      */
     editMessageText (
         chatId: number,
         messageId: number,
         text: string,
-        opts: { parseMode?: 'MarkdownV2' | 'HTML' } = {},
+        opts: { parseMode?: 'MarkdownV2' | 'HTML'; replyMarkup?: InlineKeyboardMarkup } = {},
     ): Promise<TgMessage | true> {
         return this.call<TgMessage | true>('editMessageText', {
             chat_id: chatId,
             message_id: messageId,
             text,
             parse_mode: opts.parseMode,
+            reply_markup: opts.replyMarkup,
+        })
+    }
+
+    /**
+     * Acknowledge a callback_query so the user's button stops "loading".
+     * REQUIRED by Telegram within ~30 s of receiving the callback, even
+     * if we don't show a popup — without it the inline keyboard spinner
+     * sits forever on the user's phone. Pass `text` to show a brief toast
+     * (≤200 chars), or omit for a silent ack.
+     */
+    answerCallbackQuery (callbackQueryId: string, opts: { text?: string; showAlert?: boolean } = {}): Promise<true> {
+        return this.call<true>('answerCallbackQuery', {
+            callback_query_id: callbackQueryId,
+            text: opts.text,
+            show_alert: opts.showAlert,
         })
     }
 
@@ -204,7 +330,11 @@ export class TelegramClientService implements OnDestroy {
                     {
                         offset: this.offset,
                         timeout: TelegramClientService.POLL_SECONDS,
-                        allowed_updates: ['message'],
+                        // callback_query was added when permission-relay shipped
+                        // — without explicitly listing it Telegram drops the
+                        // inline-keyboard taps on the floor (default
+                        // allowed_updates excludes callback_query).
+                        allowed_updates: ['message', 'callback_query'],
                     },
                     this.abort.signal,
                 )
@@ -215,6 +345,10 @@ export class TelegramClientService implements OnDestroy {
                     this.updatesSubject.next(u)
                     if (u.message?.text && u.message.from && !u.message.from.is_bot) {
                         this.inboundSubject.next(this.flatten(u.message))
+                    }
+                    if (u.callback_query) {
+                        const flat = this.flattenCallback(u.callback_query)
+                        if (flat) this.callbackSubject.next(flat)
                     }
                     this.offset = Math.max(this.offset, u.update_id + 1)
                 }
@@ -252,6 +386,24 @@ export class TelegramClientService implements OnDestroy {
             topicId: m.message_thread_id,
             text: m.text!,
             rawMessageId: m.message_id,
+        }
+    }
+
+    /**
+     * Flatten a raw callback_query into the downstream-friendly shape.
+     * Returns null if the query lacks a bearing message (inline-mode
+     * callbacks don't have one — we don't issue those, but defensive).
+     */
+    private flattenCallback (q: TgCallbackQuery): TgInboundCallback | null {
+        if (!q.message || !q.data) return null
+        return {
+            callbackId: q.id,
+            senderId: q.from.id,
+            senderUsername: q.from.username,
+            chatId: q.message.chat.id,
+            topicId: q.message.message_thread_id,
+            messageId: q.message.message_id,
+            data: q.data,
         }
     }
 

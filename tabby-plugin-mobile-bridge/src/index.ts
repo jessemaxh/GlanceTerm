@@ -2,7 +2,7 @@
 import { NgModule } from '@angular/core'
 import { CommonModule } from '@angular/common'
 import { FormsModule } from '@angular/forms'
-import { SettingsTabProvider } from 'tabby-settings'
+import { SidebarSettingsRegistry } from 'tabby-plugin-ai-sidebar'
 
 import { TabIdentityService } from './tab-identity.service'
 import { TelegramClientService } from './telegram/client.service'
@@ -12,8 +12,12 @@ import { PairingService } from './binding/pairing.service'
 import { OutboundDispatcherService } from './outbound-dispatcher.service'
 import { InboundRouterService } from './inbound-router.service'
 import { KeystrokeAdapterRegistry } from './pty-keystroke/registry'
+import { TranscriptTailerService } from './transcript/tailer.service'
+import { PermissionModeService } from './permission-mode.service'
+import { PermissionRelayService } from './permission-relay.service'
+import { TopicSyncService } from './topic-sync.service'
+import { InstanceLockService } from './instance-lock.service'
 import { BridgeSettingsComponent } from './settings/settings.component'
-import { BridgeSettingsTabProvider } from './settings/settings.provider'
 
 @NgModule({
     imports: [CommonModule, FormsModule],
@@ -27,7 +31,11 @@ import { BridgeSettingsTabProvider } from './settings/settings.provider'
         OutboundDispatcherService,
         InboundRouterService,
         KeystrokeAdapterRegistry,
-        { provide: SettingsTabProvider, useClass: BridgeSettingsTabProvider, multi: true },
+        TranscriptTailerService,
+        PermissionModeService,
+        PermissionRelayService,
+        TopicSyncService,
+        InstanceLockService,
     ],
 })
 export default class MobileBridgeModule {
@@ -54,7 +62,44 @@ export default class MobileBridgeModule {
         // construct time. Eager-inject so a reply that arrives before
         // anything else reads the service still routes to the PTY.
         _router: InboundRouterService,
+        // TranscriptTailer subscribes to HookWatcher.snapshots$ at construct
+        // time and drives the 2s poll timer. Eager-inject so the tail
+        // window starts capturing the very first assistant turn after
+        // GlanceTerm launch, not the first one after a sidebar render.
+        _transcript: TranscriptTailerService,
+        // PermissionModeService writes ~/.glanceterm/permission-relay.flag
+        // and reflects the on-disk byte in the settings toggle. Eager so
+        // a stale flag from a prior session is reconciled at launch
+        // (initial read happens in the service constructor).
+        _permissionMode: PermissionModeService,
+        // PermissionRelayService starts the fs.watch on
+        // ~/.glanceterm/permissions/ at construct time. Eager so a .req
+        // written by the hook handler in the first 100 ms after launch
+        // (rare but possible during quick agent restart) still reaches
+        // the phone.
+        _permissionRelay: PermissionRelayService,
+        // TopicSyncService subscribes to identities$ + bindings$ at
+        // construct time. Eager so a tab opened in the first second of
+        // launch (before any sidebar render) still ends up mirrored to a
+        // Forum Topic on the phone.
+        _topicSync: TopicSyncService,
+        // InstanceLockService runs its tryAcquire() in the constructor.
+        // Eager so the lock decision is in flight before any side-effecting
+        // service awaits isPrimary(). All gating callers await the same
+        // promise so order-of-injection doesn't matter for correctness.
+        _instanceLock: InstanceLockService,
+        // Contribute the Mobile Bridge settings panel into the AI sidebar's
+        // gear modal (rather than Tabby's global Settings dialog) so the
+        // bridge lives next to the other AI-tab settings the user already
+        // looks for it under.
+        sidebarSettings: SidebarSettingsRegistry,
     ) {
+        sidebarSettings.register({
+            id: 'mobile-bridge',
+            title: 'Mobile Bridge',
+            description: 'Push permission prompts and completion notices to Telegram (and reply back to the agent from your phone).',
+            component: BridgeSettingsComponent,
+        })
         // eslint-disable-next-line no-console
         console.log('[glanceterm:mobile-bridge] plugin loaded')
     }

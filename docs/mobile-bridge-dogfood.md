@@ -96,9 +96,12 @@ node scripts/install-deps.mjs
 
 ## 3. Bind a bot
 
-1. Settings (gear icon) → **Mobile Bridge** tab (sidebar). If the tab
-   isn't there, `BridgeSettingsTabProvider` wasn't registered. Re-check
-   `index.ts` `providers` array.
+1. **AI sidebar gear icon** (top of the left AI Tabs sidebar) → click
+   the **Mobile Bridge** row → **Configure…**. If the row isn't there,
+   the plugin didn't register with `SidebarSettingsRegistry`. Re-check
+   `MobileBridgeModule`'s constructor for the `sidebarSettings.register(...)`
+   call. Note: this used to live under Tabby's global Settings dialog
+   (`BridgeSettingsTabProvider`) and has moved.
 2. Paste the bot token from step 0.1 into the **Bot token** field.
 3. (Optional) Label.
 4. Click **Generate pairing code**.

@@ -7,9 +7,11 @@ import { TabIdentityService } from './tab-identity.service'
 import { BindingStoreService } from './binding/store.service'
 import { ChannelBinding } from './binding/types'
 import { TopicService } from './telegram/topic.service'
-import { TelegramClientService } from './telegram/client.service'
+import { TelegramClientService, TelegramApiError } from './telegram/client.service'
 import { retryWithBackoff } from './retry'
 import { appendAudit, redactToken } from './audit-log'
+import { TranscriptTailerService, TranscriptEvent } from './transcript/tailer.service'
+import { InstanceLockService } from './instance-lock.service'
 
 /** Event types pushed to phones. Aligned with the per-event-type filter
  *  defaults documented in docs/todo-mobile-bridge.md. */
@@ -18,6 +20,7 @@ export type BridgeEventType =
     | 'task_completed'
     | 'task_failed'
     | 'tool_use'
+    | 'assistant_text'
     | 'state_transition'
 
 /**
@@ -44,7 +47,16 @@ export type BridgeEventType =
  */
 @Injectable()
 export class OutboundDispatcherService implements OnDestroy {
-    private static readonly DEFAULT_FILTER: BridgeEventType[] = ['needs_permission', 'task_completed', 'task_failed']
+    // Mirrors Claude's official Remote Control UX: the phone is a thin
+    // client that sees the conversation — JUST the messages Claude
+    // actually wrote, nothing else. No GlanceTerm-flavoured status
+    // pings, no tool-call summaries, no notification icons. The phone
+    // bubble should look indistinguishable from "Claude wrote you a
+    // message," because that's exactly what it is.
+    //
+    // Every other event type is opt-in via the per-binding event filter
+    // in the settings UI for users who specifically want a louder feed.
+    private static readonly DEFAULT_FILTER: BridgeEventType[] = ['assistant_text']
 
     private prevStatus = new WeakMap<object, TabStatus>()
     private subs: Subscription[] = []
@@ -55,9 +67,12 @@ export class OutboundDispatcherService implements OnDestroy {
         private store: BindingStoreService,
         private topics: TopicService,
         private telegram: TelegramClientService,
+        private transcript: TranscriptTailerService,
+        private lock: InstanceLockService,
     ) {
         this.subs.push(this.monitor.states$.subscribe(states => this.diff(states)))
         this.subs.push(this.store.bindings$.subscribe(bindings => void this.syncTransport(bindings)))
+        this.subs.push(this.transcript.events$.subscribe(ev => void this.dispatchTranscript(ev)))
         // Load the persisted bindings now so the first bindings$ emission
         // reflects truth, not the initial `[]`. Safe to await indirectly —
         // store.load() is idempotent.
@@ -69,6 +84,16 @@ export class OutboundDispatcherService implements OnDestroy {
     }
 
     private async syncTransport (bindings: ChannelBinding[]): Promise<void> {
+        // If this process didn't win the single-instance lock, force-stop
+        // the Telegram loop unconditionally. Two processes long-polling
+        // the same bot token would steal each other's updates (Telegram
+        // delivers each update_id exactly once), making /bind and inbound
+        // routing flap between instances. Better to be silent here than
+        // be subtly broken.
+        if (!await this.lock.isPrimary()) {
+            await this.telegram.stop()
+            return
+        }
         const active = bindings.find(b => b.platform === 'telegram' && b.enabled)
         if (active) {
             try {
@@ -125,17 +150,66 @@ export class OutboundDispatcherService implements OnDestroy {
     }
 
     private async dispatch (state: TabState, eventType: BridgeEventType, body: string): Promise<void> {
+        // Secondary instances would otherwise try sendToTelegram with a
+        // client that syncTransport already stopped, log a flood of
+        // "no token" warnings, and write outbound-drop audit lines for
+        // events the primary already shipped. Gate early.
+        if (!await this.lock.isPrimary()) return
         const uuid = this.identity.uuidOf(state.outerTab)
         if (!uuid) return
         const identity = this.identity.current.find(i => i.uuid === uuid)
         if (!identity) return
 
+        // Parallelise across bindings — sendToTelegram has its own retry
+        // budget and catches all errors before resolving, so a slow /
+        // rate-limited binding A cannot delay binding B from receiving
+        // the same event. Sequential await here would queue every send
+        // behind the slowest channel, which on transcript-driven traffic
+        // (many assistant messages per minute) would cascade into
+        // observable lag.
+        const sends: Promise<void>[] = []
         for (const binding of this.store.current) {
             if (!binding.enabled) continue
             if (!this.passesFilter(binding, eventType)) continue
             if (binding.platform !== 'telegram') continue // v0: Telegram only
-            await this.sendToTelegram(binding, identity, eventType, body)
+            sends.push(this.sendToTelegram(binding, identity, eventType, body))
         }
+        await Promise.all(sends)
+    }
+
+    /**
+     * Transcript-sourced events (assistant text + structured tool_use)
+     * carry the GLANCETERM_TAB_ID directly — the env-injected uuid that
+     * flows through hook events. Identity rows are keyed on a separate
+     * sidebar-minted uuid, so we resolve via `byHookTabId` (walks tabs
+     * and matches `session.glancetermTabId`) instead of the self-match
+     * the state-transition path can use.
+     *
+     * Kept as a separate entry point rather than collapsed into `dispatch`
+     * because TabState is structurally distant from TranscriptEvent —
+     * coercing one into the other just to share four lines of code
+     * would obscure both.
+     */
+    private async dispatchTranscript (ev: TranscriptEvent): Promise<void> {
+        if (!await this.lock.isPrimary()) return
+        const identity = this.identity.byHookTabId(ev.tabId)
+        if (!identity) return
+
+        const eventType: BridgeEventType = ev.kind === 'assistant_text' ? 'assistant_text' : 'tool_use'
+        const body = ev.kind === 'assistant_text'
+            ? truncateForChat(ev.text)
+            : (ev.summary ? `${ev.toolName}: ${ev.summary}` : ev.toolName)
+        if (!body) return
+
+        // Same parallel fan-out rationale as `dispatch` above.
+        const sends: Promise<void>[] = []
+        for (const binding of this.store.current) {
+            if (!binding.enabled) continue
+            if (!this.passesFilter(binding, eventType)) continue
+            if (binding.platform !== 'telegram') continue
+            sends.push(this.sendToTelegram(binding, identity, eventType, body))
+        }
+        await Promise.all(sends)
     }
 
     private passesFilter (binding: ChannelBinding, eventType: BridgeEventType): boolean {
@@ -153,6 +227,7 @@ export class OutboundDispatcherService implements OnDestroy {
         body: string,
     ): Promise<void> {
         const text = this.formatMessage(eventType, body)
+        let reopenAttempted = false
         try {
             await retryWithBackoff(async () => {
                 // ensureTopic is cached after first success, so retrying
@@ -164,6 +239,24 @@ export class OutboundDispatcherService implements OnDestroy {
                 })
             })
         } catch (err) {
+            // TOPIC_CLOSED race: TopicSyncService closed the topic in the
+            // gap between identity going away and this send draining the
+            // queue. Reopen + retry once. The next sync tick will re-close
+            // if the tab is really gone — minor cosmetic flicker, but the
+            // assistant's final message isn't lost.
+            if (this.isTopicClosed(err)) {
+                reopenAttempted = true
+                try {
+                    await this.topics.syncReopenTopic(binding, identity.uuid)
+                    const threadId = await this.topics.ensureTopic(binding, identity)
+                    await this.telegram.sendMessage(Number(binding.chatId), text, {
+                        messageThreadId: threadId,
+                    })
+                    return
+                } catch (innerErr) {
+                    err = innerErr
+                }
+            }
             const safeMessage = redactToken(err instanceof Error ? err.message : String(err))
             // eslint-disable-next-line no-console
             console.warn('[mobile-bridge:dispatch] send failed after retries:', safeMessage)
@@ -175,16 +268,55 @@ export class OutboundDispatcherService implements OnDestroy {
                 tabUuid: identity.uuid,
                 tabIndex: identity.displayIndex,
                 error: safeMessage,
+                // Distinguishes "first send failed" from "first send hit
+                // TOPIC_CLOSED, reopen + resend also failed" — without
+                // this the audit log reads as a vanilla send failure
+                // when it's actually a reopen-side issue (e.g. 429 on
+                // the second sendMessage), which points at a different
+                // fix.
+                reopenAttempted,
             })
         }
     }
 
+    private isTopicClosed (err: unknown): boolean {
+        return err instanceof TelegramApiError
+            && err.code === 400
+            && /TOPIC_CLOSED/i.test(err.description)
+    }
+
     private formatMessage (eventType: BridgeEventType, body: string): string {
+        // assistant_text is the actual Claude reply — no icon prefix, the
+        // bot's name in the message bubble already labels it. Adding an
+        // emoji here would make every Claude utterance look like a status
+        // line, defeating the "phone sees the conversation" goal.
+        if (eventType === 'assistant_text') return body
         const icon =
             eventType === 'needs_permission' ? '🔔'
             : eventType === 'task_completed' ? '✅'
             : eventType === 'task_failed' ? '⚠️'
+            : eventType === 'tool_use' ? '▷'
             : 'ℹ️'
         return `${icon} ${body}`
     }
+}
+
+/**
+ * Telegram caps a single message at 4096 chars. Long assistant turns
+ * (multi-paragraph plans, code blocks) need a hard cap or the send
+ * fails outright. Keep it below the limit with room for the bot name
+ * + topic prefix Telegram adds in the bubble.
+ *
+ * We chunk-truncate rather than chunk-split because successive sends
+ * arrive out of Telegram's rate-limit budget very fast — a 10-message
+ * single-turn would also be visually overwhelming in a notification
+ * stream. Truncating + "… (X chars truncated)" gives the user the
+ * gist on the phone and signals to open the desktop for the full
+ * version. The cliff matches Claude's own answer length for "ok cool"
+ * tier turns; longer turns get the chop.
+ */
+function truncateForChat (s: string): string {
+    const MAX = 3500
+    if (s.length <= MAX) return s
+    return s.slice(0, MAX) + `\n… (${s.length - MAX} chars truncated — see desktop)`
 }

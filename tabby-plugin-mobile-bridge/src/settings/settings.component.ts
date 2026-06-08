@@ -1,107 +1,125 @@
 import { Component, NgZone, OnDestroy } from '@angular/core'
-import { Observable, Subscription } from 'rxjs'
+import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap'
+import { Observable, Subscription, combineLatest } from 'rxjs'
+import { map } from 'rxjs/operators'
 
 import { BindingStoreService } from '../binding/store.service'
 import { PairingService } from '../binding/pairing.service'
+import { TelegramClientService } from '../telegram/client.service'
+import { TopicService } from '../telegram/topic.service'
+import { InstanceLockService } from '../instance-lock.service'
 import { ChannelBinding, PendingPairing } from '../binding/types'
-import type { BridgeEventType } from '../outbound-dispatcher.service'
+import { TgUser } from '../telegram/types'
 
 /**
- * Minimal settings panel for the Mobile Bridge plugin. Renders inside
- * Tabby's Settings dialog as a tab provided by BridgeSettingsTabProvider.
+ * Settings panel for the Mobile Bridge plugin. Opened from the AI
+ * sidebar's gear modal as an NgbModal — the plugin registers itself with
+ * SidebarSettingsRegistry at module construct time (see index.ts).
  *
- * v0 scope: enough to add/remove a Telegram binding, toggle enabled,
- * edit approvedSenders, and pick event-type filters. Inline template +
- * raw inputs — no fancy styling. Polish lives downstream of dogfood
- * feedback.
+ * Post-rewrite scope (deliberately minimal): one bot, on/off, status.
+ * The previous version exposed an event-type filter, an approved-senders
+ * editor, and a separate permission-relay toggle — all artefacts of the
+ * v0 "push per event type" model. With topic-sync (every tab mirrors as
+ * a Forum Topic, permission requests always relay), those knobs collapsed
+ * to a single concept: "is the bridge on or off."
+ *
+ * Three render states, mutually exclusive:
+ *   - Not connected: bot token entry + pairing flow
+ *   - Connected: bot identity + enabled toggle + disconnect button + stats
+ *   - Secondary instance: warning banner (lock held by another process)
  */
 @Component({
     selector: 'bridge-settings',
     template: `
-        <div class="content-box">
-            <h3>Mobile Bridge</h3>
+        <div class="content-box p-3">
+            <div class="d-flex align-items-center mb-3">
+                <h3 class="m-0">Mobile Bridge</h3>
+                <button type="button" class="btn-close btn-close-white ms-auto"
+                        aria-label="Close" (click)="modal.dismiss()"></button>
+            </div>
 
-            <p class="text-muted small">
-                Bidirectional bridge to Telegram (and soon 飞书). Phone gets
-                permission prompts &amp; completion notices per tab; replies
-                in the Forum Topic inject into the same tab's PTY.
+            <p class="text-muted small mb-3">
+                Every GlanceTerm tab mirrors to a Telegram Forum Topic on
+                your phone. Reply in the topic → injects into the tab.
+                Closing a tab archives its topic (history kept).
             </p>
 
-            <h4 class="mt-4">Bindings</h4>
-            <div *ngIf="(bindings$ | async)?.length === 0" class="text-muted">
-                No bindings yet — add one below.
+            <!-- Secondary-instance warning supersedes everything else -->
+            <div *ngIf="!(isPrimary$ | async)" class="alert alert-warning small mb-3">
+                ⚠ Another GlanceTerm instance holds the bridge lock. This
+                window is silent. Quit the other GlanceTerm to re-enable
+                here.
             </div>
 
-            <div *ngFor="let b of bindings$ | async" class="binding-row p-2 mb-2 border rounded">
-                <div class="d-flex align-items-center mb-2">
-                    <strong>{{ b.label }}</strong>
-                    <span class="badge bg-secondary mx-2">{{ b.platform }}</span>
-                    <label class="ms-auto me-2">
-                        <input type="checkbox" [checked]="b.enabled" (change)="toggleEnabled(b)"/>
-                        Enabled
-                    </label>
-                    <button class="btn btn-sm btn-danger" (click)="remove(b)">Remove</button>
+            <!-- Connected state -->
+            <ng-container *ngIf="binding$ | async as binding; else notConnected">
+                <div class="border rounded p-3 mb-3">
+                    <div class="d-flex align-items-center mb-2">
+                        <strong>{{ statusLine$ | async }}</strong>
+                    </div>
+                    <div class="small text-muted mb-3">
+                        chat: {{ binding.chatId }} · {{ statsLine }}
+                    </div>
+                    <div class="d-flex align-items-center">
+                        <label class="form-check-label me-3">
+                            <input type="checkbox" class="form-check-input me-1"
+                                   [checked]="binding.enabled"
+                                   (change)="toggleEnabled(binding)"/>
+                            Enabled
+                        </label>
+                        <button class="btn btn-sm btn-outline-danger ms-auto"
+                                (click)="disconnect(binding)">
+                            Disconnect
+                        </button>
+                    </div>
                 </div>
-                <div class="small text-muted mb-2">chat: {{ b.chatId }} · owner: {{ b.ownerUserId }}</div>
+            </ng-container>
 
-                <div class="form-group mb-2">
-                    <label class="small">Approved senders (comma-separated Telegram user ids):</label>
-                    <input type="text" class="form-control form-control-sm"
-                           [value]="b.approvedSenders.join(', ')"
-                           (change)="updateSenders(b, $event)"/>
+            <!-- Not connected: pairing flow -->
+            <ng-template #notConnected>
+                <div *ngIf="!pairing" class="border rounded p-3 mb-3">
+                    <div class="form-group mb-2">
+                        <label class="small">Bot token (from @BotFather):</label>
+                        <input type="password" class="form-control" [(ngModel)]="botToken"
+                               placeholder="123456789:ABC..."/>
+                    </div>
+                    <div class="form-group mb-3">
+                        <label class="small">Label (optional):</label>
+                        <input type="text" class="form-control" [(ngModel)]="label"
+                               placeholder="My Telegram"/>
+                    </div>
+                    <button class="btn btn-primary" (click)="startPair()"
+                            [disabled]="!botToken || busy">
+                        Generate pairing code
+                    </button>
+                    <div *ngIf="error" class="text-danger small mt-2">{{ error }}</div>
+                    <div class="text-muted small mt-3">
+                        ⓘ The bot must be an admin in a supergroup with
+                        <strong>Forum Topics enabled</strong> (group settings →
+                        Topics).
+                    </div>
                 </div>
 
-                <div class="form-group">
-                    <label class="small d-block">Event filter (empty = defaults):</label>
-                    <label *ngFor="let evt of EVENT_TYPES" class="me-3">
-                        <input type="checkbox"
-                               [checked]="filterChecked(b, evt)"
-                               (change)="toggleFilter(b, evt)"/>
-                        {{ evt }}
-                    </label>
+                <div *ngIf="pairing" class="alert alert-info">
+                    <p class="mb-2">In the supergroup's General topic, send:</p>
+                    <pre class="bg-dark text-white p-2 rounded mb-2">/bind {{ pairing.code }}</pre>
+                    <p class="small text-muted mb-2">
+                        Expires in {{ remainingMin }} min.
+                    </p>
+                    <button class="btn btn-sm btn-secondary" (click)="cancelPair()">
+                        Cancel
+                    </button>
                 </div>
-            </div>
-
-            <h4 class="mt-4">Add Telegram binding</h4>
-
-            <div *ngIf="!pairing">
-                <div class="form-group mb-2">
-                    <label class="small">Bot token (from @BotFather):</label>
-                    <input type="password" class="form-control" [(ngModel)]="botToken"
-                           placeholder="123456789:ABC..."/>
-                </div>
-                <div class="form-group mb-2">
-                    <label class="small">Label (optional):</label>
-                    <input type="text" class="form-control" [(ngModel)]="label"
-                           placeholder="My Telegram"/>
-                </div>
-                <button class="btn btn-primary" (click)="startPair()"
-                        [disabled]="!botToken || busy">
-                    Generate pairing code
-                </button>
-                <div *ngIf="error" class="text-danger mt-2">{{ error }}</div>
-            </div>
-
-            <div *ngIf="pairing" class="alert alert-info">
-                <p>Open Telegram, find your bot's supergroup (Forum Topics must be
-                enabled), and send <strong>from the chat (not a DM)</strong>:</p>
-                <pre class="bg-dark text-white p-2 rounded">/bind {{ pairing.code }}</pre>
-                <p class="small text-muted mb-2">Expires in {{ remainingMin }} min.
-                The bot must be a member &amp; admin of the chat.</p>
-                <button class="btn btn-sm btn-secondary" (click)="cancelPair()">Cancel</button>
-            </div>
-
-            <h4 class="mt-4">Audit log</h4>
-            <p class="small text-muted">
-                Inbound messages from non-whitelisted senders are silently
-                dropped and logged to
-                <code>~/.glanceterm/mobile-bridge.log</code> (JSONL).
-            </p>
+            </ng-template>
         </div>
     `,
 })
 export class BridgeSettingsComponent implements OnDestroy {
-    bindings$: Observable<ChannelBinding[]>
+    binding$: Observable<ChannelBinding | undefined>
+    isPrimary$: Observable<boolean>
+    /** Renders as e.g. "@MyBot · connected" or "Idle". */
+    statusLine$: Observable<string>
+
     botToken = ''
     label = ''
     pairing: PendingPairing | null = null
@@ -109,26 +127,32 @@ export class BridgeSettingsComponent implements OnDestroy {
     error = ''
     busy = false
 
-    readonly EVENT_TYPES: BridgeEventType[] = [
-        'needs_permission', 'task_completed', 'task_failed', 'tool_use', 'state_transition',
-    ]
-    private readonly DEFAULT_ON: BridgeEventType[] = ['needs_permission', 'task_completed', 'task_failed']
-
     private completedSub: Subscription
     private tickHandle: ReturnType<typeof setInterval> | null = null
 
     constructor (
         private store: BindingStoreService,
         private pairingSvc: PairingService,
+        private telegram: TelegramClientService,
+        private topics: TopicService,
+        private lock: InstanceLockService,
         private zone: NgZone,
+        public modal: NgbActiveModal,
     ) {
-        this.bindings$ = this.store.bindings$
+        // First (and only, given v0 single-binding cap) telegram binding.
+        // undefined → "not connected" template branch.
+        this.binding$ = this.store.bindings$.pipe(
+            map(bindings => bindings.find(b => b.platform === 'telegram')),
+        )
+        this.isPrimary$ = this.lock.isPrimary$
+        this.statusLine$ = combineLatest([this.telegram.running$, this.telegram.identity$]).pipe(
+            map(([running, identity]) => this.formatStatus(running, identity)),
+        )
         void this.store.load()
 
         this.completedSub = this.pairingSvc.completedPairing$.subscribe(_b => {
-            // Plain Subject now (was BehaviorSubject) — no replay on
-            // resubscribe, so we don't need to guard against null
-            // initial emissions any more.
+            // PairingService.completedPairing$ is a plain Subject (no replay)
+            // so guarding against null initial emissions isn't required.
             this.zone.run(() => {
                 this.pairing = null
                 this.botToken = ''
@@ -141,6 +165,20 @@ export class BridgeSettingsComponent implements OnDestroy {
     ngOnDestroy (): void {
         this.completedSub.unsubscribe()
         this.stopTicking()
+    }
+
+    /**
+     * Topic stats line. Recomputed on every change-detection pass by
+     * touching the TopicService cache — cheap (Map iteration over dozens
+     * of entries) and avoids subscribing to a per-mutation event stream
+     * we don't otherwise need. Empty string when no binding exists.
+     */
+    get statsLine (): string {
+        const current = this.store.current.find(b => b.platform === 'telegram')
+        if (!current) return ''
+        const { open, closed } = this.topics.getStatsForBinding(current.id)
+        if (closed === 0) return `${open} topic${open === 1 ? '' : 's'}`
+        return `${open} open · ${closed} archived`
     }
 
     async startPair (): Promise<void> {
@@ -172,33 +210,34 @@ export class BridgeSettingsComponent implements OnDestroy {
         void this.store.update(b.id, { enabled: !b.enabled })
     }
 
-    remove (b: ChannelBinding): void {
-        if (!confirm(`Remove binding "${b.label}"? Forum Topics on Telegram stay.`)) return
+    /** Hard-disconnect = remove binding entirely. The previous UI separated
+     *  "disable" (binding stays, no traffic) from "remove" (binding deleted);
+     *  the simplified UI keeps both because they're different intents — but
+     *  surfaces Disconnect as the only destructive action since v0 caps us
+     *  at one binding (you'd add a fresh one from scratch).
+     *
+     *  Topic-cache cleanup: BindingStore.remove only drops the binding
+     *  record. Without forgetBinding the per-tab thread_id map under
+     *  ~/.glanceterm/mobile-bridge-topics.json grows unbounded across
+     *  disconnect/reconnect cycles (entries can't be re-addressed since
+     *  the new binding gets a fresh uuid, but they're never deleted
+     *  either). Done as fire-and-forget — forgetBinding is in-memory +
+     *  schedules a save, can't fail in a way the user can act on. */
+    disconnect (b: ChannelBinding): void {
+        if (!confirm(
+            `Disconnect "${b.label}"?\n\n`
+            + 'Existing Forum Topics in the supergroup are not deleted — '
+            + 'they become orphans (no new messages, history preserved). '
+            + 'Clean them up manually on Telegram if you want.',
+        )) return
+        void this.topics.forgetBinding(b.id)
         void this.store.remove(b.id)
     }
 
-    updateSenders (b: ChannelBinding, event: Event): void {
-        const value = (event.target as HTMLInputElement).value
-        const senders = value.split(',').map(s => s.trim()).filter(s => s.length > 0)
-        // Always keep the owner — accidental removal would lock the owner
-        // out of their own binding.
-        if (!senders.includes(b.ownerUserId)) senders.unshift(b.ownerUserId)
-        void this.store.update(b.id, { approvedSenders: senders })
-    }
-
-    filterChecked (b: ChannelBinding, evt: BridgeEventType): boolean {
-        if (b.eventFilter.length === 0) return this.DEFAULT_ON.includes(evt)
-        return b.eventFilter.includes(evt)
-    }
-
-    toggleFilter (b: ChannelBinding, evt: BridgeEventType): void {
-        const current = b.eventFilter.length > 0
-            ? [...b.eventFilter] as BridgeEventType[]
-            : [...this.DEFAULT_ON]
-        const idx = current.indexOf(evt)
-        if (idx >= 0) current.splice(idx, 1)
-        else current.push(evt)
-        void this.store.update(b.id, { eventFilter: current })
+    private formatStatus (running: boolean, identity: TgUser | null): string {
+        if (!running) return 'Idle'
+        if (identity?.username) return `@${identity.username} · connected`
+        return 'Connected'
     }
 
     private tickRemaining (): void {

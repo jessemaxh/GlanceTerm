@@ -9,8 +9,14 @@ import { TopicService } from './telegram/topic.service'
 import { BindingStoreService } from './binding/store.service'
 import { TabIdentityService } from './tab-identity.service'
 import { KeystrokeAdapterRegistry } from './pty-keystroke/registry'
-import { TgInboundMessage } from './telegram/types'
+import { PermissionRelayService } from './permission-relay.service'
+import { TgInboundCallback, TgInboundMessage } from './telegram/types'
 import { appendAudit, AUDIT_LOG_PATH } from './audit-log'
+
+/** Anthropic's 5-letter id alphabet ([a-km-z], no l) + verdict word.
+ *  /i tolerates phone autocorrect that capitalises sentence starts;
+ *  lowercase the captured id before passing to PermissionRelayService.applyVerdict. */
+const PERM_TEXT_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
 /**
  * Route inbound Telegram messages → originating tab's PTY input.
@@ -45,9 +51,13 @@ export class InboundRouterService implements OnDestroy {
         private identity: TabIdentityService,
         private monitor: TabMonitor,
         private keystrokes: KeystrokeAdapterRegistry,
+        private permissionRelay: PermissionRelayService,
     ) {
         this.subs.push(
             this.telegram.inboundMessages$.subscribe(msg => void this.route(msg)),
+        )
+        this.subs.push(
+            this.telegram.callbackQueries$.subscribe(cb => void this.routeCallback(cb)),
         )
     }
 
@@ -75,6 +85,21 @@ export class InboundRouterService implements OnDestroy {
         // Skip here to avoid double-handling — the user would otherwise see
         // their "/bind ABCDEF" injected into the focused terminal too.
         if (/^\/bind\b/i.test(msg.text.trim())) return
+
+        // Permission-relay verdict shortcut: `yes <id>` / `no <id>` text
+        // matches the same alphabet/format the handler's 5-letter id uses
+        // and the same convention as Anthropic's official plugin.
+        const verdictMatch = PERM_TEXT_RE.exec(msg.text.trim())
+        if (verdictMatch) {
+            const verdict: 'allow' | 'deny' = verdictMatch[1].toLowerCase().startsWith('y') ? 'allow' : 'deny'
+            const permId = verdictMatch[2].toLowerCase()
+            const applied = await this.permissionRelay.applyVerdict(permId, verdict)
+            await appendAudit({
+                kind: applied ? 'permission-verdict' : 'permission-verdict-stale',
+                permId, verdict, source: 'text', chatId: msg.chatId,
+            })
+            return
+        }
 
         if (msg.topicId === undefined) {
             await this.audit(msg, 'no-topic-id')
@@ -134,6 +159,62 @@ export class InboundRouterService implements OnDestroy {
             topicId: msg.topicId,
             textLen: msg.text.length,
         })
+    }
+
+    /**
+     * Route an inline-keyboard tap. The data string is
+     * `perm:(allow|deny):<5-letter-id>`; anything else is ignored. We
+     * always answerCallbackQuery so the user's button stops "loading"
+     * even if our gate rejects the verdict.
+     */
+    private async routeCallback (cb: TgInboundCallback): Promise<void> {
+        // Always ack — Telegram requires it within ~30s or the button
+        // spins forever on the user's phone. Errors here are non-fatal.
+        const ack = (text?: string) =>
+            this.telegram.answerCallbackQuery(cb.callbackId, text ? { text } : {})
+                .catch(err => {
+                    // eslint-disable-next-line no-console
+                    console.warn('[mobile-bridge:inbound] answerCallbackQuery failed:', err)
+                })
+
+        const m = /^perm:(allow|deny):([a-km-z]{5})$/i.exec(cb.data)
+        if (!m) {
+            // Unknown callback shape (future button kinds, stale callback
+            // from a removed feature). Ack silently, drop.
+            void ack()
+            return
+        }
+
+        const verdict = m[1].toLowerCase() as 'allow' | 'deny'
+        const permId = m[2].toLowerCase()
+
+        // Gate: callback sender must be on the allowlist of SOME binding
+        // that targets this chat. We don't yet have a callback-chat→binding
+        // map; iterate bindings and accept if any allowlist matches.
+        const binding = this.store.current.find(
+            b => b.platform === 'telegram'
+                && b.chatId === String(cb.chatId)
+                && b.enabled
+                && b.approvedSenders.includes(String(cb.senderId)),
+        )
+        if (!binding) {
+            void ack('Not authorised.')
+            await appendAudit({
+                kind: 'permission-verdict-rejected',
+                reason: 'no-matching-binding-or-sender',
+                chatId: cb.chatId,
+                senderId: cb.senderId,
+                permId,
+            })
+            return
+        }
+
+        const ok = await this.permissionRelay.applyVerdict(permId, verdict)
+        await appendAudit({
+            kind: ok ? 'permission-verdict' : 'permission-verdict-stale',
+            permId, verdict, source: 'callback', chatId: cb.chatId,
+        })
+        void ack(ok ? (verdict === 'allow' ? '✅ Allowed' : '❌ Denied') : 'Already resolved.')
     }
 }
 
