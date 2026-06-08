@@ -449,7 +449,19 @@ export class TelegramBackend implements MessagingBackend, OnDestroy {
             parameters?: { retry_after?: number }
         }
         if (!data.ok) {
-            throw this.translateError(method, data.error_code, data.description ?? 'unknown error', data.parameters?.retry_after)
+            const err = this.translateError(method, data.error_code, data.description ?? 'unknown error', data.parameters?.retry_after)
+            // Surface auth-shaped failures (revoked bot token, scope
+            // change) to lastError$ so the UI shows "Auth failed —
+            // re-pair" even if the failure is hit from a per-send call
+            // rather than start(). Without this, a token revoked
+            // mid-session would log warnings forever while the UI
+            // cheerfully reads "@bot · connected" because the long-poll
+            // loop catch path may not see the auth error (it depends on
+            // whether the next getUpdates call gets a 401 from TG, which
+            // it usually does — but per-send 401 is the more direct
+            // signal).
+            if (err.kind === 'auth_failed') this.recordError(err)
+            throw err
         }
         return data.result as T
     }

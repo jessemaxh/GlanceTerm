@@ -162,6 +162,11 @@ export class InboundRouterService implements OnDestroy {
         await appendAudit({
             kind: 'inbound-drop',
             reason,
+            // Platform lets `grep platform=feishu ~/.glanceterm/mobile-bridge.log`
+            // isolate per-backend drops; without it diagnosis required
+            // inferring platform from chatId shape (Feishu oc_* vs
+            // Telegram numeric).
+            platform: msg.platform,
             chatId: msg.chatId,
             senderId: msg.senderId,
             senderName: msg.senderName,

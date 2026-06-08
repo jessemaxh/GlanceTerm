@@ -536,7 +536,14 @@ export class FeishuBackend implements MessagingBackend, OnDestroy {
         // values on auth-side failures.
         const wrapped = `Feishu ${method} failed: ${redactToken(rawMessage)}`
         const kind = this.classifyError(err)
-        return new MessagingError(kind, wrapped)
+        const out = new MessagingError(kind, wrapped)
+        // Surface auth-shaped failures from any path (per-send 401,
+        // token-refresh failure during a send round trip) to lastError$
+        // so the UI's "Auth failed — re-pair" alert fires even if the
+        // long-running watchdog hasn't noticed yet (watchdog cadence is
+        // 10s; a send-side 401 arrives immediately).
+        if (kind === 'auth_failed') this.recordError(out)
+        return out
     }
 
     private classifyError (err: unknown): MessagingErrorKind {

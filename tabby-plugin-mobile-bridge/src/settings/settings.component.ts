@@ -406,6 +406,11 @@ export class BridgeSettingsComponent implements OnDestroy {
     private completedSub: Subscription
     private diagnosticsSub: Subscription | null = null
     private tickHandle: ReturnType<typeof setInterval> | null = null
+    /** Set in ngOnDestroy. Async paths (startPair awaits beginXxxPairing)
+     *  check this after their await before touching component state — if
+     *  the modal closed during the round-trip we'd otherwise install a
+     *  setInterval / Subscription that no consumer ever tears down. */
+    private destroyed = false
 
     constructor (
         private store: BindingStoreService,
@@ -474,6 +479,7 @@ export class BridgeSettingsComponent implements OnDestroy {
     }
 
     ngOnDestroy (): void {
+        this.destroyed = true
         this.completedSub.unsubscribe()
         this.stopDiagnostics()
         this.stopTicking()
@@ -518,19 +524,33 @@ export class BridgeSettingsComponent implements OnDestroy {
         this.busy = true
         this.error = ''
         try {
+            let result: PendingPairing
             if (this.platform === 'telegram') {
-                this.pairing = await this.pairingSvc.beginTelegramPairing(
+                result = await this.pairingSvc.beginTelegramPairing(
                     this.botToken,
                     this.label || undefined,
                 )
             } else {
-                this.pairing = await this.pairingSvc.beginFeishuPairing(
+                result = await this.pairingSvc.beginFeishuPairing(
                     this.appId,
                     this.appSecret,
                     this.region,
                     this.label || undefined,
                 )
             }
+            // Re-check after the await — the user may have clicked the
+            // modal's X between the start of beginXxxPairing and now,
+            // which would have triggered ngOnDestroy. Installing a
+            // setInterval and diagnostics subscription on a destroyed
+            // component leaks both for up to 5 minutes (the pairing
+            // expiry) or forever (no inbound emission to close the sub).
+            // The pairing itself is fine to leave running — PairingService
+            // owns it and sweepExpired will clear it.
+            if (this.destroyed) {
+                this.pairingSvc.cancelPending(result.code)
+                return
+            }
+            this.pairing = result
             this.tickRemaining()
             this.tickHandle = setInterval(() => this.tickRemaining(), 30_000)
             this.startDiagnostics()
