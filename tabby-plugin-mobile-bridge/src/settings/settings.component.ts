@@ -9,7 +9,7 @@ import { BackendRegistry } from '../backends/registry.service'
 import { TopicService } from '../topic.service'
 import { InstanceLockService } from '../instance-lock.service'
 import { ChannelBinding, PendingPairing } from '../binding/types'
-import { BotIdentity } from '../backends/types'
+import { BackendLastError, BotIdentity } from '../backends/types'
 
 type Platform = 'telegram' | 'feishu'
 
@@ -34,7 +34,7 @@ type Platform = 'telegram' | 'feishu'
             <div class="d-flex align-items-center mb-3">
                 <h3 class="m-0">Mobile Bridge</h3>
                 <button type="button" class="btn-close btn-close-white ms-auto"
-                        aria-label="Close" (click)="modal.dismiss()"></button>
+                        aria-label="Close" (click)="dismiss()"></button>
             </div>
 
             <p class="text-muted small mb-3">
@@ -55,6 +55,14 @@ type Platform = 'telegram' | 'feishu'
                 <div class="border rounded p-3 mb-3">
                     <div class="d-flex align-items-center mb-2">
                         <strong>{{ statusLine$ | async }}</strong>
+                    </div>
+                    <!-- Actionable error line. Surfaces auth failures
+                         (revoked token, hostname drift breaking keystore,
+                         Feishu secret rotated) instead of leaving the user
+                         staring at "Idle" with no recovery hint. -->
+                    <div *ngIf="lastErrorLine$ | async as errorLine"
+                         class="alert alert-danger small py-2 mb-2">
+                        {{ errorLine }}
                     </div>
                     <div class="small text-muted mb-3">
                         {{ platformLabel(binding.platform) }} · chat: {{ binding.chatId }} · {{ statsLine }}
@@ -108,7 +116,7 @@ type Platform = 'telegram' | 'feishu'
                                    placeholder="My Telegram"/>
                         </div>
                         <button class="btn btn-primary" (click)="startPair()"
-                                [disabled]="!canPair() || busy">
+                                [disabled]="!canPair() || busy || !(isPrimary$ | async)">
                             Generate pairing code
                         </button>
                         <div class="text-muted small mt-3">
@@ -153,7 +161,7 @@ type Platform = 'telegram' | 'feishu'
                                    placeholder="My Feishu"/>
                         </div>
                         <button class="btn btn-primary" (click)="startPair()"
-                                [disabled]="!canPair() || busy">
+                                [disabled]="!canPair() || busy || !(isPrimary$ | async)">
                             Generate pairing code
                         </button>
                         <div class="text-muted small mt-3">
@@ -191,6 +199,10 @@ export class BridgeSettingsComponent implements OnDestroy {
     /** Renders as e.g. "@MyBot · connected" or "Idle". Reactive — derived
      *  from the connected binding's platform-specific backend. */
     statusLine$: Observable<string>
+    /** When the connected backend has a recent auth-shaped failure, this
+     *  emits an actionable single-line string. null otherwise — the alert
+     *  banner is hidden via *ngIf. */
+    lastErrorLine$: Observable<string | null>
 
     platform: Platform = 'telegram'
     botToken = ''
@@ -243,6 +255,19 @@ export class BridgeSettingsComponent implements OnDestroy {
                 )
             }),
         )
+        this.lastErrorLine$ = this.binding$.pipe(
+            switchMap(binding => {
+                if (!binding) return of(null)
+                // Disabled = user explicitly toggled off. The backend
+                // wasn't asked to be running, so a previous-session error
+                // is irrelevant to the user. Hide the banner.
+                if (!binding.enabled) return of(null)
+                const backend = this.backends.forPlatform(binding.platform)
+                return backend.lastError$.pipe(
+                    map(err => this.formatLastError(err)),
+                )
+            }),
+        )
         void this.store.load()
 
         this.completedSub = this.pairingSvc.completedPairing$.subscribe(_b => {
@@ -260,6 +285,19 @@ export class BridgeSettingsComponent implements OnDestroy {
     ngOnDestroy (): void {
         this.completedSub.unsubscribe()
         this.stopTicking()
+    }
+
+    /** Modal-close handler. If a pairing is mid-flight, cancel it so the
+     *  backend doesn't keep running after the user clicked X — the previous
+     *  build left the bot polling for ~5 minutes waiting on a /bind code
+     *  the user already navigated away from. */
+    dismiss (): void {
+        if (this.pairing) {
+            this.pairingSvc.cancelPending(this.pairing.code)
+            this.pairing = null
+            this.stopTicking()
+        }
+        this.modal.dismiss()
     }
 
     /**
@@ -341,6 +379,26 @@ export class BridgeSettingsComponent implements OnDestroy {
         if (!running) return 'Idle'
         if (identity?.displayName) return `${identity.displayName} · connected`
         return 'Connected'
+    }
+
+    /** Human-readable single-line action hint for backend errors. The kind
+     *  enum is small and stable, so we hand-craft per kind rather than
+     *  pass the raw .message through — the SDK / TG error strings are
+     *  technical and noisy. */
+    private formatLastError (err: BackendLastError | null): string | null {
+        if (!err) return null
+        switch (err.kind) {
+            case 'auth_failed':
+                return '⚠ Authentication failed — your token or app secret is invalid. Disconnect and pair again.'
+            case 'permission_denied':
+                return '⚠ Permission denied. Check the bot has admin / forum-topic permissions in the group.'
+            case 'rate_limited':
+                return '⏳ Rate limited by the platform — temporary; will retry automatically.'
+            case 'chat_not_found':
+                return '⚠ The bound chat is no longer reachable (bot removed?). Disconnect and pair again.'
+            default:
+                return null
+        }
     }
 
     private tickRemaining (): void {

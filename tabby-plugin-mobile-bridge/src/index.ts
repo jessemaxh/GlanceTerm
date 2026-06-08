@@ -15,6 +15,7 @@ import { OutboundDispatcherService } from './outbound-dispatcher.service'
 import { InboundRouterService } from './inbound-router.service'
 import { KeystrokeAdapterRegistry } from './pty-keystroke/registry'
 import { TranscriptTailerService } from './transcript/tailer.service'
+import { PtyTailerService } from './transcript/pty-tailer.service'
 import { PermissionModeService } from './permission-mode.service'
 import { PermissionRelayService } from './permission-relay.service'
 import { TopicSyncService } from './topic-sync.service'
@@ -37,6 +38,7 @@ import { BridgeSettingsComponent } from './settings/settings.component'
         InboundRouterService,
         KeystrokeAdapterRegistry,
         TranscriptTailerService,
+        PtyTailerService,
         PermissionModeService,
         PermissionRelayService,
         TopicSyncService,
@@ -75,6 +77,12 @@ export default class MobileBridgeModule {
         // window starts capturing the very first assistant turn after
         // GlanceTerm launch, not the first one after a sidebar render.
         _transcript: TranscriptTailerService,
+        // PtyTailer subscribes to TabMonitor.states$ at construct time
+        // and lazy-subscribes to each non-Claude tab's session.output$.
+        // Eager so a non-Claude tab opened in the first second of launch
+        // (before any sidebar render) still has its output mirrored to
+        // the bridge.
+        _ptyTailer: PtyTailerService,
         // PermissionModeService writes ~/.glanceterm/permission-relay.flag
         // and reflects the on-disk byte in the settings toggle. Eager so
         // a stale flag from a prior session is reconciled at launch

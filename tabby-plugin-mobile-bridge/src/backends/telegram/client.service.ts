@@ -11,6 +11,7 @@ import {
 } from './wire-types'
 import {
     BackendCredentials,
+    BackendLastError,
     BotIdentity,
     ChatRef,
     EditOptions,
@@ -77,6 +78,7 @@ export class TelegramBackend implements MessagingBackend, OnDestroy {
     private callbackSubject = new Subject<InboundCallback>()
     private runningSubject = new BehaviorSubject<boolean>(false)
     private identitySubject = new BehaviorSubject<BotIdentity | null>(null)
+    private lastErrorSubject = new BehaviorSubject<BackendLastError | null>(null)
 
     constructor (private keystore: KeystoreService) {}
 
@@ -84,6 +86,7 @@ export class TelegramBackend implements MessagingBackend, OnDestroy {
     get callbacks$ (): Observable<InboundCallback> { return this.callbackSubject }
     get running$ (): Observable<boolean> { return this.runningSubject }
     get identity$ (): Observable<BotIdentity | null> { return this.identitySubject }
+    get lastError$ (): Observable<BackendLastError | null> { return this.lastErrorSubject }
 
     // ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -94,6 +97,11 @@ export class TelegramBackend implements MessagingBackend, OnDestroy {
             ))
         }
         const tokenOrRef = creds.botToken
+        // Clear stale error EARLY (before the network round-trip) so the
+        // UI doesn't flash "Authentication failed — re-pair" during a
+        // legitimate re-pair attempt. If the new start fails, recordError
+        // sets a fresh one before throwing.
+        this.lastErrorSubject.next(null)
         return this.enqueueLifecycle(async () => {
             // Resolve to plaintext at the lifecycle boundary — the token
             // lives only in-memory inside this class. Plaintext from a
@@ -109,10 +117,12 @@ export class TelegramBackend implements MessagingBackend, OnDestroy {
                 try {
                     token = await this.keystore.read(tokenOrRef.id)
                 } catch (err) {
-                    throw new MessagingError(
+                    const wrapped = new MessagingError(
                         'auth_failed',
                         `TelegramBackend: keystore read failed (re-pair to recover): ${err instanceof Error ? err.message : String(err)}`,
                     )
+                    this.recordError(wrapped)
+                    throw wrapped
                 }
             }
             if (this.running && this.token === token) return
@@ -287,6 +297,16 @@ export class TelegramBackend implements MessagingBackend, OnDestroy {
         return this.call<TgUser>('getMe', {})
     }
 
+    /** Capture an auth-shaped or otherwise actionable error on lastError$
+     *  so the UI can render "Auth failed — re-pair" instead of "Idle". */
+    private recordError (err: MessagingError): void {
+        this.lastErrorSubject.next({
+            kind: err.kind,
+            message: redactToken(err.message),
+            occurredAt: Date.now(),
+        })
+    }
+
     private toBotIdentity (me: TgUser): BotIdentity {
         return {
             id: String(me.id),
@@ -344,6 +364,15 @@ export class TelegramBackend implements MessagingBackend, OnDestroy {
                     '[mobile-bridge:telegram] poll error, backing off:',
                     redactToken(err instanceof Error ? err.message : String(err)),
                 )
+                // Surface auth-shaped poll errors (401 bot-token revoked)
+                // to the UI via lastError$. Without this the settings card
+                // would forever read "@MyBot · connected" while the loop
+                // silently retries against a dead token. Only auth_failed
+                // is interesting at the UI layer — transient network
+                // errors are recoverable by the backoff loop itself.
+                if (err instanceof MessagingError && err.kind === 'auth_failed') {
+                    this.recordError(err)
+                }
                 const stopPromise = this.stopSignal!.promise
                 let timer: ReturnType<typeof setTimeout> | null = null
                 await Promise.race([

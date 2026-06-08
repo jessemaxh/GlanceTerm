@@ -12,6 +12,7 @@ import { MessagingError } from './backends/types'
 import { retryWithBackoff } from './retry'
 import { appendAudit, redactToken } from './audit-log'
 import { TranscriptTailerService, TranscriptEvent } from './transcript/tailer.service'
+import { PtyTailerService } from './transcript/pty-tailer.service'
 import { InstanceLockService } from './instance-lock.service'
 
 /** Event types pushed to phones. Aligned with the per-event-type filter
@@ -61,6 +62,11 @@ export class OutboundDispatcherService implements OnDestroy {
 
     private prevStatus = new WeakMap<object, TabStatus>()
     private subs: Subscription[] = []
+    /** Last audited (platform, error) tuple — used to dedup
+     *  backend-start-failed rows. Without this, every bindings$ emission
+     *  while a token stays revoked would write a duplicate audit row,
+     *  drowning out actually new failures. */
+    private lastStartFailureSig = new Map<ChannelBinding['platform'], string>()
 
     constructor (
         private monitor: TabMonitor,
@@ -69,11 +75,25 @@ export class OutboundDispatcherService implements OnDestroy {
         private topics: TopicService,
         private backends: BackendRegistry,
         private transcript: TranscriptTailerService,
+        private pty: PtyTailerService,
         private lock: InstanceLockService,
     ) {
         this.subs.push(this.monitor.states$.subscribe(states => this.diff(states)))
         this.subs.push(this.store.bindings$.subscribe(bindings => void this.syncTransport(bindings)))
+        // Two event sources for assistant_text / tool_use, mutually
+        // exclusive per tab:
+        //   - TranscriptTailerService: Claude jsonl (structured + carries
+        //     tool_use blocks). Fires only for Claude tabs.
+        //   - PtyTailerService: ANSI-stripped output debounced 1.2s.
+        //     Fires only for non-Claude tabs (Codex / Aider / Goose /
+        //     anything else). Skips raw shells (no aiTool).
+        // The dispatchTranscript path is identical for both — both emit
+        // TranscriptEvent with kind='assistant_text', tabId from the
+        // session env. The agent-name shown in the IM bubble is derived
+        // from TabMonitor.aiTool at dispatch time so a non-Claude tab
+        // doesn't render "Claude said …".
         this.subs.push(this.transcript.events$.subscribe(ev => void this.dispatchTranscript(ev)))
+        this.subs.push(this.pty.events$.subscribe(ev => void this.dispatchTranscript(ev)))
         // Load the persisted bindings now so the first bindings$ emission
         // reflects truth, not the initial `[]`. Safe to await indirectly —
         // store.load() is idempotent.
@@ -111,15 +131,29 @@ export class OutboundDispatcherService implements OnDestroy {
         if (active) {
             try {
                 await backend.start(active.credentials)
+                this.lastStartFailureSig.delete(platform)
             } catch (err) {
+                const safe = redactToken(err instanceof Error ? err.message : String(err))
                 // eslint-disable-next-line no-console
-                console.warn(
-                    `[mobile-bridge:dispatch] ${platform} start failed:`,
-                    redactToken(err instanceof Error ? err.message : String(err)),
-                )
+                console.warn(`[mobile-bridge:dispatch] ${platform} start failed:`, safe)
+                // Audit ONLY when the error fingerprint changes — a
+                // chronically-broken binding (revoked token, hostname
+                // drift) would otherwise re-audit on every bindings$
+                // emission, drowning the log in N copies of the same row.
+                const sig = `${active.id}|${safe}`
+                if (this.lastStartFailureSig.get(platform) !== sig) {
+                    this.lastStartFailureSig.set(platform, sig)
+                    await appendAudit({
+                        kind: 'backend-start-failed',
+                        platform,
+                        bindingId: active.id,
+                        error: safe,
+                    })
+                }
             }
         } else {
             await backend.stop()
+            this.lastStartFailureSig.delete(platform)
         }
     }
 

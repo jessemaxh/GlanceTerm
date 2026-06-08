@@ -16,6 +16,7 @@ import {
 
 import {
     BackendCredentials,
+    BackendLastError,
     BotIdentity,
     ChatRef,
     EditOptions,
@@ -61,7 +62,15 @@ import { redactToken } from '../../audit-log'
  */
 @Injectable()
 export class FeishuBackend implements MessagingBackend, OnDestroy {
+    /** Polling cadence for the SDK's connection-status watchdog (see
+     *  {@link startConnectionWatchdog}). 10 s is rare enough to not spam
+     *  the event loop while fast enough that a token-refresh-loop failure
+     *  surfaces to the UI within a few-minute window of dogfood
+     *  observability. */
+    private static readonly WATCHDOG_POLL_MS = 10_000
+
     private channel: LarkChannel | null = null
+    private watchdogTimer: ReturnType<typeof setInterval> | null = null
     /** Full session fingerprint (appId|region|appSecret-hash) used by
      *  start() to detect a no-op re-pair vs a real credentials change.
      *  Previously the equality check used appId alone, which silently
@@ -84,11 +93,13 @@ export class FeishuBackend implements MessagingBackend, OnDestroy {
     private callbackSubject = new Subject<InboundCallback>()
     private runningSubject = new BehaviorSubject<boolean>(false)
     private identitySubject = new BehaviorSubject<BotIdentity | null>(null)
+    private lastErrorSubject = new BehaviorSubject<BackendLastError | null>(null)
 
     get inbound$ (): Observable<InboundMessage> { return this.inboundSubject }
     get callbacks$ (): Observable<InboundCallback> { return this.callbackSubject }
     get running$ (): Observable<boolean> { return this.runningSubject }
     get identity$ (): Observable<BotIdentity | null> { return this.identitySubject }
+    get lastError$ (): Observable<BackendLastError | null> { return this.lastErrorSubject }
 
     constructor (private keystore: KeystoreService) {}
 
@@ -104,6 +115,9 @@ export class FeishuBackend implements MessagingBackend, OnDestroy {
                 `FeishuBackend.start: expected feishu credentials, got ${creds.platform}`,
             ))
         }
+        // Clear stale error EARLY so the UI doesn't flash "Auth failed —
+        // re-pair" during a legitimate retry. Mirror of TelegramBackend.
+        this.lastErrorSubject.next(null)
         return this.enqueueLifecycle(async () => {
             const appSecret = await this.resolveSecret(creds.appSecret)
             // Compose a session fingerprint that includes EVERY field the
@@ -144,7 +158,9 @@ export class FeishuBackend implements MessagingBackend, OnDestroy {
                 // channel — swallow.
                 try { await channel.disconnect() } catch { /* ignore */ }
                 this.sessionKey = ''
-                throw this.translateLarkError(err, 'connect')
+                const wrapped = this.translateLarkError(err, 'connect')
+                this.recordError(wrapped)
+                throw wrapped
             }
             this.channel = channel
             this.connected = true
@@ -153,6 +169,60 @@ export class FeishuBackend implements MessagingBackend, OnDestroy {
             if (channel.botIdentity) {
                 this.identitySubject.next(this.toBotIdentity(channel.botIdentity))
             }
+            this.startConnectionWatchdog()
+        })
+    }
+
+    /**
+     * Poll the SDK's connection status so a silent reconnect failure
+     * (token refresh broken, repeated WS handshake failures past the
+     * SDK's internal budget) surfaces to {@link lastError$} and flips
+     * {@link running$} to false. Without this, an enabled binding can
+     * sit in `connected`-then-`failed` for hours with the settings UI
+     * cheerfully reporting "@bot · connected".
+     *
+     * Only `state === 'failed'` is treated as a hard error. 'reconnecting'
+     * is a recoverable hiccup the SDK is actively retrying — surfacing
+     * it would flap the UI on every transient network blip.
+     */
+    private startConnectionWatchdog (): void {
+        this.stopConnectionWatchdog()
+        this.watchdogTimer = setInterval(() => {
+            const status = this.channel?.getConnectionStatus()
+            if (!status) return
+            if (status.state === 'failed') {
+                if (this.runningSubject.value) {
+                    this.runningSubject.next(false)
+                    this.recordError(new MessagingError(
+                        'auth_failed',
+                        'Feishu connection failed (SDK exhausted reconnect budget) — disconnect and re-pair to recover',
+                    ))
+                }
+            } else if (status.state === 'connected') {
+                // Recovered after a transient — clear stale errors so
+                // the UI alert disappears.
+                if (this.lastErrorSubject.value) {
+                    this.lastErrorSubject.next(null)
+                }
+                if (!this.runningSubject.value) {
+                    this.runningSubject.next(true)
+                }
+            }
+        }, FeishuBackend.WATCHDOG_POLL_MS)
+    }
+
+    private stopConnectionWatchdog (): void {
+        if (this.watchdogTimer) {
+            clearInterval(this.watchdogTimer)
+            this.watchdogTimer = null
+        }
+    }
+
+    private recordError (err: MessagingError): void {
+        this.lastErrorSubject.next({
+            kind: err.kind,
+            message: err.message, // already redacted by translateLarkError
+            occurredAt: Date.now(),
         })
     }
 
@@ -164,6 +234,7 @@ export class FeishuBackend implements MessagingBackend, OnDestroy {
         if (!this.connected) return
         this.connected = false
         this.sessionKey = ''
+        this.stopConnectionWatchdog()
         const channel = this.channel
         this.channel = null
         this.detachHandlers()
@@ -192,10 +263,12 @@ export class FeishuBackend implements MessagingBackend, OnDestroy {
         try {
             return await this.keystore.read(value.id)
         } catch (err) {
-            throw new MessagingError(
+            const wrapped = new MessagingError(
                 'auth_failed',
                 `FeishuBackend: keystore read failed (re-pair to recover): ${err instanceof Error ? err.message : String(err)}`,
             )
+            this.recordError(wrapped)
+            throw wrapped
         }
     }
 

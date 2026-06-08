@@ -163,6 +163,17 @@ export type MessagingErrorKind =
     | 'permission_denied'  // bot lacks can_manage_topics / equivalent
     | 'unknown'
 
+/** Surfaced by {@link MessagingBackend.lastError$}. Distinct from the
+ *  thrown {@link MessagingError} so the UI can render an actionable hint
+ *  without parsing message strings. */
+export interface BackendLastError {
+    kind: MessagingErrorKind
+    /** Already-redacted human-readable message (no secrets). */
+    message: string
+    /** ms since epoch when the error was first observed in this session. */
+    occurredAt: number
+}
+
 /** Single error type backends throw out of their interface methods. */
 export class MessagingError extends Error {
     constructor (
@@ -205,6 +216,16 @@ export interface MessagingBackend {
 
     readonly running$: Observable<boolean>
     readonly identity$: Observable<BotIdentity | null>
+    /**
+     * Last terminal failure the backend hit during start() or its
+     * long-lived loop. Null when no error has been seen since the last
+     * successful start. Settings UI renders an actionable message
+     * ("Auth failed — re-pair") so the user has a recovery path instead
+     * of staring at "Idle" forever after a revoked token / hostname
+     * drift / Feishu secret rotation. Cleared on the next successful
+     * start().
+     */
+    readonly lastError$: Observable<BackendLastError | null>
 
     createThread (chatId: ChatRef, title: string): Promise<ThreadRef>
     /** `currentTitle` is the title the thread last displayed (caller's
