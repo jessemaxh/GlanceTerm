@@ -68,6 +68,12 @@ mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
 
 # Cap stdin at 1 MiB so a runaway agent can't blow up our memory.
 PAYLOAD=$(head -c 1048576)
+# Empty-stdin default \`{}\` — without this, an agent that fires the hook
+# with no payload would let the wrapper-JSON writer in the relay branch
+# emit \`{"tab_id":"X","payload":}\` which is invalid JSON, the JS-side
+# parser drops it silently, and the handler then polls for 25 min with
+# no chance of getting a verdict.
+[ -z "\$PAYLOAD" ] && PAYLOAD='{}'
 
 # Cheap field extraction without jq. Values are user-supplied: sed's [^"]*
 # class blocks injected quotes, then tr strips backslashes + ASCII control
@@ -112,6 +118,12 @@ MATCHER=$(extract matcher)
 # Stop. See hook-watcher.service.ts processEvent() for the match.
 TOOL_NAME=$(extract tool_name)
 CWD=$(extract cwd)
+# transcript_path is the absolute path to Claude's own .jsonl transcript file.
+# Authoritative — Claude knows where it writes; reconstructing it from cwd is
+# unsafe because the file lives at the directory where \`claude\` was launched
+# (project root), not the agent's current cwd if it has cd'd into a subdir.
+# Used by tabby-plugin-mobile-bridge's TranscriptTailerService.
+TRANSCRIPT_PATH=$(extract transcript_path)
 TS=$(date +%s)
 
 # Subagent identity fields. Source of truth for the id-based pairing in
@@ -143,6 +155,30 @@ if [ "\$EVENT" = "PostToolUse" ] && [ "\$TOOL_NAME" = "Agent" ]; then
     SPAWN_AGENT_ID=$(extract agentId)
 fi
 
+# Monitor task lifecycle. Claude's footer reads "N shell, M monitor": shell
+# is bg-Bash count (already captured via BG above), monitor is the live
+# Monitor-tool task count, decremented when TaskStop fires for that id.
+# Hooks expose both events but with the id nested under tool_response /
+# tool_input respectively; we extract both casings (camelCase for nested
+# tool_response per the agentId precedent, snake_case for tool_input per
+# the run_in_background precedent) and fall back to the other if the first
+# casing returns empty — costs us one extra grep per Monitor / TaskStop
+# event, buys us robustness against any future field-naming drift.
+MONITOR_TASK_ID=""
+if [ "\$EVENT" = "PostToolUse" ] && [ "\$TOOL_NAME" = "Monitor" ]; then
+    MONITOR_TASK_ID=$(extract taskId)
+    if [ -z "\$MONITOR_TASK_ID" ]; then
+        MONITOR_TASK_ID=$(extract task_id)
+    fi
+fi
+STOP_TASK_ID=""
+if [ "\$EVENT" = "PreToolUse" ] && [ "\$TOOL_NAME" = "TaskStop" ]; then
+    STOP_TASK_ID=$(extract task_id)
+    if [ -z "\$STOP_TASK_ID" ]; then
+        STOP_TASK_ID=$(extract taskId)
+    fi
+fi
+
 # Background-shell indicator: set BG=1 when this is a PreToolUse for the
 # Bash tool with tool_input.run_in_background == true. Used downstream by
 # TabMonitor to definitively credit a new child PID as a backgrounded
@@ -162,6 +198,21 @@ if [ "\$EVENT" = "PreToolUse" ] && [ "\$TOOL_NAME" = "Bash" ]; then
     fi
 fi
 
+# IMPORTANT — write the per-tab .log line HERE (before any PermissionRequest
+# handling) so HookWatcher sees the event immediately, not 25 minutes later
+# when relay polling resolves. Without this, a tab sitting in permission-
+# relay limbo would show no "needs permission" state in the sidebar.
+OUT="\$STATE_DIR/\$TAB_ID.log"
+# Append one newline-terminated JSON record. POSIX \`>>\` opens the file with
+# O_APPEND, which guarantees the write goes to current EOF; for writes
+# ≤ PIPE_BUF (4 KiB+ on macOS / Linux) the write is atomic with respect to
+# other concurrent appenders. Our records are ~250 bytes — well under the
+# limit — so two handler processes firing simultaneously cannot interleave
+# bytes mid-record.
+printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s","ts":%s,"bg":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s","monitor_task_id":"%s","stop_task_id":"%s"}\\n' \\
+    "\$TAB_ID" "\$AGENT" "\$EVENT" "\$MATCHER" "\$TOOL_NAME" "\$SESSION_ID" "\$CWD" "\$TRANSCRIPT_PATH" "\$TS" "\$BG" "\$AGENT_ID" "\$AGENT_TYPE" "\$SPAWN_AGENT_ID" "\$MONITOR_TASK_ID" "\$STOP_TASK_ID" \\
+    >> "\$OUT" 2>/dev/null
+
 # Auto-approve permission prompts (Claude only, P0). When the user has
 # explicitly enabled the feature via the sidebar toggle, AutoApproveService
 # writes "1" to ~/.glanceterm/auto-approve.flag; when disabled, "0". For
@@ -173,27 +224,76 @@ fi
 # was auto-approved after the fact.
 # \`head -c 1\` deliberately reads only ONE byte: tolerates a trailing newline
 # in the flag file (most editors add one) without an extra \`tr -d\`.
+#
+# Precedence (decided 2026-06-08): auto-approve short-circuits — if it
+# fires, the relay branch never runs and the phone never sees this
+# request. Two independent switches; users can have any combination.
 if [ "\$AGENT" = "claude" ] && [ "\$EVENT" = "PermissionRequest" ]; then
-    FLAG=$(head -c 1 "\${HOME}/.glanceterm/auto-approve.flag" 2>/dev/null)
-    if [ "\$FLAG" = "1" ]; then
+    AUTO_FLAG=$(head -c 1 "\${HOME}/.glanceterm/auto-approve.flag" 2>/dev/null)
+    RELAY_FLAG=$(head -c 1 "\${HOME}/.glanceterm/permission-relay.flag" 2>/dev/null)
+    if [ "\$AUTO_FLAG" = "1" ]; then
         printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}\\n'
         printf '%s\\t%s\\t%s\\t%s\\n' "\$TS" "\$TAB_ID" "\$TOOL_NAME" "\$CWD" \\
             >> "\${HOME}/.glanceterm/auto-approve.log" 2>/dev/null
+    elif [ "\$RELAY_FLAG" = "1" ]; then
+        # Mint a 5-letter id from [a-km-z] — Anthropic's anti-l/I-confusion
+        # alphabet, same as their official Channels plugin. The id flows
+        # into the .req filename, the IM-side keyboard callback_data
+        # (\`perm:allow:<id>\`), and the decision file.
+        PERM_DIR="\${HOME}/.glanceterm/permissions"
+        mkdir -p "\$PERM_DIR" 2>/dev/null
+        PERM_ID=$(LC_ALL=C tr -dc 'a-km-z' < /dev/urandom 2>/dev/null | head -c 5)
+        # Fallback if /dev/urandom is unreadable (sandbox / unusual fs);
+        # awk \`rand()\` seeded with \$\$ + epoch nanos avoids the all-zero
+        # collision that a constant fallback id would cause.
+        if [ -z "\$PERM_ID" ]; then
+            PERM_ID=$(awk -v s="\$\$\${TS}" 'BEGIN{srand(s);a="abcdefghijkmnopqrstuvwxyz";o="";for(i=0;i<5;i++)o=o substr(a,int(rand()*25)+1,1);print o}')
+        fi
+        REQ_FILE="\$PERM_DIR/\$PERM_ID.req"
+        DEC_FILE="\$PERM_DIR/\$PERM_ID.decision"
+        # Wrapper JSON: \`{"tab_id":"...","payload":<raw>}\`. tab_id is
+        # outside payload so JS-side can route to the right tab without
+        # heuristics (cwd / session_id matching is unreliable when the
+        # user has several tabs in the same dir). PAYLOAD is itself a
+        # JSON object so embedding it after \`"payload":\` yields a valid
+        # outer JSON document.
+        printf '{"tab_id":"%s","payload":%s}' "\$TAB_ID" "\$PAYLOAD" > "\$REQ_FILE" 2>/dev/null
+        # Poll for the decision file. 15000 × 0.1 s = ~25 min ceiling —
+        # safety net for a forgotten request. Claude's own local dialog
+        # is NOT shown during this poll (we own the hook); on timeout
+        # we exit with no output and Claude falls back to its built-in
+        # approval prompt. (A local "cancel relay, ask me here" sidebar
+        # escape-hatch is in scope for mobile-bridge-v2 Block 1.5 but
+        # NOT implemented in v1 — see todo-mobile-bridge-v2.md.)
+        # Each iteration is one stat syscall; negligible CPU.
+        PERM_I=0
+        while [ "\$PERM_I" -lt 15000 ]; do
+            if [ -f "\$DEC_FILE" ]; then
+                DEC=$(head -c 16 "\$DEC_FILE" 2>/dev/null | tr -d '\\n\\r ')
+                rm -f "\$REQ_FILE" "\$DEC_FILE" 2>/dev/null
+                if [ "\$DEC" = "allow" ] || [ "\$DEC" = "deny" ]; then
+                    printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"%s"}}}\\n' "\$DEC"
+                    printf '%s\\t%s\\t%s\\t%s\\trelay\\t%s\\n' "\$TS" "\$TAB_ID" "\$TOOL_NAME" "\$CWD" "\$DEC" \\
+                        >> "\${HOME}/.glanceterm/permission-relay.log" 2>/dev/null
+                else
+                    # \"cancel\" or anything else: exit silent, Claude's local dialog handles it.
+                    printf '%s\\t%s\\t%s\\t%s\\trelay\\tcancel\\n' "\$TS" "\$TAB_ID" "\$TOOL_NAME" "\$CWD" \\
+                        >> "\${HOME}/.glanceterm/permission-relay.log" 2>/dev/null
+                fi
+                break
+            fi
+            sleep 0.1
+            PERM_I=$((PERM_I + 1))
+        done
+        if [ "\$PERM_I" -ge 15000 ]; then
+            rm -f "\$REQ_FILE" 2>/dev/null
+            printf '%s\\t%s\\t%s\\t%s\\trelay\\ttimeout\\n' "\$TS" "\$TAB_ID" "\$TOOL_NAME" "\$CWD" \\
+                >> "\${HOME}/.glanceterm/permission-relay.log" 2>/dev/null
+        fi
     fi
 fi
 
-OUT="$STATE_DIR/$TAB_ID.log"
-
-# Append one newline-terminated JSON record. POSIX \`>>\` opens the file with
-# O_APPEND, which guarantees the write goes to current EOF; for writes
-# ≤ PIPE_BUF (4 KiB+ on macOS / Linux) the write is atomic with respect to
-# other concurrent appenders. Our records are ~250 bytes — well under the
-# limit — so two handler processes firing simultaneously cannot interleave
-# bytes mid-record.
-printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","ts":%s,"bg":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s"}\\n' \\
-    "$TAB_ID" "$AGENT" "$EVENT" "$MATCHER" "$TOOL_NAME" "$SESSION_ID" "$CWD" "$TS" "$BG" "$AGENT_ID" "$AGENT_TYPE" "$SPAWN_AGENT_ID" \\
-    >> "$OUT" 2>/dev/null
-
+# Per-tab .log already written above; nothing else to do.
 exit 0
 `
 
@@ -223,6 +323,9 @@ New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
 # Read stdin and cap at 1 MiB so a runaway agent can't blow up memory.
 $payload = [Console]::In.ReadToEnd()
 if ($payload.Length -gt 1048576) { $payload = $payload.Substring(0, 1048576) }
+# Empty-stdin default '{}' — see HANDLER_SH for the rationale (wrapper-
+# JSON validity in the relay branch).
+if ([string]::IsNullOrEmpty($payload)) { $payload = '{}' }
 
 # Native JSON parse — much cleaner than the sh regex approach.
 try { $json = $payload | ConvertFrom-Json } catch { exit 0 }
@@ -253,6 +356,32 @@ if ([string]$json.hook_event_name -eq "PostToolUse" -and $toolName -eq "Agent") 
     }
 }
 
+# Monitor task lifecycle — mirror of the HANDLER_SH block. PowerShell can
+# traverse nested fields directly, so we hit tool_response.taskId /
+# tool_input.task_id without regex. Same dual-casing fallback: try the
+# casing that matches the per-section precedent first (camelCase under
+# tool_response, snake_case under tool_input), fall back to the other.
+$monitorTaskId = ""
+if ([string]$json.hook_event_name -eq "PostToolUse" -and $toolName -eq "Monitor") {
+    if ($json.tool_response) {
+        if ($json.tool_response.taskId) {
+            $monitorTaskId = [string]$json.tool_response.taskId
+        } elseif ($json.tool_response.task_id) {
+            $monitorTaskId = [string]$json.tool_response.task_id
+        }
+    }
+}
+$stopTaskId = ""
+if ([string]$json.hook_event_name -eq "PreToolUse" -and $toolName -eq "TaskStop") {
+    if ($json.tool_input) {
+        if ($json.tool_input.task_id) {
+            $stopTaskId = [string]$json.tool_input.task_id
+        } elseif ($json.tool_input.taskId) {
+            $stopTaskId = [string]$json.tool_input.taskId
+        }
+    }
+}
+
 # Background-shell indicator — see HANDLER_SH for the rationale. PowerShell
 # has native JSON parsing so we can read tool_input.run_in_background
 # directly rather than regex-matching the raw payload.
@@ -271,22 +400,36 @@ $out = [ordered]@{
     tool_name       = $toolName
     session_id      = [string]$json.session_id
     cwd             = [string]$json.cwd
+    # See HANDLER_SH for why this field is authoritative and cwd-derived
+    # paths are wrong.
+    transcript_path = [string]$json.transcript_path
     ts              = [int][double]::Parse((Get-Date -UFormat %s))
     bg              = [int]$bg
     agent_id        = $agentId
     agent_type      = $agentType
     spawn_agent_id  = $spawnAgentId
+    monitor_task_id = $monitorTaskId
+    stop_task_id    = $stopTaskId
 }
+
+# IMPORTANT — write the per-tab .log line HERE (before any PermissionRequest
+# handling) so HookWatcher sees the event immediately, not 25 minutes later
+# when relay polling resolves. See HANDLER_SH for the rationale.
+$outPath = Join-Path $stateDir "\$tabId.log"
+$line = ($out | ConvertTo-Json -Compress) + "\`n"
+[System.IO.File]::AppendAllText($outPath, $line, [System.Text.Encoding]::UTF8)
 
 # Auto-approve permission prompts (Claude only, P0) — mirror of the POSIX
 # block in HANDLER_SH. See hook-runtime.service.ts comments there for the
 # full rationale. When the user has enabled the feature, AutoApproveService
 # writes "1" to %USERPROFILE%\\.glanceterm\\auto-approve.flag.
 if ($Agent -eq "claude" -and $out.event -eq "PermissionRequest") {
-    $flagFile = Join-Path $env:USERPROFILE ".glanceterm\\auto-approve.flag"
-    $flag = ""
-    try { $flag = ([System.IO.File]::ReadAllText($flagFile)).Trim() } catch {}
-    if ($flag -eq "1") {
+    $autoFlagFile = Join-Path $env:USERPROFILE ".glanceterm\\auto-approve.flag"
+    $relayFlagFile = Join-Path $env:USERPROFILE ".glanceterm\\permission-relay.flag"
+    $autoFlag = ""; $relayFlag = ""
+    try { $autoFlag = ([System.IO.File]::ReadAllText($autoFlagFile)).Trim() } catch {}
+    try { $relayFlag = ([System.IO.File]::ReadAllText($relayFlagFile)).Trim() } catch {}
+    if ($autoFlag -eq "1") {
         # Claude reads stdout for sync hooks. Hard-coded JSON (rather than
         # ConvertTo-Json on a hashtable) keeps the on-the-wire payload
         # byte-identical to the POSIX handler, which simplifies regression
@@ -300,21 +443,57 @@ if ($Agent -eq "claude" -and $out.event -eq "PermissionRequest") {
         $auditPath = Join-Path $env:USERPROFILE ".glanceterm\\auto-approve.log"
         $auditLine = ("{0}\`t{1}\`t{2}\`t{3}\`n" -f $out.ts, $out.tab_id, $out.tool_name, $out.cwd)
         [System.IO.File]::AppendAllText($auditPath, $auditLine, [System.Text.Encoding]::UTF8)
+    } elseif ($relayFlag -eq "1") {
+        # Permission relay — see HANDLER_SH for the full rationale. Same
+        # 5-letter id alphabet, same .req/.decision file contract, same
+        # ~25 min poll ceiling, same fall-through-to-local-dialog on
+        # timeout/cancel.
+        $permDir = Join-Path $env:USERPROFILE ".glanceterm\\permissions"
+        New-Item -ItemType Directory -Path $permDir -Force | Out-Null
+        $alpha = "abcdefghijkmnopqrstuvwxyz"  # no l (Anthropic alphabet)
+        # Explicit Guid-derived seed — \`New-Object System.Random\` with no seed
+        # uses Environment.TickCount on PowerShell 5.1 (default Windows shell),
+        # which means two handlers spawned in the same millisecond (concurrent
+        # tabs / subagent fan-out) get IDENTICAL seeds → identical 5-letter
+        # ids → second .req overwrites the first, losing one request and
+        # routing its verdict to the wrong tab. NewGuid is cheap and per-call
+        # unique; GetHashCode squeezes it to the Int32 the Random ctor wants.
+        $rng = New-Object System.Random ([System.Guid]::NewGuid().GetHashCode())
+        $permId = -join (1..5 | ForEach-Object { $alpha[$rng.Next(0, $alpha.Length)] })
+        $reqFile = Join-Path $permDir "\$permId.req"
+        $decFile = Join-Path $permDir "\$permId.decision"
+        # Wrapper JSON \`{"tab_id":"...","payload":<raw>}\` — see HANDLER_SH
+        # for the rationale (clean tab routing without cwd heuristics).
+        $wrapper = '{"tab_id":"' + $tabId + '","payload":' + $payload + '}'
+        [System.IO.File]::WriteAllText($reqFile, $wrapper, [System.Text.Encoding]::UTF8)
+        $auditPath = Join-Path $env:USERPROFILE ".glanceterm\\permission-relay.log"
+        $decided = $false
+        for ($i = 0; $i -lt 15000; $i++) {
+            if (Test-Path $decFile) {
+                $dec = ""
+                try { $dec = ([System.IO.File]::ReadAllText($decFile)).Trim() } catch {}
+                Remove-Item -Force $reqFile, $decFile -ErrorAction SilentlyContinue
+                if ($dec -eq "allow" -or $dec -eq "deny") {
+                    [Console]::Out.Write('{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"' + $dec + '"}}}' + "\`n")
+                    $line = ("{0}\`t{1}\`t{2}\`t{3}\`trelay\`t{4}\`n" -f $out.ts, $out.tab_id, $out.tool_name, $out.cwd, $dec)
+                } else {
+                    $line = ("{0}\`t{1}\`t{2}\`t{3}\`trelay\`tcancel\`n" -f $out.ts, $out.tab_id, $out.tool_name, $out.cwd)
+                }
+                [System.IO.File]::AppendAllText($auditPath, $line, [System.Text.Encoding]::UTF8)
+                $decided = $true
+                break
+            }
+            Start-Sleep -Milliseconds 100
+        }
+        if (-not $decided) {
+            Remove-Item -Force $reqFile -ErrorAction SilentlyContinue
+            $line = ("{0}\`t{1}\`t{2}\`t{3}\`trelay\`ttimeout\`n" -f $out.ts, $out.tab_id, $out.tool_name, $out.cwd)
+            [System.IO.File]::AppendAllText($auditPath, $line, [System.Text.Encoding]::UTF8)
+        }
     }
 }
 
-$outPath = Join-Path $stateDir "$tabId.log"
-
-# Append one NDJSON record. See HANDLER_SH for the rationale (single-file
-# overwrite + fs.watch coalescing lost fast event pairs). NTFS does not give
-# the POSIX-style O_APPEND atomicity guarantee, but System.IO.File.AppendAllText
-# opens with FILE_APPEND_DATA which serializes appends at the OS level for
-# small writes — and concurrent Claude handler instances for the same tab are
-# rare enough (Claude runs hooks async per event, not per turn) that the
-# residual interleave risk is acceptable. If it ever bites us, switch to a
-# named mutex.
-$line = ($out | ConvertTo-Json -Compress) + "\`n"
-[System.IO.File]::AppendAllText($outPath, $line, [System.Text.Encoding]::UTF8)
+# Per-tab .log already written above; nothing else to do.
 exit 0
 `
 
@@ -330,6 +509,10 @@ export class HookRuntimeService {
     readonly root = path.join(os.homedir(), '.glanceterm')
     /** Per-tab status files written by the handler script. */
     readonly stateDir = path.join(this.root, 'hooks')
+    /** Permission-relay request/decision files. Pre-created in doEnsure()
+     *  so the hook handler's first \`mkdir -p\` is a no-op; same dir is
+     *  also fs.watched by tabby-plugin-mobile-bridge's PermissionRelayService. */
+    readonly permissionsDir = path.join(this.root, 'permissions')
     /** Where the handler scripts live (we write BOTH so a user dragging the
      *  home folder between platforms keeps working). */
     readonly handlerDir = path.join(this.root, 'handlers')
@@ -377,6 +560,7 @@ export class HookRuntimeService {
     private async doEnsure (): Promise<void> {
         await fs.mkdir(this.stateDir, { recursive: true })
         await fs.mkdir(this.handlerDir, { recursive: true })
+        await fs.mkdir(this.permissionsDir, { recursive: true })
 
         // Write BOTH scripts on every platform — cheap, and means the user
         // copying their home dir between machines keeps working.

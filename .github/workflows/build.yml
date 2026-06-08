@@ -101,14 +101,13 @@ jobs:
         ARCH: ${{matrix.arch}}
         # DEBUG: electron-builder,electron-builder:*
 
-    - name: Upload symbols
-      run: |
-        sudo npm install -g @sentry/cli --unsafe-perm
-        ./scripts/sentry-upload.mjs
-      env:
-        SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-        SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-        SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+    # Upstream Tabby ran a `sentry-cli upload-dif` + sourcemap upload
+    # step here, gated on SENTRY_AUTH_TOKEN. GlanceTerm has no Sentry
+    # project (and the renderer no longer initialises Sentry — see
+    # `app/lib/sentry.ts`), so the step is dropped. Restore it when a
+    # GlanceTerm Sentry project is set up; until then leaving the step
+    # in would silently push debug symbols to upstream Tabby's account
+    # if a CI maintainer ever copy-pasted Tabby's secret values.
 
     - name: Package artifacts
       run: |
@@ -239,15 +238,7 @@ jobs:
       run: zsh -c 'tar czf tabby-web.tar.gz (tabby-*|web)/dist'
       if: matrix.build-arch == 'x64'
 
-    - name: Upload symbols (amd64 only)
-      run: |
-        sudo npm install -g @sentry/cli --unsafe-perm
-        ./scripts/sentry-upload.mjs
-      if: matrix.build-arch == 'x64'
-      env:
-        SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-        SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-        SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+    # Upload symbols (amd64) — dropped, see the macOS job's note above.
 
     - name: Upload packages to packagecloud.io
       uses: TykTechnologies/packagecloud-action@7add92bc6a06914be404cf7fa00a6ccb302e6ac5 # main
@@ -447,14 +438,7 @@ jobs:
         SM_LOG_LEVEL: TRACE
         # DEBUG: electron-builder,electron-builder:*
 
-    - name: Upload symbols
-      run: |
-        npm install @sentry/cli
-        node scripts/sentry-upload.mjs
-      env:
-        SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
-        SENTRY_ORG: ${{ secrets.SENTRY_ORG }}
-        SENTRY_PROJECT: ${{ secrets.SENTRY_PROJECT }}
+    # Upload symbols (Windows) — dropped, see the macOS job's note above.
 
     - name: Package artifacts
       run: |

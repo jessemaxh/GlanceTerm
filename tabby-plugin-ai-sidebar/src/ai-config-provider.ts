@@ -55,17 +55,25 @@ export class AiSidebarConfigProvider extends ConfigProvider {
             autoResumeAgents: true,
             // Per-cwd record of the re-runnable command to launch the AI
             // tool that was running there at quit time (or, more precisely,
-            // "last observed alive there during the last session"). Value
-            // is the command to type into the restored shell, with flags
-            // preserved — e.g. `claude --resume`, `codex --model gpt-5`.
-            // Captured every TabMonitor tick that sees an aiTool by
-            // reducing the raw `ps` cmdline (which may include the node
-            // interpreter and absolute paths) to a portable invocation.
-            // Deleted when the user is observed quitting the agent
-            // (had-agent → no-agent transition on the same outer tab).
-            // Map shape, not a per-tab list, because cwd is the only
-            // stable identifier across restarts.
-            autoResumeCommandByCwd: {} as Record<string, string>,
+            // "last observed alive there during the last session"), plus
+            // the COUNT of distinct outer tabs at that cwd that had an
+            // agent. Command is the line typed into the restored shell
+            // with flags preserved — e.g. `claude --resume`,
+            // `codex --model gpt-5`. Count gates how many restored tabs
+            // sharing the same cwd actually get the relaunch on next
+            // start: 3 tabs in /repo with only 1 having had claude
+            // resume claude exactly once, not three times. Captured
+            // every TabMonitor tick that sees an aiTool by reducing the
+            // raw `ps` cmdline (which may include the node interpreter
+            // and absolute paths) to a portable invocation. Decremented
+            // when the user is observed quitting the agent in one of
+            // the tabs (had-agent → no-agent transition); fully
+            // deleted when the count reaches 0. Map keyed by cwd, not
+            // per-tab, because cwd is the only stable identifier
+            // across restarts. Reads also accept the legacy bare-
+            // string shape from pre-fix installs — see
+            // `parsePersistedEntry`.
+            autoResumeCommandByCwd: {} as Record<string, string | { command: string; count: number }>,
         },
     }
 

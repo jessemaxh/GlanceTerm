@@ -5,14 +5,29 @@ import * as os from 'os'
 
 import { AppService, BaseTabComponent, ConfigService, MenuItemOptions, NotificationsService, PlatformService } from 'tabby-core'
 
-import { TabMonitor, TabState } from './tab-monitor'
+import { TabMonitor, TabState, TabStatus } from './tab-monitor'
 import { UnreadService } from './unread.service'
 import { ScreenshotService } from './screenshot/screenshot.service'
 import { ScreenshotPasteService } from './screenshot/paste.service'
 import { SplitShellService } from './split-shell.service'
 import { AutoApproveService } from './auto-approve.service'
+import { SidebarSettingsRegistry, SidebarSettingsSection } from './sidebar-settings-registry.service'
 
-type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
+/**
+ * Pill filter ids — a strict subset of TabStatus (`'no_ai'` is excluded
+ * since "shell" tabs don't appear in the AI sidebar by default) plus a
+ * sentinel `'all'` for the disabled-filter state. Reuses TabStatus values
+ * where they overlap so a future TabStatus rename propagates without a
+ * silent drift between the filter pill, sidebar row, and footer counts.
+ */
+const FilterId = {
+    All: 'all',
+    NeedsPermission: TabStatus.NeedsPermission,
+    Done: TabStatus.Done,
+    Working: TabStatus.Working,
+    Idle: TabStatus.Idle,
+} as const
+type FilterId = typeof FilterId[keyof typeof FilterId]
 
 /**
  * The actual sidebar content. NOT a BaseTabComponent — this is a plain
@@ -68,7 +83,7 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             </div>
 
             <div *ngIf="states.length > 0 && visibleStates.length === 0" class="sb-empty filtered">
-                <ng-container *ngIf="hideTabsWithoutAgent && filterMode === 'all'; else regularFilterEmpty">
+                <ng-container *ngIf="hideTabsWithoutAgent && filterMode === FilterId.All; else regularFilterEmpty">
                     <div class="et">All hidden</div>
                     <div class="es">Every open tab is a plain shell. Uncheck "Hide tabs without an AI agent" in settings to see them.</div>
                 </ng-container>
@@ -101,20 +116,21 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
                                       stroke="currentColor" stroke-width="0.6" stroke-linejoin="round"/>
                             </svg>
                             <span class="primary" [attr.title]="s.cwd || s.title">{{ s.cwd ? folderName(s.cwd) : s.title }}</span>
-                            <span *ngIf="effStatus(s) === 'needs_permission'" class="attn" aria-hidden="true"></span>
+                            <span *ngIf="effStatus(s) === TabStatus.NeedsPermission" class="attn" aria-hidden="true"></span>
                         </div>
                         <div class="line2">
                             <span *ngIf="s.aiTool" class="tag" [attr.data-tool]="s.aiTool">{{ toolTag(s.aiTool) }}</span>
                             <span class="status" [attr.data-status]="effStatus(s)">{{ statusLabel(s) }}</span>
                             <span *ngIf="s.subagentCount > 0" class="micro accent">{{ s.subagentCount }} {{ s.subagentCount === 1 ? 'agent' : 'agents' }}</span>
-                            <span *ngIf="s.backgroundJobCount > 0" class="micro accent" [title]="bgJobTitle(s)">{{ s.backgroundJobCount }} bg</span>
+                            <span *ngIf="s.backgroundJobCount > 0" class="micro accent" [title]="bgJobTitle(s)">{{ s.backgroundJobCount }} {{ bgLabel(s) }}</span>
+                            <span *ngIf="s.monitorCount > 0" class="micro accent" [title]="monitorTitle(s)">{{ s.monitorCount }} monitor</span>
                         </div>
-                        <div *ngIf="s.cwd && effStatus(s) !== 'needs_permission'" class="line3">
+                        <div *ngIf="s.cwd && effStatus(s) !== TabStatus.NeedsPermission" class="line3">
                             <span class="path-sub" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
                         </div>
                     </div>
                     <div class="meta">
-                        <span class="age" *ngIf="effStatus(s) !== 'no_ai' && s.lastActiveMs !== null">{{ ageStr(s.lastActiveMs) }}</span>
+                        <span class="age" *ngIf="effStatus(s) !== TabStatus.NoAi && s.lastActiveMs !== null">{{ ageStr(s.lastActiveMs) }}</span>
                     </div>
                 </div>
             </div>
@@ -260,6 +276,26 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
                         </div>
                         <input type="checkbox" class="gt-switch" [checked]="hideTabsWithoutAgent" (change)="toggleHideTabsWithoutAgent()" aria-label="Hide tabs without an AI agent"/>
                     </label>
+
+                    <!-- Plugin-contributed sections (currently:
+                         tabby-plugin-mobile-bridge). Rendered as a row with
+                         a "Configure…" button rather than inlined because
+                         the contributed UI is too large for an at-a-glance
+                         toggle — opening a sub-modal keeps the gear sheet
+                         compact. -->
+                    <div *ngFor="let s of (sidebarSettingsRegistry.sections$ | async)"
+                         class="gt-setting-row gt-setting-row-action"
+                         (click)="openSidebarSettingsSection(s)">
+                        <div class="gt-setting-text">
+                            <div class="gt-setting-title">{{ s.title }}</div>
+                            <div class="gt-setting-desc" *ngIf="s.description">{{ s.description }}</div>
+                        </div>
+                        <button type="button" class="gt-section-btn"
+                                (click)="openSidebarSettingsSection(s); $event.stopPropagation()"
+                                [attr.aria-label]="'Open ' + s.title + ' settings'">
+                            Configure…
+                        </button>
+                    </div>
                 </div>
             </div>
         </ng-template>
@@ -1119,6 +1155,32 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
             outline-offset: 2px;
         }
 
+        /* "Configure…" button for plugin-contributed settings sections.
+           Restrained — same hierarchy as the toggle switches so the row
+           reads as one of the existing settings, just with a sub-modal
+           rather than an inline control. */
+        .gt-section-btn {
+            flex: none;
+            margin-top: 2px;
+            padding: 6px 12px;
+            font-size: 12.5px;
+            font-weight: 500;
+            color: #E7E9EC;
+            background: rgba(255, 255, 255, 0.06);
+            border: 1px solid rgba(255, 255, 255, 0.10);
+            border-radius: 6px;
+            cursor: pointer;
+            transition: background 0.12s ease, border-color 0.12s ease;
+        }
+        .gt-section-btn:hover {
+            background: rgba(255, 170, 85, 0.14);
+            border-color: rgba(255, 170, 85, 0.45);
+        }
+        .gt-section-btn:focus-visible {
+            outline: 2px solid #FFAA55;
+            outline-offset: 2px;
+        }
+
         @media (prefers-reduced-motion: reduce) {
             .dot[data-status="working"],
             .attn { animation: none !important; }
@@ -1127,6 +1189,15 @@ type FilterId = 'all' | 'done' | 'needs_permission' | 'working' | 'idle'
     `],
 })
 export class AiSidebarComponent implements OnInit, OnDestroy {
+    /** Re-exposed for the template so `*ngIf="effStatus(s) === TabStatus.NeedsPermission"`
+     *  works without falling back to magic strings. Angular templates can
+     *  only reach component-class members, not module-scope imports. */
+    readonly TabStatus = TabStatus
+    /** Same shape as the TabStatus re-export — lets template bindings on
+     *  the filter pills (e.g. `filterMode === FilterId.All`) avoid magic
+     *  strings on the Angular side too. */
+    readonly FilterId = FilterId
+
     states: TabState[] = []
     /**
      * True when the focused inner tab is one of our recognised AI agents
@@ -1137,16 +1208,16 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      * to the shell side of the split.
      */
     activeIsAi = false
-    filterMode: FilterId = 'all'
+    filterMode: FilterId = FilterId.All
     /** Pill definitions — order is render order, left → right. Mirrors the
      *  attention-priority sort: blocking-on-user first, then "your turn",
      *  then the non-attention buckets in their natural reading order. */
     readonly FILTERS: ReadonlyArray<{ id: FilterId; label: string }> = [
-        { id: 'all',              label: 'All' },
-        { id: 'needs_permission', label: 'Needs You' },
-        { id: 'done',             label: 'Done' },
-        { id: 'working',          label: 'Working' },
-        { id: 'idle',             label: 'Idle' },
+        { id: FilterId.All,              label: 'All' },
+        { id: FilterId.NeedsPermission,  label: 'Needs You' },
+        { id: FilterId.Done,             label: 'Done' },
+        { id: FilterId.Working,          label: 'Working' },
+        { id: FilterId.Idle,             label: 'Idle' },
     ]
     private sub?: Subscription
     private activeTabSub?: Subscription
@@ -1158,30 +1229,6 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     screenshotMenuOpen = false
     @ViewChild('screenshotSplit', { static: false }) private screenshotSplitEl?: ElementRef<HTMLElement>
     @ViewChild('settingsModalTpl', { static: false }) private settingsModalTpl?: TemplateRef<unknown>
-
-    /**
-     * Sort-position pin for the just-clicked row. When you click a `done` row,
-     * the unread flag clears (focus → markRead) and effStatus flips done →
-     * idle in the same tick — that demotes the row from sort-rank 0 to 3, so
-     * the row teleports out from under your cursor while its dot recolours.
-     * Disorienting: you can't tell what you just clicked.
-     *
-     * The fix: hold the row's pre-click sort rank for PIN_MS so the row
-     * doesn't move; the dot still recolours (with a CSS transition) so the
-     * "ack, I saw your click" feedback survives. After PIN_MS the natural
-     * sort takes over and the row slides to its new bucket.
-     *
-     * The pin is dropped early when the row's raw `TabState.status` changes
-     * (a real external event from the monitor) so genuinely new state is
-     * always immediately visible. Only the done→idle flip-on-focus, which
-     * leaves raw status as `'idle'`, gets suppressed.
-     *
-     * Keyed by innerTab (same key visibleStates groups by) so split panes
-     * stay independent.
-     */
-    private pinnedRank = new Map<BaseTabComponent, number>()
-    private pinnedRawStatusAtPin = new Map<BaseTabComponent, TabState['status']>()
-    private readonly PIN_MS = 2000
 
     /**
      * Per-tab user-set pins. Keyed by the inner `BaseTabComponent` (the
@@ -1203,34 +1250,6 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      */
     private pinnedInnerTabs = new Set<BaseTabComponent>()
 
-    /**
-     * Two attention buckets float to the top — that's the whole point of the
-     * sidebar — and *everything else stays in Tabby's top-bar order*.
-     *
-     *   0. needs_permission — AI is blocked waiting on you, fix it first
-     *   1. done             — AI finished a turn, your reply queued
-     *   2. (rest)           — working / idle / no_ai all flat: position
-     *                         tracks Tabby's tab bar, so spatial memory works
-     *
-     * Why not put `working` above `idle` like we used to? The dot already
-     * encodes "this one is alive" (green breathing pulse) — encoding it a
-     * *second* time in vertical position just made the list re-sort every
-     * time a tab transitioned working→idle or vice versa, with zero
-     * information gain. Spatial memory > duplicate visual encoding.
-     *
-     * `no_ai` (plain shells) sits in its natural Tabby-bar position rather
-     * than being buried at the bottom — those are part of the workflow,
-     * not noise. CSS already lowers their opacity (.row[data-status="no_ai"])
-     * so they're visually de-emphasised without needing to be re-ordered.
-     */
-    private static readonly STATUS_RANK: Record<TabState['status'], number> = {
-        needs_permission: 0,
-        done:             1,
-        working:          2,
-        idle:             2,
-        no_ai:            2,
-    }
-
     constructor (
         public app: AppService,
         public monitor: TabMonitor,
@@ -1244,6 +1263,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         private zone: NgZone,
         private autoApprove: AutoApproveService,
         private ngbModal: NgbModal,
+        public sidebarSettingsRegistry: SidebarSettingsRegistry,
     ) {}
 
     /**
@@ -1355,6 +1375,21 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     openSettingsModal (): void {
         if (!this.settingsModalTpl) return
         this.ngbModal.open(this.settingsModalTpl, { centered: true, size: 'md' })
+    }
+
+    /**
+     * Open a plugin-contributed settings section (e.g. Mobile Bridge) in a
+     * separate NgbModal. The section's component is whatever the plugin
+     * registered via SidebarSettingsRegistry; Angular's component factory
+     * resolves it as long as the contributing module is loaded (which it
+     * always is here — both plugins are bundled at app startup).
+     *
+     * Size `lg` rather than `md` because contributed UIs tend to have
+     * forms / lists (Mobile Bridge has both) that wrap awkwardly at the
+     * gear-modal's narrow width.
+     */
+    openSidebarSettingsSection (section: SidebarSettingsSection): void {
+        this.ngbModal.open(section.component, { centered: true, size: 'lg' })
     }
 
     /**
@@ -1545,7 +1580,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      * conditional. Memoising would risk drift when the unread set changes.
      */
     effStatus (s: TabState): TabState['status'] {
-        if (s.status === 'idle' && this.unread.isUnread(s.innerTab)) return 'done'
+        if (s.status === TabStatus.Idle && this.unread.isUnread(s.innerTab)) return TabStatus.Done
         return s.status
     }
 
@@ -1562,27 +1597,21 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         const focusedInner = focusedInnerOf(active)
         const match = this.states.find(s => s.outerTab === active && s.innerTab === focusedInner)
             ?? this.states.find(s => s.outerTab === active)
-        this.activeIsAi = !!(match && match.aiTool && this.effStatus(match) !== 'no_ai')
+        this.activeIsAi = !!(match && match.aiTool && this.effStatus(match) !== TabStatus.NoAi)
     }
 
     /**
-     * Tabs we render. Only the two "you have to act" states float to the top;
-     * everything else mirrors Tabby's top-bar tab order so spatial memory
-     * works (the 3rd row from top stays the 3rd row from top as long as no
-     * attention event interrupts).
+     * Tabs we render. Slack-mode layout — rows mirror Tabby's tab-bar
+     * order one-to-one, no attention buckets float up. The 3rd row from
+     * top stays the 3rd row from top, period. Status comes through dot
+     * colour, the per-row `data-status` attribute, and the done-state
+     * red `!` (held until viewed via UnreadService) — none of those
+     * reorder the list.
      *
      * Two-stage layout:
-     *   1. Sort PRIMARIES (one per outer tab) by (pinnedRank ?? STATUS_RANK,
-     *      tabIdx).
-     *   2. Glue each primary's SUBORDINATES (other leaves of the same outer
-     *      tab, in their split-pane order) directly underneath. Subordinates
-     *      never participate in status-rank sorting — a `working` shell pane
-     *      in an idle AI tab still rides under the idle AI, not into the
-     *      Working bucket.
-     *
-     * Within any rank tier we fall back to Tabby's tab-bar order — STABLE,
-     * so tabs only move when their attention status changes, not when their
-     * elapsed timer ticks. See STATUS_RANK doc for the bucket layout.
+     *   1. Sort PRIMARIES (one per outer tab) by Tabby's tab-bar index.
+     *   2. Glue each primary's SUBORDINATES (other leaves of the same
+     *      outer tab, in their split-pane order) directly underneath.
      *
      * Filtering: a primary survives the filter when itself OR any of its
      * subordinates matches the chosen status. This keeps the filtered view
@@ -1591,25 +1620,19 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      * pair under the Working filter. Subordinates ride along regardless of
      * their own status so the connector bracket always points somewhere.
      *
-     * NOTE: ranking and filtering both go through `effStatus`, not the raw
-     * `s.status` from the monitor. The monitor never produces `'done'` — it's
-     * derived from raw `idle + isUnread`.
+     * NOTE: filtering goes through `effStatus`, not the raw `s.status` from
+     * the monitor. The monitor never produces `'done'` — it's derived from
+     * raw `idle + isUnread`.
      */
     get visibleStates (): TabState[] {
-        const rank = AiSidebarComponent.STATUS_RANK
+        // Slack-mode sort: rows always follow Tabby's tab-bar order. Status
+        // (needs_permission, done, working) is conveyed by dot colour and
+        // the per-row `data-status` attribute, never by position — spatial
+        // memory works because row N stays at row N. The "Needs You" pill
+        // is the safety valve when the user wants to see only urgent rows.
         const tabIdx = (s: TabState): number => {
             const i = this.app.tabs.indexOf(s.outerTab)
             return i < 0 ? Number.MAX_SAFE_INTEGER : i
-        }
-        const rankOf = (s: TabState): number => {
-            // User-driven pin wins over everything else — even the click-pin
-            // and even needs_permission (the user explicitly asked for this
-            // row to live at the top; respect it). Negative so it slots
-            // above STATUS_RANK[needs_permission] = 0.
-            if (this.isPinned(s)) return -1
-            const pinned = this.pinnedRank.get(s.innerTab)
-            if (pinned !== undefined) return pinned
-            return rank[this.effStatus(s)] ?? 99
         }
         // Group by outer tab so we can pick a primary per group AND ride
         // subordinates along under their primary's filter decision.
@@ -1622,7 +1645,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         const fm = this.filterMode
         const primaryOf = (group: TabState[]): TabState => this.pickPrimary(group)
         const groupMatches = (group: TabState[]): boolean =>
-            fm === 'all' || group.some(s => this.effStatus(s) === fm)
+            fm === FilterId.All || group.some(s => this.effStatus(s) === fm)
         const visiblePrimaries: TabState[] = []
         const subsByOuter = new Map<BaseTabComponent, TabState[]>()
         for (const [outer, group] of byOuter) {
@@ -1633,11 +1656,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
             const subs = group.filter(s => s !== p)
             if (subs.length > 0) subsByOuter.set(outer, subs)
         }
-        visiblePrimaries.sort((a, b) => {
-            const dr = rankOf(a) - rankOf(b)
-            if (dr !== 0) return dr
-            return tabIdx(a) - tabIdx(b)
-        })
+        visiblePrimaries.sort((a, b) => tabIdx(a) - tabIdx(b))
         const out: TabState[] = []
         for (const p of visiblePrimaries) {
             out.push(p)
@@ -1660,7 +1679,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      * row below it.
      */
     private pickPrimary (group: TabState[]): TabState {
-        return group.find(s => this.effStatus(s) !== 'no_ai') ?? group[0]
+        return group.find(s => this.effStatus(s) !== TabStatus.NoAi) ?? group[0]
     }
 
     /**
@@ -1684,7 +1703,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     private groupPassesNoAiFilter (group: TabState[], primary: TabState): boolean {
         if (!this.hideTabsWithoutAgent) return true
         if (group.some(s => this.isPinned(s))) return true
-        return this.effStatus(primary) !== 'no_ai'
+        return this.effStatus(primary) !== TabStatus.NoAi
     }
 
     /**
@@ -1749,24 +1768,9 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      * also get cleared.
      */
     private dropStalePins (states: TabState[]): void {
-        // Drop click-pins on rows whose raw status has changed (the original
-        // signal for "the click feedback isn't the latest story anymore")
-        // or rows that have disappeared entirely (tab closed).
-        if (this.pinnedRank.size > 0) {
-            const byInner = new Map(states.map(s => [s.innerTab, s.status]))
-            for (const innerTab of [...this.pinnedRank.keys()]) {
-                const nowStatus = byInner.get(innerTab)
-                const pinStatus = this.pinnedRawStatusAtPin.get(innerTab)
-                if (nowStatus === undefined || nowStatus !== pinStatus) {
-                    this.pinnedRank.delete(innerTab)
-                    this.pinnedRawStatusAtPin.delete(innerTab)
-                }
-            }
-        }
-        // Drop pin entries for tabs that have disappeared from the live
-        // state list (close removes pin). No startup-grace gate needed —
-        // pins are in-memory only, so a fresh process starts with the
-        // Set empty and there's nothing to over-eagerly clear.
+        // Slack-mode dropped the click-pin map entirely (PIN_MS / pinnedRank
+        // / pinnedRawStatusAtPin all deleted). The only thing left to GC is
+        // the user-driven pin set when a tab closes — handled below.
         this.prunePinnedTabs(states)
     }
 
@@ -1784,9 +1788,9 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         }
     }
 
-    /** Set or toggle the filter. Clicking the active pill resets to 'all'. */
+    /** Set or toggle the filter. Clicking the active pill resets to All. */
     setFilter (id: FilterId): void {
-        this.filterMode = this.filterMode === id && id !== 'all' ? 'all' : id
+        this.filterMode = this.filterMode === id && id !== FilterId.All ? FilterId.All : id
     }
 
     /** Pill counter — `All` matches `visibleStates.length` exactly (every leaf
@@ -1800,7 +1804,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      *  that the pill number and the rendered row count never disagree, even
      *  when a passing SplitTab contributes a primary plus N subordinate rows. */
     countFor (id: FilterId): number {
-        if (id === 'all') {
+        if (id === FilterId.All) {
             if (!this.hideTabsWithoutAgent) return this.states.length
             // Single pass: group by outer tab, sum group.length for every
             // group that passes the no_ai filter. Counting group.length
@@ -1824,28 +1828,28 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
 
     filterLabel (): string {
         switch (this.filterMode) {
-            case 'done':             return 'finished tabs you haven’t opened'
-            case 'needs_permission': return 'tabs need you right now'
-            case 'working':          return 'working tabs'
-            case 'idle':             return 'idle tabs'
-            default:                 return 'tabs'
+            case FilterId.Done:             return 'finished tabs you haven’t opened'
+            case FilterId.NeedsPermission:  return 'tabs need you right now'
+            case FilterId.Working:          return 'working tabs'
+            case FilterId.Idle:             return 'idle tabs'
+            default:                        return 'tabs'
         }
     }
 
     get countWorking (): number {
-        return this.states.filter(s => this.effStatus(s) === 'working').length
+        return this.states.filter(s => this.effStatus(s) === TabStatus.Working).length
     }
 
     get countIdle (): number {
-        return this.states.filter(s => this.effStatus(s) === 'idle').length
+        return this.states.filter(s => this.effStatus(s) === TabStatus.Idle).length
     }
 
     get countAttn (): number {
-        return this.states.filter(s => this.effStatus(s) === 'needs_permission').length
+        return this.states.filter(s => this.effStatus(s) === TabStatus.NeedsPermission).length
     }
 
     get countDone (): number {
-        return this.states.filter(s => this.effStatus(s) === 'done').length
+        return this.states.filter(s => this.effStatus(s) === TabStatus.Done).length
     }
 
     trackByTab = (_: number, s: TabState): any => s.innerTab
@@ -1863,23 +1867,12 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     }
 
     onSelect (s: TabState): void {
-        // Freeze the row's sort position BEFORE focus runs, so the unread
-        // flip triggered by selectTab doesn't yank the row out from under
-        // the click. See `pinnedRank` doc for the full rationale. Subordinate
-        // rows don't participate in status-rank sort (visibleStates only
-        // sorts primaries), so we skip the pin for them — it would be a
-        // wasted timer + map write.
-        if (!this.isSubordinate(s)) {
-            const preClickRank = AiSidebarComponent.STATUS_RANK[this.effStatus(s)] ?? 99
-            this.pinnedRank.set(s.innerTab, preClickRank)
-            this.pinnedRawStatusAtPin.set(s.innerTab, s.status)
-            setTimeout(() => {
-                this.pinnedRank.delete(s.innerTab)
-                this.pinnedRawStatusAtPin.delete(s.innerTab)
-                // setTimeout is zone-patched → CD picks this up automatically.
-            }, this.PIN_MS)
-        }
-
+        // Slack-mode: row position is purely tab-bar order, never moves on
+        // state change. So no click-pin is needed — the done→idle flip
+        // triggered by focus only changes the dot colour, not the row's
+        // index in the list. Removed the pinnedRank freeze that used to
+        // shield against the teleport when the previous sort had `done`
+        // floating above `idle`.
         this.app.selectTab(s.outerTab)
         // If the matched leaf is inside a split, also focus that specific pane.
         if (s.outerTab !== s.innerTab && typeof (s.outerTab as any).focus === 'function') {
@@ -1910,12 +1903,12 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
 
     statusLabel (s: TabState): string {
         switch (this.effStatus(s)) {
-            case 'working':          return 'working'
-            case 'needs_permission': return 'needs you'
-            case 'done':             return 'done'
-            case 'idle':             return 'ready'
-            case 'no_ai':            return 'shell'
-            default:                 return s.status
+            case TabStatus.Working:          return 'working'
+            case TabStatus.NeedsPermission:  return 'needs you'
+            case TabStatus.Done:             return 'done'
+            case TabStatus.Idle:             return 'ready'
+            case TabStatus.NoAi:             return 'shell'
+            default:                         return s.status
         }
     }
 
@@ -1960,6 +1953,26 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         const n = s.backgroundJobCount
         const noun = n === 1 ? 'job' : 'jobs'
         return `${n} background ${noun} running under this agent (immediate child processes of the agent's PID that have persisted across polls — typically backgrounded shells started via the agent's own bg-task mechanism).`
+    }
+
+    /**
+     * Label for the bg-job badge. Claude reports its own count as "shell"
+     * (each is a confirmed PreToolUse(Bash, run_in_background:true)
+     * spawn — the hook layer guarantees that semantic), so the sidebar
+     * matches that wording to mirror Claude's bottom-bar
+     * "N shell, M monitor" pair. Non-Claude agents fall back to the
+     * generic "bg" — those counts come from our persistence-time
+     * heuristic and might be any long-lived child process, not
+     * necessarily a shell.
+     */
+    bgLabel (s: TabState): string {
+        return s.aiTool === 'claude' ? 'shell' : 'bg'
+    }
+
+    monitorTitle (s: TabState): string {
+        const n = s.monitorCount
+        const noun = n === 1 ? 'task' : 'tasks'
+        return `${n} Monitor ${noun} active (Claude's Monitor tool — started via PostToolUse(Monitor), retired on the matching PreToolUse(TaskStop)). Reset on SessionStart/SessionEnd; a monitor that exits via its own until-condition without a TaskStop will linger here until then.`
     }
 
     /**

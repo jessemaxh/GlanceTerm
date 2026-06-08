@@ -52,6 +52,12 @@ export interface TraceEvent {
     /** Extracted from PostToolUse(Agent).tool_response.agentId in the
      *  real handler. Empty / missing on every other event. */
     spawn_agent_id?: string
+    /** Extracted from PostToolUse(Monitor).tool_response.{taskId,task_id}
+     *  in the real handler. Empty / missing on every other event. */
+    monitor_task_id?: string
+    /** Extracted from PreToolUse(TaskStop).tool_input.{task_id,taskId}
+     *  in the real handler. Empty / missing on every other event. */
+    stop_task_id?: string
 }
 
 /**
@@ -128,6 +134,10 @@ export class ReplayHarness {
 
     getSubagentInFlight (tabId: string): number {
         return this.watcher.getSubagentInFlight(tabId)
+    }
+
+    getMonitorInFlight (tabId: string): number {
+        return this.watcher.getMonitorInFlight(tabId)
     }
 
     getStatus (tabId: string): HookSnapshot | null {

@@ -10,12 +10,19 @@
 set -euo pipefail
 FORK="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PLUGIN="$FORK/tabby-plugin-ai-sidebar"
+MOBILE_BRIDGE_PKG="$FORK/tabby-plugin-mobile-bridge"
 TERMINAL_PKG="$FORK/tabby-terminal"
 USER_DATA="$HOME/Library/Application Support/GlanceTerm-dev"
 
 # Rebuild the plugin (fast, idempotent).
 echo "→ building plugin…"
 (cd "$PLUGIN" && npm run build) >/dev/null
+
+# Build mobile-bridge — its dist/ is gitignored and the plugin is registered
+# in builtin-plugins, so a missing dist/index.js makes Angular bootstrap fail
+# and the renderer wedges on the splash logo. Cheap, idempotent.
+echo "→ building mobile-bridge plugin…"
+(cd "$MOBILE_BRIDGE_PKG" && ../node_modules/.bin/webpack) >/dev/null 2>&1
 
 # Rebuild tabby-terminal too — we vendored an `IMAGE_PASTE_HOOK` extension
 # point into BaseTerminalTabComponent (see tabby-terminal/src/api/), and a

@@ -12,7 +12,7 @@
 			<key>NSMenuItem</key>
 			<dict>
 				<key>default</key>
-				<string>Open Tabby here</string>
+				<string>Paste path into GlanceTerm</string>
 			</dict>
 			<key>NSMessage</key>
 			<string>runWorkflowAsService</string>

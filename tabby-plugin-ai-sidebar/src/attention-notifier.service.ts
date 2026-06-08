@@ -6,7 +6,18 @@ import { AppService, ConfigService } from 'tabby-core'
 import { TabMonitor, TabState, TabStatus } from './tab-monitor'
 import { UnreadService } from './unread.service'
 
-type NotifyKind = 'permission' | 'ready'
+/**
+ * Reasons we'd fire an attention signal. The underlying values are still
+ * the same strings the old code used as inline literals — the named
+ * constants exist for readability at the call sites, not to add a layer of
+ * indirection over the type. Use `NotifyKind.Permission` / `NotifyKind.Ready`
+ * everywhere; the type alias keeps function signatures concise.
+ */
+export const NotifyKind = {
+    Permission: 'permission',
+    Ready: 'ready',
+} as const
+export type NotifyKind = typeof NotifyKind[keyof typeof NotifyKind]
 
 /**
  * Fires attention signals when an AI tab transitions into a state that
@@ -36,6 +47,10 @@ type NotifyKind = 'permission' | 'ready'
  * needs_permission row is high-signal on its own, so the suppression
  * rule there is unchanged: only the OS notification fires, gated on
  * not-looking-here, no separate badge/sound channel for this kind.
+ * Additionally suppressed entirely when `ai.autoApprovePermissions`
+ * is on — the hook handler's sync-stdout `allow` reply has already
+ * resolved the prompt by the time we'd notify, so a ding here just
+ * trains the user to ignore the bell. See `fire()` for the gate.
  *
  * Tabs with non-AI status (`no_ai`) never notify.
  */
@@ -100,8 +115,8 @@ export class AttentionNotifierService implements OnDestroy {
             if (prev === s.status) continue
 
             // Permission state: fire immediately.
-            if (s.status === 'needs_permission' && prev !== 'needs_permission') {
-                this.fire(s, 'permission')
+            if (s.status === TabStatus.NeedsPermission && prev !== TabStatus.NeedsPermission) {
+                this.fire(s, NotifyKind.Permission)
                 continue
             }
 
@@ -109,8 +124,8 @@ export class AttentionNotifierService implements OnDestroy {
             // done?" debounce lives upstream in TabMonitor's idle-stability
             // gate now, so any working → idle we see here has already been
             // stable in the hook layer for the gate duration.
-            if (s.status === 'idle' && prev === 'working') {
-                this.fire(s, 'ready')
+            if (s.status === TabStatus.Idle && prev === TabStatus.Working) {
+                this.fire(s, NotifyKind.Ready)
             }
         }
 
@@ -136,13 +151,29 @@ export class AttentionNotifierService implements OnDestroy {
         // dead tab is just misleading (click → selectTab no-op) so drop it.
         if (!this.isStillLive(s)) return
 
+        // Auto-approve suppression for permission events. When
+        // `ai.autoApprovePermissions` is on, the hook handler's
+        // sync-stdout `decision: allow` reply has ALREADY granted the
+        // prompt before this notifier even runs — Claude's `working →
+        // needs_permission → working` is a transient flicker, not a
+        // genuine "user, please act" moment. Firing the OS notification
+        // (which carries silent:false ⇒ system ding on most platforms)
+        // would alert the user about something already handled,
+        // training them to ignore the bell. So we drop the whole
+        // notification — no popup, no sound — for permission events
+        // while auto-approve is enabled. Ready / done notifications
+        // are unaffected.
+        if (kind === NotifyKind.Permission && this.config.store?.ai?.autoApprovePermissions === true) {
+            return
+        }
+
         // Badge + chime fire BEFORE the looking-here gate — see class doc.
         // Even if the user is at the focused tab right now, they could be
         // mid-step-away; the engagement-based clear in UnreadService is the
         // single source of truth for "user has seen this", and that fires
         // on real terminal interaction (scroll / type / click in body), not
         // on activeTab + windowFocused alone.
-        if (kind === 'ready') {
+        if (kind === NotifyKind.Ready) {
             this.unread.markReady(s.innerTab)
             // Chime gates on its own throttle (CHIME_THROTTLE_MS) and the
             // user-controlled `ai.soundOnReady` toggle — setting toggle is
@@ -169,10 +200,10 @@ export class AttentionNotifierService implements OnDestroy {
         if (now - last < this.COOLDOWN_MS) return
         this.lastFiredAt.set(key, now)
 
-        const title = kind === 'permission'
+        const title = kind === NotifyKind.Permission
             ? 'GlanceTerm — agent needs you'
             : 'GlanceTerm — agent ready'
-        const subline = kind === 'permission'
+        const subline = kind === NotifyKind.Permission
             ? 'permission required'
             : 'ready for next prompt'
 

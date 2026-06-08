@@ -36,6 +36,10 @@ import { SplitShellService } from './split-shell.service'
 // link against. Removing or renaming requires touching every importer.
 export { TabMonitor, TabStatus } from './tab-monitor'
 export type { TabState, AiTool } from './tab-monitor'
+export { SidebarSettingsRegistry } from './sidebar-settings-registry.service'
+export type { SidebarSettingsSection } from './sidebar-settings-registry.service'
+export { HookWatcherService } from './hook-watcher.service'
+export type { HookSnapshot } from './hook-watcher.service'
 
 const BASE_ICON_INNER = `
   <rect x="1" y="2" width="5" height="12" rx="1" fill="currentColor" opacity="0.85"/>

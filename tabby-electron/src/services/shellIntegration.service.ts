@@ -13,26 +13,38 @@ try {
 
 @Injectable({ providedIn: 'root' })
 export class ShellIntegrationService {
-    private automatorWorkflows = ['Open Tabby here.workflow', 'Paste path into Tabby.workflow']
+    private automatorWorkflows = ['Open GlanceTerm here.workflow', 'Paste path into GlanceTerm.workflow']
     private automatorWorkflowsLocation: string
     private automatorWorkflowsDestination: string
     private registryKeys = [
         {
-            path: 'Software\\Classes\\Directory\\Background\\shell\\Tabby',
-            value: 'Open Tabby here',
+            path: 'Software\\Classes\\Directory\\Background\\shell\\GlanceTerm',
+            value: 'Open GlanceTerm here',
             command: 'open "%V"',
         },
         {
-            path: 'SOFTWARE\\Classes\\Directory\\shell\\Tabby',
-            value: 'Open Tabby here',
+            path: 'SOFTWARE\\Classes\\Directory\\shell\\GlanceTerm',
+            value: 'Open GlanceTerm here',
             command: 'open "%V"',
         },
         {
-            path: 'Software\\Classes\\*\\shell\\Tabby',
-            value: 'Paste path into Tabby',
+            path: 'Software\\Classes\\*\\shell\\GlanceTerm',
+            value: 'Paste path into GlanceTerm',
             command: 'paste "%V"',
         },
     ]
+    /** Legacy registry / Services keys carried over from the upstream Tabby
+     *  shell-integration. Cleaned up on each install() so a user who had
+     *  Tabby installed before GlanceTerm doesn't end up with two parallel
+     *  "Open here" entries in their context menu. */
+    private legacyRegistryPaths = [
+        'Software\\Classes\\Directory\\Background\\shell\\Tabby',
+        'SOFTWARE\\Classes\\Directory\\shell\\Tabby',
+        'Software\\Classes\\*\\shell\\Tabby',
+        'Software\\Classes\\Directory\\Background\\shell\\Open Tabby here',
+        'Software\\Classes\\*\\shell\\Paste path into Tabby',
+    ]
+    private legacyAutomatorWorkflows = ['Open Tabby here.workflow', 'Paste path into Tabby.workflow']
 
     private constructor (
         private electron: ElectronService,
@@ -62,6 +74,12 @@ export class ShellIntegrationService {
     async install (): Promise<void> {
         const exe: string = process.env.PORTABLE_EXECUTABLE_FILE ?? this.electron.app.getPath('exe')
         if (this.hostApp.platform === Platform.macOS) {
+            // Sweep legacy upstream-Tabby workflow files first so a user
+            // who had Tabby's Services entries doesn't end up with two
+            // parallel "Open … here" items in their Finder right-click.
+            for (const wf of this.legacyAutomatorWorkflows) {
+                await exec(`rm -rf "${this.automatorWorkflowsDestination}/${wf}"`).catch(() => { /* ignore */ })
+            }
             for (const wf of this.automatorWorkflows) {
                 await exec(`cp -r "${this.automatorWorkflowsLocation}/${wf}" "${this.automatorWorkflowsDestination}"`)
             }
@@ -74,11 +92,13 @@ export class ShellIntegrationService {
                 wnr.setRegistryValue(wnr.HK.CU, registryKey.path + '\\command', '', wnr.REG.SZ, exe + ' ' + registryKey.command)
             }
 
-            if (wnr.getRegistryKey(wnr.HK.CU, 'Software\\Classes\\Directory\\Background\\shell\\Open Tabby here')) {
-                wnr.deleteRegistryKey(wnr.HK.CU, 'Software\\Classes\\Directory\\Background\\shell\\Open Tabby here')
-            }
-            if (wnr.getRegistryKey(wnr.HK.CU, 'Software\\Classes\\*\\shell\\Paste path into Tabby')) {
-                wnr.deleteRegistryKey(wnr.HK.CU, 'Software\\Classes\\*\\shell\\Paste path into Tabby')
+            // Sweep legacy upstream-Tabby registry entries for the same
+            // reason — avoid a duplicate "Open Tabby here" sitting next to
+            // our "Open GlanceTerm here" in Windows Explorer's context menu.
+            for (const legacy of this.legacyRegistryPaths) {
+                if (wnr.getRegistryKey(wnr.HK.CU, legacy)) {
+                    wnr.deleteRegistryKey(wnr.HK.CU, legacy)
+                }
             }
         }
     }

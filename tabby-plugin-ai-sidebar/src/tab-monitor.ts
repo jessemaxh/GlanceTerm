@@ -78,14 +78,29 @@ const BG_PERSIST_MS = 2_000
 const IDLE_STABILITY_MS = 3_000
 
 /**
- * `done` is render-derived, never emitted by hooks or this monitor. The sidebar
- * (and jumper) treat `idle` as `done` while UnreadService.isUnread() is true
+ * `Done` is render-derived, never emitted by hooks or this monitor. The sidebar
+ * (and jumper) treat `Idle` as `Done` while UnreadService.isUnread() is true
  * for the tab — i.e. the agent finished a turn and the user hasn't focused the
  * tab since. The transition done → idle ("ready") happens automatically when
  * UnreadService clears the entry on focus. Keeping it in the union lets all
  * UI-facing consumers share one TabStatus type without a separate DisplayStatus.
+ *
+ * Pattern: `as const`-frozen object + derived type. Same shape as `NotifyKind`
+ * in attention-notifier — gives every comparison site a named constant
+ * (`TabStatus.Working` instead of `'working'`) while keeping function
+ * signatures concise via the type alias. The runtime values are the
+ * stringly-typed names the hook layer + sidebar template DOM attributes use,
+ * so changing the strings here would propagate to CSS data-attribute
+ * selectors and persisted snapshots.
  */
-export type TabStatus = 'working' | 'done' | 'idle' | 'needs_permission' | 'no_ai'
+export const TabStatus = {
+    Working: 'working',
+    Done: 'done',
+    Idle: 'idle',
+    NeedsPermission: 'needs_permission',
+    NoAi: 'no_ai',
+} as const
+export type TabStatus = typeof TabStatus[keyof typeof TabStatus]
 
 /**
  * AI CLIs we recognise from `ps` output. Knowing WHICH tool is running tells
@@ -150,6 +165,16 @@ export interface TabState {
     outerTab: BaseTabComponent
     /** Inner tab (= outerTab unless it's inside a split). */
     innerTab: BaseTabComponent
+    /**
+     * GLANCETERM_TAB_ID for this inner tab — same value Session injects into
+     * the PTY env, what the hook handler writes as `tab_id` in the per-tab
+     * .log file, and the key HookWatcher uses in snapshots$. Null when the
+     * tab has no Session (placeholder rows / non-terminal tabs). Routing key
+     * for cross-service correlation; UI persistence should still prefer the
+     * sidebar's own per-tab identity UUID since this id is regenerated on
+     * fresh sessions.
+     */
+    tabId: string | null
     /** What the user sees in the top tab bar — used as our row label. */
     title: string
     /** The descendant AI process pid, if there is one. */
@@ -189,12 +214,23 @@ export interface TabState {
     /**
      * Number of long-lived child processes hanging off `aiPid` — proxy for
      * "backgrounded shells / jobs the agent kicked off and walked away
-     * from". Sidebar renders `· N bg` after the status when > 0. Agent-
-     * agnostic: any AI tool that spawns a subprocess that survives across
-     * polls bumps this count, no per-agent code required. See BG_PERSIST_MS
-     * for the persistence threshold and the over- vs under-count tradeoff.
+     * from". Sidebar renders `· N shell` after the status when > 0
+     * (Claude agents) or `· N bg` for agents without a hook adapter.
+     * Agent-agnostic: any AI tool that spawns a subprocess that survives
+     * across polls bumps this count, no per-agent code required. See
+     * BG_PERSIST_MS for the persistence threshold and the over- vs
+     * under-count tradeoff. Mirrors the "N shell" half of Claude's
+     * footer pair "N shell, M monitor".
      */
     backgroundJobCount: number
+    /**
+     * Number of Monitor-tool tasks the agent has started without a
+     * matching TaskStop yet. Claude-only today (the only adapter that
+     * surfaces Monitor lifecycle via hook events); non-Claude tabs
+     * always read 0. Sidebar renders `· M monitor` after the status when
+     * > 0. Mirrors the "M monitor" half of Claude's footer pair.
+     */
+    monitorCount: number
 }
 
 interface ChildProcessInfo { pid: number; ppid: number; command: string }
@@ -545,11 +581,11 @@ export class TabMonitor implements OnDestroy {
         let tabId: string | undefined
 
         if (!aiTool) {
-            status = 'no_ai'
+            status = TabStatus.NoAi
         } else if (!this.registry.supports(aiTool)) {
             // Tool we recognise via ps but don't have a hook adapter for yet —
             // degraded "we know it's alive, can't tell working vs idle" state.
-            status = 'working'
+            status = TabStatus.Working
         } else {
             // Prefer the UUID actually present in the live process env block —
             // see `envTabIdCache` doc above for why this beats sess.glancetermTabId.
@@ -577,8 +613,8 @@ export class TabMonitor implements OnDestroy {
                 // drops the counter back to 0. See HookWatcher's
                 // `subagentInFlight` doc for the counter contract.
                 let rawStatus = snap.status
-                if (rawStatus === 'idle' && tabId && this.hooks.getSubagentInFlight(tabId) > 0) {
-                    rawStatus = 'working'
+                if (rawStatus === TabStatus.Idle && tabId && this.hooks.getSubagentInFlight(tabId) > 0) {
+                    rawStatus = TabStatus.Working
                 }
                 status = this.applyIdleGate(t.inner, rawStatus, snap.eventAt)
                 lastActiveMs = Math.max(0, Date.now() - snap.eventAt)
@@ -589,7 +625,7 @@ export class TabMonitor implements OnDestroy {
                 // injection, or (c) we somehow lost the file. Show "idle" so
                 // the row reads as "present but not actively working" and
                 // mark awaitingFirstEvent so UI can hint that to the user.
-                status = 'idle'
+                status = TabStatus.Idle
                 awaitingFirstEvent = true
             }
         }
@@ -598,7 +634,7 @@ export class TabMonitor implements OnDestroy {
         // entering effective=working) instead of "ms since last hook event".
         // See workingSince doc for rationale. Runs AFTER applyIdleGate so a
         // brief raw-idle inside the gate window doesn't reset the anchor.
-        if (status === 'working') {
+        if (status === TabStatus.Working) {
             let since = this.workingSince.get(t.inner)
             if (since === undefined) {
                 since = Date.now()
@@ -627,6 +663,7 @@ export class TabMonitor implements OnDestroy {
         return {
             outerTab: t.outer,
             innerTab: t.inner,
+            tabId: tabId ?? null,
             title: t.outer.customTitle || t.outer.title || `(tab ${this.shellPidCache.get(t.inner) ?? '?'})`,
             aiTool,
             aiPid,
@@ -640,6 +677,7 @@ export class TabMonitor implements OnDestroy {
             // event yet, etc.), matching placeholderState.
             subagentCount: tabId ? this.hooks.getSubagentInFlight(tabId) : 0,
             backgroundJobCount,
+            monitorCount: tabId ? this.hooks.getMonitorInFlight(tabId) : 0,
         }
     }
 
@@ -813,34 +851,34 @@ export class TabMonitor implements OnDestroy {
      *                                                session, post-perm, …).
      */
     private applyIdleGate (inner: BaseTabComponent, rawStatus: TabStatus, eventAt: number): TabStatus {
-        if (rawStatus === 'working') {
+        if (rawStatus === TabStatus.Working) {
             this.idleGateArmed.set(inner, true)
             this.clearGateTimer(inner)
-            return 'working'
+            return TabStatus.Working
         }
-        if (rawStatus === 'needs_permission' || rawStatus === 'no_ai') {
+        if (rawStatus === TabStatus.NeedsPermission || rawStatus === TabStatus.NoAi) {
             this.idleGateArmed.delete(inner)
             this.clearGateTimer(inner)
             return rawStatus
         }
-        // rawStatus === 'idle' (and per the TabStatus union, nothing else
-        // reaches here — `done` is render-derived in the sidebar, not
+        // rawStatus === TabStatus.Idle (and per the TabStatus union, nothing
+        // else reaches here — `Done` is render-derived in the sidebar, not
         // produced by hooks).
         if (!this.idleGateArmed.get(inner)) {
-            return 'idle'
+            return TabStatus.Idle
         }
         const idleAgeMs = Date.now() - eventAt
         if (idleAgeMs >= IDLE_STABILITY_MS) {
             this.idleGateArmed.delete(inner)
             this.clearGateTimer(inner)
-            return 'idle'
+            return TabStatus.Idle
         }
         // Hold idle as working. Schedule a single follow-up tick at the
         // release moment so the UI doesn't have to wait up to POLL_MS to
         // flip. Tick is idempotent: if a fresh hook event arrives first,
         // hooks.snapshots$ already triggers a tick — we just race ourselves.
         this.scheduleGateRelease(inner, IDLE_STABILITY_MS - idleAgeMs)
-        return 'working'
+        return TabStatus.Working
     }
 
     private scheduleGateRelease (inner: BaseTabComponent, delayMs: number): void {
@@ -889,19 +927,23 @@ export class TabMonitor implements OnDestroy {
         this.workingSince.delete(t.inner)
         this.bgChildrenFirstSeen.delete(t.inner)
         this.bgConfirmedPids.delete(t.inner)
+        const sess: { glancetermTabId?: string } | undefined =
+            (t.inner as unknown as { session?: { glancetermTabId?: string } }).session
         return {
             outerTab: t.outer,
             innerTab: t.inner,
+            tabId: sess?.glancetermTabId ?? null,
             title: t.outer.customTitle || t.outer.title || '(tab)',
             aiTool: null,
             aiPid: null,
             aiCommandLine: null,
             cwd: null,
-            status: 'no_ai',
+            status: TabStatus.NoAi,
             lastActiveMs: null,
             awaitingFirstEvent: false,
             subagentCount: 0,
             backgroundJobCount: 0,
+            monitorCount: 0,
         }
     }
 

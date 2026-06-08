@@ -59,7 +59,7 @@
 				<key>ActionParameters</key>
 				<dict>
 					<key>COMMAND_STRING</key>
-					<string>/Applications/Tabby.app/Contents/MacOS/tabby paste --escape "$1"</string>
+					<string>/Applications/GlanceTerm.app/Contents/MacOS/GlanceTerm open "$1"</string>
 					<key>CheckedForUserDefaultShell</key>
 					<true/>
 					<key>inputMethod</key>

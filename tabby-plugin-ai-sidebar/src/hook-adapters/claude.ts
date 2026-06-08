@@ -4,7 +4,8 @@ import * as crypto from 'crypto'
 import * as os from 'os'
 import * as path from 'path'
 
-import type { AiTool, TabStatus } from '../tab-monitor'
+import type { AiTool } from '../tab-monitor'
+import { TabStatus } from '../tab-monitor'
 import { HookAdapter, HookEventEntry, InstallReport } from './adapter'
 
 // Cross-platform note: every fs/process touchpoint in this file must work
@@ -272,7 +273,7 @@ export class ClaudeHookAdapter extends HookAdapter {
     mapEventToStatus (event: string, _matcher?: string): TabStatus | null {
         switch (event) {
             case 'UserPromptSubmit':
-                return 'working'
+                return TabStatus.Working
             case 'PreToolUse':
             case 'PostToolUse':
                 // The AI is actively running a tool. Map both to working —
@@ -291,9 +292,9 @@ export class ClaudeHookAdapter extends HookAdapter {
                 // sees the brief working → needs_permission ping. Only the
                 // post-approval Pre/PostToolUse — where no PermissionRequest
                 // follows — actually changes display state.
-                return 'working'
+                return TabStatus.Working
             case 'Stop':
-                return 'idle'
+                return TabStatus.Idle
             case 'SubagentStop':
                 // A subagent finishing is not the same as the main agent
                 // finishing — we don't change the row's displayed status
@@ -303,18 +304,18 @@ export class ClaudeHookAdapter extends HookAdapter {
                 // remains correct.
                 return null
             case 'PermissionRequest':
-                return 'needs_permission'
+                return TabStatus.NeedsPermission
             case 'Notification':
                 // The settings.json matcher already narrowed the firing set
                 // to permission_prompt|elicitation_dialog — any Notification
                 // we receive here is a permission ask. We trust the install-
                 // time matcher rather than re-checking a `matcher` field in
                 // the payload (which Claude does not always populate).
-                return 'needs_permission'
+                return TabStatus.NeedsPermission
             case 'SessionStart':
-                return 'idle'
+                return TabStatus.Idle
             case 'SessionEnd':
-                return 'no_ai'
+                return TabStatus.NoAi
             default:
                 return null
         }

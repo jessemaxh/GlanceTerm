@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 
-import { isShellSafe, toRunnableCommand } from '../auto-resume.service'
+import { isShellSafe, parsePersistedEntry, toRunnableCommand } from '../auto-resume.service'
 
 describe('toRunnableCommand', () => {
     describe('Pass 1 — exact basename match', () => {
@@ -144,6 +144,76 @@ describe('isShellSafe', () => {
 
         it('rejects strings STARTING with metacharacter', () => {
             expect(isShellSafe('; claude --resume foo')).toBe(false)
+        })
+    })
+})
+
+describe('parsePersistedEntry', () => {
+    describe('legacy bare-string entries', () => {
+        it('normalises a plain command string to count=1', () => {
+            // Pre-fix installs wrote the value as just the command string.
+            // We accept it and assume one tab — first restored tab at the
+            // cwd gets the resume, no others (the typical case anyway).
+            expect(parsePersistedEntry('claude --resume foo'))
+                .toEqual({ command: 'claude --resume foo', count: 1 })
+        })
+
+        it('rejects the empty string', () => {
+            // Empty would mean "no command to type" — degenerate.
+            expect(parsePersistedEntry('')).toBeNull()
+        })
+    })
+
+    describe('new object entries', () => {
+        it('preserves command and a positive count', () => {
+            expect(parsePersistedEntry({ command: 'claude', count: 3 }))
+                .toEqual({ command: 'claude', count: 3 })
+        })
+
+        it('defaults a missing count to 1', () => {
+            // Forward-compat: future writers might drop count for cwds
+            // where it's always 1; readers shouldn't choke.
+            expect(parsePersistedEntry({ command: 'claude' } as unknown))
+                .toEqual({ command: 'claude', count: 1 })
+        })
+
+        it('truncates non-integer counts toward zero', () => {
+            expect(parsePersistedEntry({ command: 'claude', count: 2.7 }))
+                .toEqual({ command: 'claude', count: 2 })
+        })
+
+        it.each([
+            ['zero', 0],
+            ['negative', -2],
+            ['NaN', NaN],
+            ['Infinity', Infinity],
+        ])('defaults a %s count to 1', (_label, count) => {
+            // Manual config edits / pre-fix migrations can produce odd
+            // counts; we never WRITE these, but defending the read keeps
+            // a future hand-edit from disabling resume entirely.
+            expect(parsePersistedEntry({ command: 'claude', count }))
+                .toEqual({ command: 'claude', count: 1 })
+        })
+
+        it('rejects an object with a non-string command', () => {
+            expect(parsePersistedEntry({ command: 42, count: 1 } as unknown)).toBeNull()
+        })
+
+        it('rejects an object with an empty-string command', () => {
+            expect(parsePersistedEntry({ command: '', count: 2 } as unknown)).toBeNull()
+        })
+    })
+
+    describe('garbage / missing', () => {
+        it.each([
+            ['undefined', undefined],
+            ['null', null],
+            ['number', 42],
+            ['boolean', true],
+            ['empty object', {}],
+            ['array', ['claude', 2]],
+        ])('returns null for %s', (_label, raw) => {
+            expect(parsePersistedEntry(raw as unknown)).toBeNull()
         })
     })
 })

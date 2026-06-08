@@ -11,7 +11,7 @@
                             .logo-area
                                 .tabby-logo.mt-3
 
-                                h1.tabby-title Tabby
+                                h1.tabby-title GlanceTerm
                                     sup α
                                 .text-muted {{homeBase.appVersion}}
 
@@ -63,9 +63,11 @@
                     .form-line
                         .header
                             .title(translate) Language
-                            a.description((click)='homeBase.openTranslations()')
-                                span(translate) Help translate Tabby
-                                i.fas.fa-external-link-square-alt.ms-1
+                            //- "Help translate" link hidden: GlanceTerm has
+                                no translation portal of its own and we don't
+                                want to send users to upstream Tabby's
+                                Weblate. Restore the `a.description(click)`
+                                block above when a portal is set up.
                         select.form-control([(ngModel)]='config.store.language', (ngModelChange)='saveConfiguration(true)')
                             option([ngValue]='null', translate) Automatic
                             option(
@@ -79,14 +81,11 @@
                             .description(translate) Allows quickly opening a terminal in the selected folder
                         toggle([ngModel]='isShellIntegrationInstalled', (ngModelChange)='toggleShellIntegration()')
 
-                    .form-line(*ngIf='hostApp.platform !== Platform.Web')
-                        .header
-                            .title(translate) Enable analytics
-                            .description(translate) We're only tracking your Tabby and OS versions.
-                        toggle(
-                            [(ngModel)]='config.store.enableAnalytics',
-                            (ngModelChange)='saveConfiguration(true)',
-                        )
+                    //- Analytics toggle hidden: GlanceTerm does not run a
+                        telemetry pipeline (HomeBaseService.enableAnalytics
+                        is a no-op). Re-add this form-line when a real
+                        analytics backend is wired up — until then exposing
+                        the toggle would lie to users about what we collect.
 
                     .form-line(*ngIf='hostApp.platform !== Platform.Web')
                         .header

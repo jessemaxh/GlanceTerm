@@ -48,14 +48,14 @@ export class AttentionJumperService implements OnDestroy {
     }
 
     private effStatus (s: TabState): TabStatus {
-        if (s.status === 'idle' && this.unread.isUnread(s.innerTab)) return 'done'
+        if (s.status === TabStatus.Idle && this.unread.isUnread(s.innerTab)) return TabStatus.Done
         return s.status
     }
 
     private jump (direction: 1 | -1): void {
         const rank = (s: TabState): number => {
             const eff = this.effStatus(s)
-            return eff === 'done' ? 0 : eff === 'needs_permission' ? 1 : 2
+            return eff === TabStatus.Done ? 0 : eff === TabStatus.NeedsPermission ? 1 : 2
         }
         const tabIdx = (s: TabState): number => {
             const i = this.app.tabs.indexOf(s.outerTab)
@@ -64,7 +64,7 @@ export class AttentionJumperService implements OnDestroy {
         const candidates = this.latest
             .filter(s => {
                 const eff = this.effStatus(s)
-                return eff === 'done' || eff === 'needs_permission' || eff === 'idle'
+                return eff === TabStatus.Done || eff === TabStatus.NeedsPermission || eff === TabStatus.Idle
             })
             .sort((a, b) => {
                 const dp = rank(a) - rank(b)

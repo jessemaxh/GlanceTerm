@@ -64,7 +64,7 @@ div(*ngIf='vault.isEnabled()')
         .form-line
             .header
                 .title(translate) Encrypt config file
-                .description(translate) Puts all of Tabby's configuration into the vault
+                .description(translate) Puts all of GlanceTerm's configuration into the vault
             toggle(
                 [ngModel]='config.store.encrypted',
                 (click)='toggleConfigEncrypted()',

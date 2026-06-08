@@ -54,7 +54,7 @@ const SUDO_PROMPT_PATTERNS: RegExp[] = [
 
 export class AutoSudoPasswordMiddleware extends SessionMiddleware {
     private pendingPasswordToPaste: string | null = null
-    private pasteHint = `${colors.black.bgBlackBright(' Tabby ')} ${colors.gray('Press Enter to paste saved password')}`
+    private pasteHint = `${colors.black.bgBlackBright(' GlanceTerm ')} ${colors.gray('Press Enter to paste saved password')}`
     private pasteHintLength = colors.stripColor(this.pasteHint).length
     // Cache the last matched pattern index for performance optimization
     private lastMatchedPatternIndex = 0

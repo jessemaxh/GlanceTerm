@@ -16,7 +16,7 @@ export class WebHostWindow extends HostWindowService {
         const unloadHandler = (event) => {
             if (config.store.web.preventAccidentalTabClosure) {
                 event.preventDefault()
-                event.returnValue = translate.instant('Are you sure you want to close Tabby? You can disable this prompt in Settings -> Window.')
+                event.returnValue = translate.instant('Are you sure you want to close GlanceTerm? You can disable this prompt in Settings -> Window.')
             } else {
                 window.removeEventListener('beforeunload', unloadHandler)
             }
@@ -29,7 +29,7 @@ export class WebHostWindow extends HostWindowService {
     }
 
     setTitle (title?: string): void {
-        document.title = title ?? 'Tabby'
+        document.title = title ?? 'GlanceTerm'
     }
 
     toggleFullscreen (): void {

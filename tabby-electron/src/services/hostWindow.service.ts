@@ -73,7 +73,7 @@ export class ElectronHostWindow extends HostWindowService {
     }
 
     setTitle (title?: string): void {
-        this.electron.ipcRenderer.send('window-set-title', title ?? 'Tabby')
+        this.electron.ipcRenderer.send('window-set-title', title ?? 'GlanceTerm')
     }
 
     toggleFullscreen (): void {

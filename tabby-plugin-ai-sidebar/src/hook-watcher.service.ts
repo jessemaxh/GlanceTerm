@@ -25,6 +25,14 @@ interface HookStatusFile {
     tool_name?: string
     session_id?: string
     cwd?: string
+    /** Absolute path to Claude's `<sessionId>.jsonl` transcript file —
+     *  written by the handler verbatim from the raw Claude payload's
+     *  `transcript_path`. Authoritative: the file lives at the directory
+     *  where `claude` was launched (project root), NOT under a slug
+     *  derived from the agent's current cwd if it has cd'd into a subdir.
+     *  Consumed by tabby-plugin-mobile-bridge's TranscriptTailerService.
+     *  Older log lines (pre-feature) lack the field. */
+    transcript_path?: string
     ts: number
     /** Set to 1 by the handler when this is PreToolUse(Bash) AND
      *  tool_input.run_in_background == true — i.e. Claude is about to
@@ -33,6 +41,21 @@ interface HookStatusFile {
      *  bg job". Older log lines (pre-feature) lack the field; the
      *  watcher treats absent/0 as "not a bg invocation". */
     bg?: 0 | 1
+    /** Set by the handler on PostToolUse(Monitor) to the task id Claude
+     *  returned in tool_response — the lifecycle key for the Monitor tool.
+     *  Adding this id to the live-monitor set is how we mirror Claude's
+     *  footer "M monitor" count: each id stays in the set until the
+     *  matching PreToolUse(TaskStop) (`stop_task_id`) arrives or a
+     *  SessionStart/End boundary resets it. Empty on every other event.
+     *  Older log lines (pre-feature) lack the field. */
+    monitor_task_id?: string
+    /** Set by the handler on PreToolUse(TaskStop) to the task id Claude
+     *  passed in tool_input — the decrement signal for the live-monitor
+     *  set. We process the stop BEFORE the monitor add in `processEvent`
+     *  is irrelevant — same-second events arrive in file order and
+     *  TaskStop will only ever fire for an already-added id. Empty on
+     *  every other event. Older log lines (pre-feature) lack the field. */
+    stop_task_id?: string
     /** Top-level `agent_id` from the raw Claude hook payload. Present on
      *  every hook event fired inside a subagent's own turn — the subagent's
      *  own PreToolUse / PostToolUse / SubagentStop. Absent on the main
@@ -64,6 +87,11 @@ export interface HookSnapshot {
     eventAt: number
     sessionId: string | null
     cwd: string | null
+    /** Absolute path to Claude's `<sessionId>.jsonl` transcript file, or
+     *  null when no event has surfaced it yet (pre-feature log lines, or
+     *  agents that don't emit a transcript_path field). Prefer this over
+     *  reconstructing from cwd — see HookStatusFile.transcript_path. */
+    transcriptPath: string | null
 }
 
 /**
@@ -89,6 +117,24 @@ const RESCAN_MS = 30_000
  *  the next legitimate bg shell would be falsely credited to the dead
  *  arrival." A real user wouldn't notice. */
 const BG_ARRIVAL_TTL_MS = 10_000
+
+/**
+ * How long a stopped subagent id sits in the per-tab tombstone before
+ * being evicted. The tombstone exists because Claude Code 2026-06 fires
+ * `PostToolUse(Agent)` (which carries `spawn_agent_id`) AFTER the matching
+ * `SubagentStop`, by ~2 seconds. Without the tombstone, the late spawn
+ * event re-adds an id that just got removed and no further `SubagentStop`
+ * will ever land — the row pins to `working · 1 agent` for the rest of
+ * the session.
+ *
+ * 60 s comfortably covers the observed 2 s stop→spawn gap with margin for
+ * a slow PostToolUse(Agent) write, while being short enough that the
+ * (vanishingly unlikely) case of a brand-new subagent being assigned a
+ * collided random id within the window isn't permanently suppressed.
+ * agent_ids look like 16-hex hashes, so the collision risk inside 60 s
+ * is negligible.
+ */
+const SUBAGENT_TOMBSTONE_TTL_MS = 60_000
 
 /**
  * Startup-sweep retention window for `~/.glanceterm/hooks/<tab_uuid>.log`
@@ -254,6 +300,33 @@ export class HookWatcherService implements OnDestroy {
     private readonly liveAgentIds = new Map<string, Set<string>>()
 
     /**
+     * Per-tab tombstone for recently-stopped subagent ids. Inner Map is
+     * `agentId → stop timestamp (ms since epoch)`.
+     *
+     * Purpose: rejects late `spawn` events for an id that already had its
+     * `SubagentStop`. See SUBAGENT_TOMBSTONE_TTL_MS for the underlying
+     * Claude Code event-ordering quirk this works around.
+     *
+     * Lifecycle:
+     *   - Populated whenever the reducer applies a `stop` (either branch:
+     *     the SubagentStop event itself, OR — defence in depth — a future
+     *     code path that decides to evict an orphaned id).
+     *   - Consulted before applying `spawn`: if the id is tombstoned AND
+     *     within TTL, the spawn is dropped on the floor, not passed to
+     *     the reducer. This is the load-bearing guard.
+     *   - Cleared per-tab on SessionStart/SessionEnd, alongside
+     *     `liveAgentIds` and the other session-scoped trackers.
+     *   - Lazy GC of aged-out entries happens inside `processEvent` —
+     *     keeps the map bounded across long sessions without a dedicated
+     *     sweep timer.
+     *
+     * Why per-tab keying: every tab is a separate Claude session with
+     * independent id space. Shared keying would (very rarely) suppress a
+     * real spawn in tab B because tab A had a stop in the same TTL window.
+     */
+    private readonly subagentTombstones = new Map<string, Map<string, number>>()
+
+    /**
      * Per-tab FIFO queue of timestamps for PreToolUse(Bash,
      * run_in_background:true) events that haven't yet been matched to a
      * concrete child PID by TabMonitor's process-tree poll. Each entry
@@ -272,6 +345,33 @@ export class HookWatcherService implements OnDestroy {
      * a stale arrival doesn't get falsely matched to a much-later child.
      */
     private readonly pendingBgArrivals = new Map<string, number[]>()
+
+    /**
+     * Per-tab set of currently-live Monitor task ids. Mirrors Claude's
+     * footer "M monitor" count: a Monitor tool call adds its
+     * tool_response.taskId to the set on PostToolUse(Monitor); the
+     * matching PreToolUse(TaskStop) removes it. SessionStart/SessionEnd
+     * resets the whole set so a Claude crash that didn't fire TaskStop
+     * for in-flight monitors doesn't pin the badge forever across the
+     * next session.
+     *
+     * Why a Set of ids, not a counter:
+     *
+     *   Claude can interleave many Monitor invocations and only stop
+     *   some of them by id. A bare counter would let a TaskStop for an
+     *   unknown id decrement the count, drifting from Claude's footer.
+     *   Set semantics — add only if absent, delete by exact match —
+     *   make every transition idempotent and silently drop TaskStops
+     *   for ids we never saw (the same robustness shape the
+     *   liveAgentIds reducer uses for phantom SubagentStops).
+     *
+     *   Edge case the set does NOT model: a Monitor task that exits on
+     *   its own timeout (no TaskStop fires). The id sits in the set
+     *   forever and the badge over-counts. SessionStart/SessionEnd
+     *   reset is the only escape. v1 limitation — Claude doesn't expose
+     *   a "monitor naturally completed" hook event today.
+     */
+    private readonly liveMonitorTaskIds = new Map<string, Set<string>>()
 
     /**
      * Per-tab byte offset of the next unread byte in `<TAB_ID>.log`. Append-only
@@ -346,6 +446,13 @@ export class HookWatcherService implements OnDestroy {
      *  green even after the main agent fires Stop. */
     getSubagentInFlight (tabId: string): number {
         return this.liveAgentIds.get(tabId)?.size ?? 0
+    }
+
+    /** Sync lookup — how many Monitor tasks have been started without a
+     *  matching TaskStop yet. Drives the sidebar's "M monitor" badge,
+     *  paired with the bg-shell count to mirror Claude's footer. */
+    getMonitorInFlight (tabId: string): number {
+        return this.liveMonitorTaskIds.get(tabId)?.size ?? 0
     }
 
     /**
@@ -607,7 +714,15 @@ export class HookWatcherService implements OnDestroy {
         const liveDropped = this.liveAgentIds.delete(tabId)
         const offsetDropped = this.tailOffset.delete(tabId)
         const bgDropped = this.pendingBgArrivals.delete(tabId)
-        return snapshotDropped || liveDropped || offsetDropped || bgDropped
+        const monDropped = this.liveMonitorTaskIds.delete(tabId)
+        // Tombstones are session-scoped (already reset on SessionStart/End)
+        // but a tab can die WITHOUT firing SessionEnd (Tabby kill, process
+        // crash). Without this we'd leak one inner Map per dead UUID across
+        // the lifetime of the GlanceTerm process — small per entry but
+        // unbounded in count. Mirror the same delete shape the other
+        // per-tab side-trackers above use.
+        const tombDropped = this.subagentTombstones.delete(tabId)
+        return snapshotDropped || liveDropped || offsetDropped || bgDropped || monDropped || tombDropped
     }
 
     /**
@@ -670,7 +785,53 @@ export class HookWatcherService implements OnDestroy {
             if (events.length > 0) {
                 const prev = this.liveAgentIds.get(parsed.tab_id) ?? new Set<string>()
                 let next: ReadonlySet<string> = prev
-                for (const ev of events) next = reduceSubagentSet(next, ev)
+                // Tombstone-aware application. `stop` events seed the
+                // tombstone; `spawn` events are dropped if the id is
+                // tombstoned within TTL (load-bearing guard against the
+                // ~2s SubagentStop → PostToolUse(Agent) ordering quirk in
+                // Claude Code 2026-06 — see SUBAGENT_TOMBSTONE_TTL_MS).
+                // `reset` clears the per-tab tombstone alongside the live
+                // set, since SessionStart/End drops all prior state.
+                const tomb = this.subagentTombstones.get(parsed.tab_id)
+                for (const ev of events) {
+                    if (ev.kind === 'reset') {
+                        this.subagentTombstones.delete(parsed.tab_id)
+                        next = reduceSubagentSet(next, ev)
+                        continue
+                    }
+                    if (ev.kind === 'stop') {
+                        const t = tomb ?? new Map<string, number>()
+                        t.set(ev.agentId, eventAt)
+                        // Lazy GC: opportunistically drop aged-out entries
+                        // so the map doesn't grow unbounded across long
+                        // sessions. Bounded effort per stop (~O(entries)).
+                        for (const [id, ts] of t) {
+                            if (eventAt - ts > SUBAGENT_TOMBSTONE_TTL_MS) t.delete(id)
+                        }
+                        this.subagentTombstones.set(parsed.tab_id, t)
+                        next = reduceSubagentSet(next, ev)
+                        continue
+                    }
+                    // ev.kind === 'spawn'
+                    const stopTs = tomb?.get(ev.agentId)
+                    if (stopTs !== undefined && eventAt - stopTs <= SUBAGENT_TOMBSTONE_TTL_MS) {
+                        // Late spawn after stop — drop on the floor. Don't
+                        // hand to reducer. This is the actual bug fix.
+                        //
+                        // Edge: a same-line `[stop, spawn]` pair for the
+                        // SAME id (`eventAt - stopTs === 0`) also gets
+                        // suppressed here. Intentional — Claude doesn't
+                        // reuse an id within a single hook line today, so
+                        // the realistic case this represents IS the
+                        // 2s-late `PostToolUse(Agent)` carrying its
+                        // already-stopped subagent's id. If a future
+                        // Claude version genuinely fires stop+respawn in
+                        // the same line, this guard will need a strict
+                        // `< TTL` check OR an explicit allowlist.
+                        continue
+                    }
+                    next = reduceSubagentSet(next, ev)
+                }
                 if (next !== prev) {
                     if (next.size === 0) this.liveAgentIds.delete(parsed.tab_id)
                     else this.liveAgentIds.set(parsed.tab_id, next as Set<string>)
@@ -683,6 +844,19 @@ export class HookWatcherService implements OnDestroy {
                 // get falsely matched to the next new child of the freshly
                 // launched agent.
                 if (this.pendingBgArrivals.delete(parsed.tab_id)) changed = true
+                // And for the live-monitor set: a Claude crash that left
+                // monitors "live" with no matching TaskStop would otherwise
+                // carry the count into the next session as a phantom badge.
+                if (this.liveMonitorTaskIds.delete(parsed.tab_id)) changed = true
+                // Tombstones are session-scoped too — keeping them across a
+                // SessionStart would suppress a brand-new spawn that
+                // legitimately reused an id from a crashed prior session.
+                // Belt-and-braces with the per-event reset inside the
+                // reducer loop above: this catches the case where reset is
+                // the only event in the line (e.g. a bare SessionStart with
+                // no agent_id) and the reducer loop's reset branch already
+                // ran but we want the delete to be idempotent.
+                this.subagentTombstones.delete(parsed.tab_id)
             }
 
             // Background-shell arrival anchor: enqueue a pending arrival when
@@ -697,6 +871,38 @@ export class HookWatcherService implements OnDestroy {
                 this.pendingBgArrivals.set(parsed.tab_id, arr)
             }
 
+            // Monitor task lifecycle. PostToolUse(Monitor) carries the id of
+            // the freshly-started Monitor in monitor_task_id; PreToolUse(TaskStop)
+            // carries the id of the task being stopped in stop_task_id.
+            // Mutations bump `changed` so the sidebar repaints immediately
+            // (the bg-Bash path above relies on TabMonitor's process-tree
+            // poll for its visible update — Monitor has no process-tree
+            // signal, so the hook IS the signal).
+            //
+            // SessionStart / SessionEnd reset is handled by the
+            // boundary-reset block below — kept together with the other
+            // session-scoped trackers so the boundary semantics stay in
+            // one place.
+            if (parsed.event === 'PostToolUse' && parsed.tool_name === 'Monitor' && parsed.monitor_task_id) {
+                const set = this.liveMonitorTaskIds.get(parsed.tab_id) ?? new Set<string>()
+                if (!set.has(parsed.monitor_task_id)) {
+                    set.add(parsed.monitor_task_id)
+                    this.liveMonitorTaskIds.set(parsed.tab_id, set)
+                    changed = true
+                }
+            }
+            if (parsed.event === 'PreToolUse' && parsed.tool_name === 'TaskStop' && parsed.stop_task_id) {
+                const set = this.liveMonitorTaskIds.get(parsed.tab_id)
+                // TaskStop also targets backgrounded Bash shells (same tool,
+                // different task-id domain). Stop ids for non-monitor tasks
+                // simply fall through with no set match — silently ignored
+                // exactly like phantom SubagentStops, no over-decrement risk.
+                if (set?.delete(parsed.stop_task_id)) {
+                    if (set.size === 0) this.liveMonitorTaskIds.delete(parsed.tab_id)
+                    changed = true
+                }
+            }
+
         }
 
         const status = adapter.mapEventToStatus(parsed.event, parsed.matcher)
@@ -709,6 +915,7 @@ export class HookWatcherService implements OnDestroy {
             eventAt,
             sessionId: parsed.session_id || null,
             cwd: parsed.cwd || null,
+            transcriptPath: parsed.transcript_path || null,
         })
         return true
     }

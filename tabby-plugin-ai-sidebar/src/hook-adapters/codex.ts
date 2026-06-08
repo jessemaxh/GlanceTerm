@@ -4,7 +4,8 @@ import * as crypto from 'crypto'
 import * as os from 'os'
 import * as path from 'path'
 
-import type { AiTool, TabStatus } from '../tab-monitor'
+import type { AiTool } from '../tab-monitor'
+import { TabStatus } from '../tab-monitor'
 import { HookAdapter, HookEventEntry, InstallReport } from './adapter'
 import { withFileLock, escapeRegex } from './claude'
 
@@ -182,15 +183,15 @@ export class CodexHookAdapter extends HookAdapter {
             case 'UserPromptSubmit':
             case 'PreToolUse':
             case 'PostToolUse':
-                return 'working'
+                return TabStatus.Working
             case 'Stop':
-                return 'idle'
+                return TabStatus.Idle
             case 'SubagentStop':
                 return null
             case 'PermissionRequest':
-                return 'needs_permission'
+                return TabStatus.NeedsPermission
             case 'SessionStart':
-                return 'idle'
+                return TabStatus.Idle
             default:
                 return null
         }

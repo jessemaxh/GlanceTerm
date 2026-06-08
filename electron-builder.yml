@@ -48,7 +48,7 @@ nsis:
   artifactName: GlanceTerm-${version}-setup-${env.ARCH}.${ext}
   installerIcon: "./build/windows/icon.ico"
   allowToChangeInstallationDirectory: true
-  shortcutName: Tabby Terminal
+  shortcutName: GlanceTerm
 mac:
   category: public.app-category.utilities
   icon: "./build/mac/icon.icns"
@@ -77,8 +77,8 @@ linux:
   - "--no-sandbox"
   desktop:
     entry:
-      StartupWMClass: tabby
-      MimeType: x-scheme-handler/tabby
+      StartupWMClass: glanceterm
+      MimeType: x-scheme-handler/glanceterm
 snap:
   plugs:
   - default
