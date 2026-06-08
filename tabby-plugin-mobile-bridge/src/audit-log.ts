@@ -6,19 +6,35 @@ import * as os from 'os'
 export const AUDIT_LOG_PATH = path.join(os.homedir(), '.glanceterm', 'mobile-bridge.log')
 
 /**
- * Strips `/bot<bot_id>:<secret>/` URL fragments from a string. fetch()
- * network errors stringify with the full request URL, which embeds the
- * Telegram bot token — without redaction those messages end up in
- * devtools, console logs, and the audit log on disk.
+ * Strip secrets from a string before it reaches the audit log or any
+ * console output. Covers patterns from every supported backend so a
+ * platform-specific error message can't sneak credentials onto disk:
  *
- * Pattern matches the Telegram URL shape exactly (digits, colon,
- * alphanumeric/underscore/dash secret). Permissive enough to handle any
- * legitimate token, narrow enough that it doesn't false-positive on
- * arbitrary text.
+ *   - Telegram: `/bot<digits>:<secret>/` URL fragment that fetch()
+ *     embeds in network error strings. Pattern matches the token shape
+ *     exactly.
+ *   - Named secret keys in stringified JSON / form bodies:
+ *     `tenant_access_token`, `app_access_token`, `access_token`,
+ *     `refresh_token`, `app_secret`, `app_id`. The Lark SDK is known
+ *     to embed these in OAuth/refresh error envelopes — the bare
+ *     `access_token` key in particular is the audited-leak path the
+ *     review-2026-06-08 pass caught.
+ *   - Lark tenant bearer shape `t-g_<chars>` when it appears bare
+ *     (no surrounding `tenant_access_token=` key) — observed in a few
+ *     SDK error message templates.
+ *
+ * Every regex is intentionally narrow: we'd rather miss a leak in an
+ * unusual error string than scrub user-visible context. New backends
+ * should add their token shape here as the FIRST step of integration.
  */
-const TOKEN_PATTERN = /\/bot\d+:[A-Za-z0-9_-]+\//g
+const TG_TOKEN_PATTERN = /\/bot\d+:[A-Za-z0-9_-]+\//g
+const NAMED_SECRET_PATTERN = /\b(tenant_access_token|app_access_token|access_token|refresh_token|app_secret|app_id)["']?\s*[:=]\s*["']?([A-Za-z0-9_-]{8,})/gi
+const FEISHU_BEARER_PATTERN = /\b(t-g_[A-Za-z0-9_-]{10,})\b/g
 export function redactToken (s: string): string {
-    return s.replace(TOKEN_PATTERN, '/bot<REDACTED>/')
+    return s
+        .replace(TG_TOKEN_PATTERN, '/bot<REDACTED>/')
+        .replace(NAMED_SECRET_PATTERN, '$1=<REDACTED>')
+        .replace(FEISHU_BEARER_PATTERN, '<REDACTED>')
 }
 
 /** Per-session de-dup so a sustained disk-full error doesn't flood the

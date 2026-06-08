@@ -31,6 +31,7 @@ import {
     ThreadRef,
 } from '../types'
 import { KeystoreService } from '../../keystore.service'
+import { redactToken } from '../../audit-log'
 
 /**
  * Feishu / Lark implementation of {@link MessagingBackend}.
@@ -245,6 +246,7 @@ export class FeishuBackend implements MessagingBackend, OnDestroy {
 
     private flattenMessage (m: NormalizedMessage): InboundMessage {
         return {
+            platform: 'feishu',
             chatId: m.chatId,
             // Inbound NormalizedMessage carries Feishu's thread_id directly
             // (omt_xxx). For our routing, we treat threadId as the anchor
@@ -453,8 +455,13 @@ export class FeishuBackend implements MessagingBackend, OnDestroy {
      * audit-log rather than silently misclassify.
      */
     private translateLarkError (err: unknown, method: string): MessagingError {
-        const message = err instanceof Error ? err.message : String(err)
-        const wrapped = `Feishu ${method} failed: ${message}`
+        const rawMessage = err instanceof Error ? err.message : String(err)
+        // Run the message through the cross-platform redactor before the
+        // error string can propagate to console.warn / audit log /
+        // dispatcher's reopenAttempted audit entry. Lark SDK error
+        // messages have been observed to include tenant_access_token
+        // values on auth-side failures.
+        const wrapped = `Feishu ${method} failed: ${redactToken(rawMessage)}`
         const kind = this.classifyError(err)
         return new MessagingError(kind, wrapped)
     }

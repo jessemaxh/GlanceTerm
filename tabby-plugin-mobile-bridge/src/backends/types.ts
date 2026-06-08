@@ -46,6 +46,11 @@ export interface BotIdentity {
 /** User-sent text the bot can hear. Subscribers (InboundRouter, Pairing)
  *  filter on chatId / sender. */
 export interface InboundMessage {
+    /** Which backend emitted this message. Lets routers / pairing scope
+     *  binding lookups by platform — otherwise a TG chatId that happens
+     *  to collide with a Feishu chatId (or vice versa) would cross-match.
+     *  Symmetric with {@link InboundCallback.platform}. */
+    platform: 'telegram' | 'feishu'
     chatId: ChatRef
     /** null when the message arrived outside a thread (DM, general topic). */
     threadId: ThreadRef | null

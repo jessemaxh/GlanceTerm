@@ -65,7 +65,12 @@ export class PermissionModeService implements OnDestroy {
         void store.load().then(() => {
             if (this.destroyed) return
             this.sub = store.bindings$.subscribe(bindings => {
-                const want = bindings.some(b => b.platform === 'telegram' && b.enabled)
+                // ANY enabled binding (telegram OR feishu) turns the
+                // relay flag on. Previously hardcoded to telegram only,
+                // which silently disabled permission relay for Feishu
+                // users — the hook handler skipped the IM-prompt path
+                // because the flag was forced to "0".
+                const want = bindings.some(b => b.enabled)
                 void this.writeFlag(want)
             })
         })

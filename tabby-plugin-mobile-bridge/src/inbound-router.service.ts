@@ -72,8 +72,13 @@ export class InboundRouterService implements OnDestroy {
     }
 
     private async route (msg: InboundMessage): Promise<void> {
+        // Scope by msg.platform so a Telegram chatId and a Feishu chatId
+        // that share a string value never cross-match. Previously this was
+        // hardcoded to 'telegram', dropping every Feishu inbound message
+        // with reason 'no-matching-binding' — including permission verdicts
+        // and PTY-input replies.
         const binding = this.store.current.find(
-            b => b.platform === 'telegram' && b.chatId === msg.chatId && b.enabled,
+            b => b.platform === msg.platform && b.chatId === msg.chatId && b.enabled,
         )
         if (!binding) {
             await this.audit(msg, 'no-matching-binding')
@@ -198,10 +203,12 @@ export class InboundRouterService implements OnDestroy {
         const permId = m[2].toLowerCase()
 
         // Gate: callback sender must be on the allowlist of SOME binding
-        // that targets this chat. We don't have a callback-chat→binding
-        // map; iterate bindings and accept if any allowlist matches.
+        // that targets this chat AND matches the originating platform.
+        // The platform scope prevents a TG / Feishu chatId collision
+        // from cross-matching (same defence as route() above).
         const binding = this.store.current.find(
-            b => b.chatId === cb.chatId
+            b => b.platform === cb.platform
+                && b.chatId === cb.chatId
                 && b.enabled
                 && b.approvedSenders.includes(cb.senderId),
         )

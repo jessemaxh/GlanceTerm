@@ -4,6 +4,8 @@ import * as fsSync from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
+import { TabMonitor } from 'tabby-plugin-ai-sidebar'
+
 import { TabIdentityService } from './tab-identity.service'
 import { BindingStoreService } from './binding/store.service'
 import { TopicService } from './topic.service'
@@ -77,6 +79,7 @@ export class PermissionRelayService implements OnDestroy {
         private store: BindingStoreService,
         private identity: TabIdentityService,
         private topics: TopicService,
+        private monitor: TabMonitor,
     ) {
         void this.start()
     }
@@ -196,7 +199,17 @@ export class PermissionRelayService implements OnDestroy {
 
         const toolName = payload.tool_name ?? 'tool'
         const preview = summarisePayloadForPhone(payload)
-        const text = formatPrompt(id, toolName, preview)
+        // Agent name comes from TabMonitor.current's TabState, NOT from
+        // the .req payload — Claude is the only agent that writes the
+        // permission-request JSON shape today, but the bridge runs for
+        // any agent. Looking up via TabState gives us 'claude' / 'codex'
+        // / 'aider' / ... or undefined for raw shells.
+        const tabState = this.monitor.current.find(s => {
+            const uuid = this.identity.uuidOf(s.outerTab)
+            return uuid === ident.uuid
+        })
+        const agentName = tabState?.aiTool ?? 'agent'
+        const text = formatPrompt(id, agentName, toolName, preview)
 
         const sentForId = new Map<string, MessageRef>()
         for (const binding of this.store.current) {
@@ -406,14 +419,19 @@ function summarisePayloadForPhone (p: ClaudePermissionPayload): string {
 }
 
 /**
- * The message body Telegram shows. The id is in the body too (not just
- * `callback_data`) so a user on a client that doesn't render inline
- * keyboards (rare today, but possible on web/legacy mobile) can still
- * answer with `yes <id>` or `no <id>` text — same convention Anthropic
- * uses in their official Channels plugin.
+ * The message body the IM platform shows. The id is in the body too
+ * (not just `callback_data`) so a user on a client that doesn't render
+ * inline keyboards (rare today, but possible on web/legacy mobile) can
+ * still answer with `yes <id>` or `no <id>` text — same convention
+ * Anthropic uses in their official Channels plugin.
+ *
+ * Agent name comes from TabState.aiTool — 'claude' / 'codex' / 'aider'
+ * etc. — so non-Claude users see "codex wants to run Bash" instead of
+ * the previously hard-coded "Claude wants to run …" which was wrong
+ * everywhere except Claude tabs.
  */
-function formatPrompt (id: string, toolName: string, preview: string): string {
-    const head = `🔔 Claude wants to run **${toolName}**`
+function formatPrompt (id: string, agentName: string, toolName: string, preview: string): string {
+    const head = `🔔 ${agentName} wants to run **${toolName}**`
     const body = preview ? `\n\n\`\`\`\n${preview}\n\`\`\`` : ''
     const tail = `\n\nTap a button — or reply \`yes ${id}\` / \`no ${id}\``
     return head + body + tail

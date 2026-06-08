@@ -357,6 +357,7 @@ export class TelegramBackend implements MessagingBackend, OnDestroy {
 
     private flattenMessage (m: TgMessage): InboundMessage {
         return {
+            platform: 'telegram',
             chatId: String(m.chat.id),
             threadId: m.message_thread_id !== undefined ? String(m.message_thread_id) : null,
             senderId: String(m.from!.id),
