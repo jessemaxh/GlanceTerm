@@ -5,7 +5,7 @@ import { debounceTime } from 'rxjs/operators'
 import { TabIdentityService, TabIdentity } from './tab-identity.service'
 import { BindingStoreService } from './binding/store.service'
 import { ChannelBinding } from './binding/types'
-import { TopicService } from './telegram/topic.service'
+import { TopicService } from './topic.service'
 import { InstanceLockService } from './instance-lock.service'
 
 /**

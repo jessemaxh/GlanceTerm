@@ -5,7 +5,7 @@ import * as path from 'path'
 import * as os from 'os'
 import { randomUUID } from 'crypto'
 
-import { ChannelBinding } from './types'
+import { ChannelBinding, LegacyChannelBinding } from './types'
 
 /**
  * Persistent storage for {@link ChannelBinding}s. Writes through to a flat
@@ -54,8 +54,19 @@ export class BindingStoreService {
         this.loadPromise = (async () => {
             try {
                 const raw = await fs.readFile(BindingStoreService.FILE, 'utf8')
-                const parsed = JSON.parse(raw) as ChannelBinding[]
-                this.bindingsSubject.next(Array.isArray(parsed) ? parsed : [])
+                const parsed = JSON.parse(raw) as LegacyChannelBinding[]
+                const migrated = Array.isArray(parsed) ? parsed.map(b => this.migrate(b)) : []
+                this.bindingsSubject.next(migrated)
+                // Persist the migration if any record was rewritten — keeps
+                // the on-disk shape current so subsequent loads skip the
+                // migrate() path entirely. Best-effort; failure here just
+                // means the migration re-runs next launch.
+                if (migrated.some((m, i) => parsed[i]?.botToken !== undefined && !parsed[i]?.credentials)) {
+                    await this.save().catch(err => {
+                        // eslint-disable-next-line no-console
+                        console.warn('[mobile-bridge:store] migration save failed:', err)
+                    })
+                }
             } catch (err: unknown) {
                 if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
                     // eslint-disable-next-line no-console
@@ -67,6 +78,38 @@ export class BindingStoreService {
             }
         })()
         return this.loadPromise
+    }
+
+    /**
+     * Forward-only migration of pre-Phase-1 records. Pre-Phase-1 stored
+     * `botToken` at the top level (Telegram-only world); Phase 1 introduces
+     * the `credentials` discriminated union to support Feishu / Lark.
+     * Records without `credentials` are inferred from `platform` +
+     * `botToken`; the legacy field is dropped on the next save.
+     *
+     * Records that already have `credentials` pass through unchanged.
+     */
+    private migrate (raw: LegacyChannelBinding): ChannelBinding {
+        const { botToken, credentials, ...rest } = raw
+        // Already-migrated record: preserve the credentials we just
+        // destructured. The previous version returned `rest` here, which
+        // had stripped `credentials` along with `botToken` — every relaunch
+        // after the first migration would silently wipe the credentials,
+        // breaking telegram.start() on every subsequent boot.
+        if (credentials) {
+            return { ...rest, credentials } as unknown as ChannelBinding
+        }
+        if (raw.platform === 'telegram' && typeof botToken === 'string') {
+            return {
+                ...(rest as unknown as Omit<ChannelBinding, 'credentials'>),
+                credentials: { platform: 'telegram', botToken },
+            }
+        }
+        // No legacy field and no credentials — record is unusable but we
+        // preserve it (the BindingStore's enabled toggle is the user's
+        // escape hatch). The runtime will throw when trying to start the
+        // backend with undefined credentials, surfacing the broken record.
+        return rest as unknown as ChannelBinding
     }
 
     /**

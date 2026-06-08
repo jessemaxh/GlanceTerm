@@ -5,8 +5,9 @@ import { FormsModule } from '@angular/forms'
 import { SidebarSettingsRegistry } from 'tabby-plugin-ai-sidebar'
 
 import { TabIdentityService } from './tab-identity.service'
-import { TelegramClientService } from './telegram/client.service'
-import { TopicService } from './telegram/topic.service'
+import { TelegramBackend } from './backends/telegram/client.service'
+import { BackendRegistry } from './backends/registry.service'
+import { TopicService } from './topic.service'
 import { BindingStoreService } from './binding/store.service'
 import { PairingService } from './binding/pairing.service'
 import { OutboundDispatcherService } from './outbound-dispatcher.service'
@@ -24,7 +25,8 @@ import { BridgeSettingsComponent } from './settings/settings.component'
     declarations: [BridgeSettingsComponent],
     providers: [
         TabIdentityService,
-        TelegramClientService,
+        TelegramBackend,
+        BackendRegistry,
         TopicService,
         BindingStoreService,
         PairingService,
@@ -45,10 +47,12 @@ export default class MobileBridgeModule {
         // being tracked the first time a downstream consumer reads the
         // service — by then tabs that opened before that read have no UUID.
         _identity: TabIdentityService,
-        // TelegramClientService is lazy by design — bindings call start()
-        // with a token when configured. Inject it here only to keep DI
-        // graph reachability obvious in tooling.
-        _telegram: TelegramClientService,
+        // TelegramBackend is lazy by design — start() is called when a
+        // binding becomes active. Inject here only for DI-graph
+        // reachability in tooling.
+        _telegram: TelegramBackend,
+        // BackendRegistry routes per-binding platform → backend.
+        _backends: BackendRegistry,
         // PairingService listens to inbound Telegram messages and watches
         // for `/bind <code>` — must be alive at app launch so a pending
         // pairing started by the UI doesn't miss the user's confirmation.

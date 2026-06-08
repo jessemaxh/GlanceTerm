@@ -4,13 +4,14 @@ import { Subscription } from 'rxjs'
 import { BaseTerminalTabComponent } from 'tabby-terminal'
 import { TabMonitor } from 'tabby-plugin-ai-sidebar'
 
-import { TelegramClientService } from './telegram/client.service'
-import { TopicService } from './telegram/topic.service'
+import { TelegramBackend } from './backends/telegram/client.service'
+import { BackendRegistry } from './backends/registry.service'
+import { InboundCallback, InboundMessage } from './backends/types'
+import { TopicService } from './topic.service'
 import { BindingStoreService } from './binding/store.service'
 import { TabIdentityService } from './tab-identity.service'
 import { KeystrokeAdapterRegistry } from './pty-keystroke/registry'
 import { PermissionRelayService } from './permission-relay.service'
-import { TgInboundCallback, TgInboundMessage } from './telegram/types'
 import { appendAudit, AUDIT_LOG_PATH } from './audit-log'
 
 /** Anthropic's 5-letter id alphabet ([a-km-z], no l) + verdict word.
@@ -45,7 +46,8 @@ export class InboundRouterService implements OnDestroy {
     private subs: Subscription[] = []
 
     constructor (
-        private telegram: TelegramClientService,
+        private telegram: TelegramBackend,
+        private backends: BackendRegistry,
         private topics: TopicService,
         private store: BindingStoreService,
         private identity: TabIdentityService,
@@ -53,11 +55,14 @@ export class InboundRouterService implements OnDestroy {
         private keystrokes: KeystrokeAdapterRegistry,
         private permissionRelay: PermissionRelayService,
     ) {
+        // Phase 1: subscribe to telegram backend directly. Phase 3 will
+        // merge inbound streams across all active backends (FeishuBackend
+        // becomes a second source).
         this.subs.push(
-            this.telegram.inboundMessages$.subscribe(msg => void this.route(msg)),
+            this.telegram.inbound$.subscribe(msg => void this.route(msg)),
         )
         this.subs.push(
-            this.telegram.callbackQueries$.subscribe(cb => void this.routeCallback(cb)),
+            this.telegram.callbacks$.subscribe(cb => void this.routeCallback(cb)),
         )
     }
 
@@ -65,18 +70,16 @@ export class InboundRouterService implements OnDestroy {
         for (const s of this.subs) s.unsubscribe()
     }
 
-    private async route (msg: TgInboundMessage): Promise<void> {
-        const chatIdStr = String(msg.chatId)
+    private async route (msg: InboundMessage): Promise<void> {
         const binding = this.store.current.find(
-            b => b.platform === 'telegram' && b.chatId === chatIdStr && b.enabled,
+            b => b.platform === 'telegram' && b.chatId === msg.chatId && b.enabled,
         )
         if (!binding) {
             await this.audit(msg, 'no-matching-binding')
             return
         }
 
-        const senderIdStr = String(msg.senderId)
-        if (!binding.approvedSenders.includes(senderIdStr)) {
+        if (!binding.approvedSenders.includes(msg.senderId)) {
             await this.audit(msg, 'sender-not-whitelisted')
             return
         }
@@ -101,12 +104,12 @@ export class InboundRouterService implements OnDestroy {
             return
         }
 
-        if (msg.topicId === undefined) {
+        if (msg.threadId === null) {
             await this.audit(msg, 'no-topic-id')
             return
         }
 
-        const tabUuid = await this.topics.findByThread(binding.id, msg.topicId)
+        const tabUuid = await this.topics.findByThread(binding.id, msg.threadId)
         if (!tabUuid) {
             await this.audit(msg, 'topic-not-bound')
             return
@@ -149,14 +152,14 @@ export class InboundRouterService implements OnDestroy {
      * Telegram, and the text could contain secrets even on the inbound
      * side).
      */
-    private async audit (msg: TgInboundMessage, reason: string): Promise<void> {
+    private async audit (msg: InboundMessage, reason: string): Promise<void> {
         await appendAudit({
             kind: 'inbound-drop',
             reason,
             chatId: msg.chatId,
             senderId: msg.senderId,
-            senderUsername: msg.senderUsername,
-            topicId: msg.topicId,
+            senderName: msg.senderName,
+            threadId: msg.threadId,
             textLen: msg.text.length,
         })
     }
@@ -167,21 +170,27 @@ export class InboundRouterService implements OnDestroy {
      * always answerCallbackQuery so the user's button stops "loading"
      * even if our gate rejects the verdict.
      */
-    private async routeCallback (cb: TgInboundCallback): Promise<void> {
-        // Always ack — Telegram requires it within ~30s or the button
-        // spins forever on the user's phone. Errors here are non-fatal.
-        const ack = (text?: string) =>
-            this.telegram.answerCallbackQuery(cb.callbackId, text ? { text } : {})
-                .catch(err => {
-                    // eslint-disable-next-line no-console
-                    console.warn('[mobile-bridge:inbound] answerCallbackQuery failed:', err)
-                })
+    private async routeCallback (cb: InboundCallback): Promise<void> {
+        // Ack UNCONDITIONALLY before any binding lookup. Telegram requires
+        // the ack within ~30s or the inline-keyboard button spins forever
+        // on the user's phone — even for callbacks we ultimately reject
+        // (sender not whitelisted, binding disabled between send and tap).
+        // We received this callback over the live backend connection, so
+        // the same backend is reachable for the ack. Phase 1 hardcodes
+        // 'telegram' because that's the only backend with callbacks;
+        // Phase 3 will resolve from the callback's source backend once
+        // FeishuBackend.callbacks$ exists.
+        void this.backends.forPlatform('telegram')
+            .ackCallback(cb.callbackId)
+            .catch(err => {
+                // eslint-disable-next-line no-console
+                console.warn('[mobile-bridge:inbound] ackCallback failed:', err)
+            })
 
         const m = /^perm:(allow|deny):([a-km-z]{5})$/i.exec(cb.data)
         if (!m) {
             // Unknown callback shape (future button kinds, stale callback
-            // from a removed feature). Ack silently, drop.
-            void ack()
+            // from a removed feature). Already acked above; drop.
             return
         }
 
@@ -189,16 +198,14 @@ export class InboundRouterService implements OnDestroy {
         const permId = m[2].toLowerCase()
 
         // Gate: callback sender must be on the allowlist of SOME binding
-        // that targets this chat. We don't yet have a callback-chat→binding
+        // that targets this chat. We don't have a callback-chat→binding
         // map; iterate bindings and accept if any allowlist matches.
         const binding = this.store.current.find(
-            b => b.platform === 'telegram'
-                && b.chatId === String(cb.chatId)
+            b => b.chatId === cb.chatId
                 && b.enabled
-                && b.approvedSenders.includes(String(cb.senderId)),
+                && b.approvedSenders.includes(cb.senderId),
         )
         if (!binding) {
-            void ack('Not authorised.')
             await appendAudit({
                 kind: 'permission-verdict-rejected',
                 reason: 'no-matching-binding-or-sender',
@@ -214,7 +221,6 @@ export class InboundRouterService implements OnDestroy {
             kind: ok ? 'permission-verdict' : 'permission-verdict-stale',
             permId, verdict, source: 'callback', chatId: cb.chatId,
         })
-        void ack(ok ? (verdict === 'allow' ? '✅ Allowed' : '❌ Denied') : 'Already resolved.')
     }
 }
 

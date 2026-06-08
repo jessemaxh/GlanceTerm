@@ -6,8 +6,9 @@ import { TabMonitor, TabState, TabStatus } from 'tabby-plugin-ai-sidebar'
 import { TabIdentityService } from './tab-identity.service'
 import { BindingStoreService } from './binding/store.service'
 import { ChannelBinding } from './binding/types'
-import { TopicService } from './telegram/topic.service'
-import { TelegramClientService, TelegramApiError } from './telegram/client.service'
+import { TopicService } from './topic.service'
+import { BackendRegistry } from './backends/registry.service'
+import { MessagingError } from './backends/types'
 import { retryWithBackoff } from './retry'
 import { appendAudit, redactToken } from './audit-log'
 import { TranscriptTailerService, TranscriptEvent } from './transcript/tailer.service'
@@ -66,7 +67,7 @@ export class OutboundDispatcherService implements OnDestroy {
         private identity: TabIdentityService,
         private store: BindingStoreService,
         private topics: TopicService,
-        private telegram: TelegramClientService,
+        private backends: BackendRegistry,
         private transcript: TranscriptTailerService,
         private lock: InstanceLockService,
     ) {
@@ -85,19 +86,22 @@ export class OutboundDispatcherService implements OnDestroy {
 
     private async syncTransport (bindings: ChannelBinding[]): Promise<void> {
         // If this process didn't win the single-instance lock, force-stop
-        // the Telegram loop unconditionally. Two processes long-polling
-        // the same bot token would steal each other's updates (Telegram
+        // every backend unconditionally. Two processes long-polling the
+        // same bot token would steal each other's updates (Telegram
         // delivers each update_id exactly once), making /bind and inbound
-        // routing flap between instances. Better to be silent here than
-        // be subtly broken.
+        // routing flap between instances. Same logic applies to Feishu's
+        // WebSocket stream — only one client per app should be alive.
         if (!await this.lock.isPrimary()) {
-            await this.telegram.stop()
+            await this.backends.forPlatform('telegram').stop()
             return
         }
+        // Phase 1: telegram-only. When FeishuBackend lands, expand this
+        // to iterate active platforms.
         const active = bindings.find(b => b.platform === 'telegram' && b.enabled)
+        const telegram = this.backends.forPlatform('telegram')
         if (active) {
             try {
-                await this.telegram.start(active.botToken)
+                await telegram.start(active.credentials)
             } catch (err) {
                 // eslint-disable-next-line no-console
                 console.warn(
@@ -106,9 +110,7 @@ export class OutboundDispatcherService implements OnDestroy {
                 )
             }
         } else {
-            // No enabled Telegram binding — stop the loop so we're not
-            // hammering api.telegram.org for an absent integration.
-            await this.telegram.stop()
+            await telegram.stop()
         }
     }
 
@@ -171,8 +173,7 @@ export class OutboundDispatcherService implements OnDestroy {
         for (const binding of this.store.current) {
             if (!binding.enabled) continue
             if (!this.passesFilter(binding, eventType)) continue
-            if (binding.platform !== 'telegram') continue // v0: Telegram only
-            sends.push(this.sendToTelegram(binding, identity, eventType, body))
+            sends.push(this.sendViaBackend(binding, identity, eventType, body))
         }
         await Promise.all(sends)
     }
@@ -206,8 +207,7 @@ export class OutboundDispatcherService implements OnDestroy {
         for (const binding of this.store.current) {
             if (!binding.enabled) continue
             if (!this.passesFilter(binding, eventType)) continue
-            if (binding.platform !== 'telegram') continue
-            sends.push(this.sendToTelegram(binding, identity, eventType, body))
+            sends.push(this.sendViaBackend(binding, identity, eventType, body))
         }
         await Promise.all(sends)
     }
@@ -220,38 +220,32 @@ export class OutboundDispatcherService implements OnDestroy {
         return list.includes(eventType)
     }
 
-    private async sendToTelegram (
+    private async sendViaBackend (
         binding: ChannelBinding,
         identity: { uuid: string; displayIndex: number; name: string },
         eventType: BridgeEventType,
         body: string,
     ): Promise<void> {
         const text = this.formatMessage(eventType, body)
+        const backend = this.backends.forPlatform(binding.platform)
         let reopenAttempted = false
         try {
             await retryWithBackoff(async () => {
-                // ensureTopic is cached after first success, so retrying
-                // the whole pipeline is cheap on the topic side and
-                // re-attempts only the actual send.
                 const threadId = await this.topics.ensureTopic(binding, identity)
-                await this.telegram.sendMessage(Number(binding.chatId), text, {
-                    messageThreadId: threadId,
-                })
+                await backend.sendText(binding.chatId, threadId, text)
             })
         } catch (err) {
-            // TOPIC_CLOSED race: TopicSyncService closed the topic in the
-            // gap between identity going away and this send draining the
-            // queue. Reopen + retry once. The next sync tick will re-close
-            // if the tab is really gone — minor cosmetic flicker, but the
-            // assistant's final message isn't lost.
-            if (this.isTopicClosed(err)) {
+            // Thread-closed race: TopicSyncService closed the thread in
+            // the gap between identity going away and this send draining
+            // the queue. Reopen + retry once. The next sync tick will
+            // re-close if the tab is really gone — minor cosmetic flicker,
+            // but the assistant's final message isn't lost.
+            if (err instanceof MessagingError && err.kind === 'thread_closed') {
                 reopenAttempted = true
                 try {
                     await this.topics.syncReopenTopic(binding, identity.uuid)
                     const threadId = await this.topics.ensureTopic(binding, identity)
-                    await this.telegram.sendMessage(Number(binding.chatId), text, {
-                        messageThreadId: threadId,
-                    })
+                    await backend.sendText(binding.chatId, threadId, text)
                     return
                 } catch (innerErr) {
                     err = innerErr
@@ -268,21 +262,9 @@ export class OutboundDispatcherService implements OnDestroy {
                 tabUuid: identity.uuid,
                 tabIndex: identity.displayIndex,
                 error: safeMessage,
-                // Distinguishes "first send failed" from "first send hit
-                // TOPIC_CLOSED, reopen + resend also failed" — without
-                // this the audit log reads as a vanilla send failure
-                // when it's actually a reopen-side issue (e.g. 429 on
-                // the second sendMessage), which points at a different
-                // fix.
                 reopenAttempted,
             })
         }
-    }
-
-    private isTopicClosed (err: unknown): boolean {
-        return err instanceof TelegramApiError
-            && err.code === 400
-            && /TOPIC_CLOSED/i.test(err.description)
     }
 
     private formatMessage (eventType: BridgeEventType, body: string): string {

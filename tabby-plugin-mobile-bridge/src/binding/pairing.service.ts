@@ -1,7 +1,7 @@
 import { Injectable, OnDestroy } from '@angular/core'
 import { BehaviorSubject, Observable, Subject, Subscription } from 'rxjs'
 
-import { TelegramClientService } from '../telegram/client.service'
+import { TelegramBackend } from '../backends/telegram/client.service'
 import { BindingStoreService } from './store.service'
 import { ChannelBinding, PendingPairing } from './types'
 
@@ -45,7 +45,7 @@ export class PairingService implements OnDestroy {
     private sweepHandle: ReturnType<typeof setInterval> | null = null
 
     constructor (
-        private telegram: TelegramClientService,
+        private telegram: TelegramBackend,
         private store: BindingStoreService,
     ) {
         this.sweepHandle = setInterval(() => this.sweepExpired(), PairingService.SWEEP_MS)
@@ -79,7 +79,7 @@ export class PairingService implements OnDestroy {
         // through console.warn — the previous `void` swallowed them and
         // left the user staring at a pairing UI that never completed.
         if (!this.telegramSub) {
-            this.telegramSub = this.telegram.inboundMessages$.subscribe(msg => {
+            this.telegramSub = this.telegram.inbound$.subscribe(msg => {
                 this.onTelegramInbound(msg).catch(err => {
                     // eslint-disable-next-line no-console
                     console.warn('[mobile-bridge:pairing] inbound handler failed:', err)
@@ -87,13 +87,13 @@ export class PairingService implements OnDestroy {
             })
         }
 
-        await this.telegram.start(botToken)
+        await this.telegram.start({ platform: 'telegram', botToken })
 
         const code = this.mintCode()
         const pending: PendingPairing = {
             code,
             platform: 'telegram',
-            botToken,
+            credentials: { platform: 'telegram', botToken },
             label,
             expiresAt: Date.now() + PairingService.PAIRING_TTL_MS,
         }
@@ -124,7 +124,7 @@ export class PairingService implements OnDestroy {
         if (!stillNeeded) await this.telegram.stop()
     }
 
-    private async onTelegramInbound (msg: { chatId: number; senderId: number; text: string; senderUsername?: string }): Promise<void> {
+    private async onTelegramInbound (msg: { chatId: string; senderId: string; text: string; senderName?: string }): Promise<void> {
         const match = /^\/bind\s+([A-Z0-9]{4,12})\b/i.exec(msg.text.trim())
         if (!match) return
         const code = match[1].toUpperCase()
@@ -138,11 +138,11 @@ export class PairingService implements OnDestroy {
         // Bound: write the binding, drop the pending entry, notify UI.
         const binding = await this.store.add({
             platform: 'telegram',
-            label: candidate.label ?? `Telegram ${msg.senderUsername ?? msg.senderId}`,
-            botToken: candidate.botToken,
-            chatId: String(msg.chatId),
-            ownerUserId: String(msg.senderId),
-            approvedSenders: [String(msg.senderId)],
+            label: candidate.label ?? `Telegram ${msg.senderName ?? msg.senderId}`,
+            credentials: candidate.credentials,
+            chatId: msg.chatId,
+            ownerUserId: msg.senderId,
+            approvedSenders: [msg.senderId],
             enabled: true,
             eventFilter: [],
         })

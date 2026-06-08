@@ -1,4 +1,4 @@
-import { TelegramApiError } from './telegram/client.service'
+import { MessagingError } from './backends/types'
 
 /**
  * Exponential-backoff retry. Backoff schedule with base=500 ms, factor=2:
@@ -10,9 +10,16 @@ import { TelegramApiError } from './telegram/client.service'
  *   attempt 5 → 8 s
  * Capped at maxMs (default 60s) per individual wait.
  *
- * `shouldRetry` lets callers narrow retryable errors. Default: retry
- * network / unknown errors and Telegram 429 / 5xx; fail fast on Telegram
- * 4xx (bad token, invalid chat) — retrying won't change those.
+ * `shouldRetry` lets callers narrow retryable errors. Default policy:
+ *   - {@link MessagingError} with kind=`rate_limited` → retry (honour
+ *     `retryAfterMs` if present, else exponential)
+ *   - {@link MessagingError} with any other kind → fail fast (auth,
+ *     thread_closed, etc. won't recover by retrying)
+ *   - Other errors (network, unknown) → retry
+ *
+ * Cross-platform: doesn't import any backend-specific error type. All
+ * decisions go through the {@link MessagingError.kind} taxonomy so the
+ * same policy applies to Telegram, Feishu, Discord, etc.
  */
 export interface RetryOptions {
     maxAttempts?: number
@@ -22,8 +29,8 @@ export interface RetryOptions {
 }
 
 const DEFAULT_SHOULD_RETRY = (err: unknown): boolean => {
-    if (err instanceof TelegramApiError && err.code !== undefined) {
-        return err.code === 429 || err.code >= 500
+    if (err instanceof MessagingError) {
+        return err.kind === 'rate_limited'
     }
     return true
 }
@@ -45,8 +52,11 @@ export async function retryWithBackoff<T> (
             lastErr = err
             if (!shouldRetry(err)) throw err
             if (attempt === maxAttempts - 1) break
-            const delay = Math.min(baseMs * 2 ** attempt, maxMs)
-            await new Promise(r => setTimeout(r, delay))
+            // Honour the server's `retry_after` hint when present; falls
+            // back to exponential backoff otherwise.
+            const hint = err instanceof MessagingError ? err.retryAfterMs : undefined
+            const delay = hint ?? Math.min(baseMs * 2 ** attempt, maxMs)
+            await new Promise(r => setTimeout(r, Math.min(delay, maxMs)))
         }
     }
     throw lastErr

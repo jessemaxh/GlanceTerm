@@ -6,8 +6,9 @@ import * as path from 'path'
 
 import { TabIdentityService } from './tab-identity.service'
 import { BindingStoreService } from './binding/store.service'
-import { TopicService } from './telegram/topic.service'
-import { TelegramClientService } from './telegram/client.service'
+import { TopicService } from './topic.service'
+import { BackendRegistry } from './backends/registry.service'
+import { InteractiveSpec, MessageRef } from './backends/types'
 import { appendAudit, redactToken } from './audit-log'
 
 /**
@@ -49,12 +50,13 @@ export class PermissionRelayService implements OnDestroy {
      *  guaranteed orphaned (the handler has already given up). */
     private static readonly STALE_REQ_MS = 30 * 60_000
 
-    /** id -> {chatId, messageId} per binding the prompt was sent to.
-     *  Multiple bindings can mirror the same prompt; we track each so an
-     *  edit-on-verdict reaches every chat. The inner Map keys on bindingId
-     *  in case a tab has multiple Telegram bindings mirroring the same
-     *  prompt — we'd edit each independently. */
-    private readonly outboundByReq = new Map<string, Map<string, { chatId: number; messageId: number }>>()
+    /** id -> per-binding MessageRef of the prompt sent. Multiple bindings
+     *  can mirror the same prompt; we track each so an edit-on-verdict
+     *  reaches every chat. The inner Map keys on bindingId so a tab
+     *  with multiple bindings can edit each independently. MessageRef
+     *  carries chatId+threadId+messageId — enough for backend.editMessage
+     *  without re-threading through the original send context. */
+    private readonly outboundByReq = new Map<string, Map<string, MessageRef>>()
     /** Per-id timer that lazily evicts outboundByReq entries that never
      *  get an applyVerdict (handler timed out, GlanceTerm restarted, etc.).
      *  Matches the handler's 25 min poll ceiling + 5 min safety margin. */
@@ -71,7 +73,7 @@ export class PermissionRelayService implements OnDestroy {
     // silently dropping a real pending request.
 
     constructor (
-        private telegram: TelegramClientService,
+        private backends: BackendRegistry,
         private store: BindingStoreService,
         private identity: TabIdentityService,
         private topics: TopicService,
@@ -196,23 +198,14 @@ export class PermissionRelayService implements OnDestroy {
         const preview = summarisePayloadForPhone(payload)
         const text = formatPrompt(id, toolName, preview)
 
-        const sentForId = new Map<string, { chatId: number; messageId: number }>()
+        const sentForId = new Map<string, MessageRef>()
         for (const binding of this.store.current) {
-            if (binding.platform !== 'telegram' || !binding.enabled) continue
+            if (!binding.enabled) continue
             try {
                 const threadId = await this.topics.ensureTopic(binding, ident)
-                const sent = await this.telegram.sendMessage(
-                    Number(binding.chatId),
-                    text,
-                    {
-                        messageThreadId: threadId,
-                        replyMarkup: buildAllowDenyKeyboard(id),
-                    },
-                )
-                sentForId.set(binding.id, {
-                    chatId: Number(binding.chatId),
-                    messageId: sent.message_id,
-                })
+                const ref = await this.backends.forPlatform(binding.platform)
+                    .sendInteractive(binding.chatId, threadId, buildPromptSpec(id, text))
+                sentForId.set(binding.id, ref)
             } catch (err) {
                 const safe = redactToken(err instanceof Error ? err.message : String(err))
                 // eslint-disable-next-line no-console
@@ -308,11 +301,15 @@ export class PermissionRelayService implements OnDestroy {
             const editText = stillPending
                 ? (verdict === 'allow' ? '✅ Allowed on phone' : '❌ Denied on phone')
                 : '↩️ Already resolved on desktop'
-            for (const [bindingId, msg] of sent) {
+            for (const [bindingId, ref] of sent) {
+                // Look up the binding to resolve platform; the binding may
+                // have been removed in the interim (rare), in which case
+                // we silently skip the edit — the user already disconnected.
+                const binding = this.store.current.find(b => b.id === bindingId)
+                if (!binding) continue
                 try {
-                    await this.telegram.editMessageText(msg.chatId, msg.messageId, editText, {
-                        replyMarkup: { inline_keyboard: [] },
-                    })
+                    await this.backends.forPlatform(binding.platform)
+                        .editMessage(ref, editText, { clearButtons: true })
                 } catch (err) {
                     const safe = redactToken(err instanceof Error ? err.message : String(err))
                     // eslint-disable-next-line no-console
@@ -422,12 +419,16 @@ function formatPrompt (id: string, toolName: string, preview: string): string {
     return head + body + tail
 }
 
-function buildAllowDenyKeyboard (id: string) {
+/** Cross-platform interactive prompt spec for the permission request.
+ *  Backends translate `buttons` into the platform-native button shape
+ *  (TG inline_keyboard, Feishu interactive card). */
+function buildPromptSpec (id: string, body: string): InteractiveSpec {
     return {
-        inline_keyboard: [
+        body,
+        buttons: [
             [
-                { text: '✅ Allow', callback_data: `perm:allow:${id}` },
-                { text: '❌ Deny', callback_data: `perm:deny:${id}` },
+                { label: '✅ Allow', value: `perm:allow:${id}`, style: 'primary' },
+                { label: '❌ Deny', value: `perm:deny:${id}`, style: 'danger' },
             ],
         ],
     }

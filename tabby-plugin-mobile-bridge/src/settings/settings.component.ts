@@ -5,11 +5,11 @@ import { map } from 'rxjs/operators'
 
 import { BindingStoreService } from '../binding/store.service'
 import { PairingService } from '../binding/pairing.service'
-import { TelegramClientService } from '../telegram/client.service'
-import { TopicService } from '../telegram/topic.service'
+import { TelegramBackend } from '../backends/telegram/client.service'
+import { TopicService } from '../topic.service'
 import { InstanceLockService } from '../instance-lock.service'
 import { ChannelBinding, PendingPairing } from '../binding/types'
-import { TgUser } from '../telegram/types'
+import { BotIdentity } from '../backends/types'
 
 /**
  * Settings panel for the Mobile Bridge plugin. Opened from the AI
@@ -133,7 +133,7 @@ export class BridgeSettingsComponent implements OnDestroy {
     constructor (
         private store: BindingStoreService,
         private pairingSvc: PairingService,
-        private telegram: TelegramClientService,
+        private telegram: TelegramBackend,
         private topics: TopicService,
         private lock: InstanceLockService,
         private zone: NgZone,
@@ -234,9 +234,9 @@ export class BridgeSettingsComponent implements OnDestroy {
         void this.store.remove(b.id)
     }
 
-    private formatStatus (running: boolean, identity: TgUser | null): string {
+    private formatStatus (running: boolean, identity: BotIdentity | null): string {
         if (!running) return 'Idle'
-        if (identity?.username) return `@${identity.username} · connected`
+        if (identity?.displayName) return `${identity.displayName} · connected`
         return 'Connected'
     }
 
