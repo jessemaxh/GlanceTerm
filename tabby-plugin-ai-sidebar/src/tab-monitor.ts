@@ -37,7 +37,7 @@ async function runProbe (cmd: string, args: string[], timeoutMs: number): Promis
 }
 
 import { HookAdapterRegistry } from './hook-adapters/registry'
-import { HookWatcherService } from './hook-watcher.service'
+import { HookWatcherService, HookSnapshot } from './hook-watcher.service'
 import { HookInstallerService } from './hook-installer.service'
 
 /** Poll cadence for process-tree scans. Hooks deliver state pushes; the poll
@@ -76,6 +76,28 @@ const BG_PERSIST_MS = 2_000
  * appearing within human-reaction-latency of the actual stop.
  */
 const IDLE_STABILITY_MS = 3_000
+
+/**
+ * Slow-path interrupt detector grace + throttle. The fast path
+ * (EscInterruptService → HookWatcher.forceIdle) catches the user pressing
+ * ESC at the keyboard. The slow path catches the rest: agent-internal
+ * timeouts, `/clear` commands, pasted interrupts, anything that bypasses
+ * keyboard input but still terminates the turn. Both agents we support
+ * today (claude / codex) leave a marker in their transcript
+ * (`[Request interrupted by user`, `turn_aborted`, `task_aborted`) — see
+ * `transcriptEndedAfter`.
+ *
+ * GRACE_MS: how long after the latest hook event before we even start
+ * looking at the transcript. Below this we assume hooks will fire on time
+ * for the normal Stop / interrupted PostToolUse path. 2 s is comfortably
+ * past Claude's typical PostToolUse latency.
+ *
+ * INTERVAL_MS: minimum gap between transcript reads per tab. Each read is
+ * a tail-128KB-and-JSON.parse — cheap but not free. 1 s keeps detection
+ * within human-reaction-latency while bounding disk traffic for a 50-tab
+ * Working population to ~50 reads/s peak. */
+const TRANSCRIPT_INTERRUPT_GRACE_MS = 2_000
+const TRANSCRIPT_INTERRUPT_INTERVAL_MS = 1_000
 
 /**
  * `Done` is render-derived, never emitted by hooks or this monitor. The sidebar
@@ -383,6 +405,14 @@ export class TabMonitor implements OnDestroy {
      * (firstSeen entries past threshold).size`, no double counting.
      */
     private bgConfirmedPids = new WeakMap<BaseTabComponent, Set<number>>()
+    /**
+     * Per-tab last-time we ran the transcript interrupt probe. Throttles the
+     * slow-path check to TRANSCRIPT_INTERRUPT_INTERVAL_MS so a stuck-Working
+     * tab doesn't trigger a transcript read on every poll tick. Reset (entry
+     * dropped) when the tab's effective status leaves Working — the next
+     * Working entry starts a fresh probe schedule.
+     */
+    private lastTranscriptProbeAt = new WeakMap<BaseTabComponent, number>()
 
     readonly states$: Observable<TabState[]> = this.subject.asObservable()
 
@@ -618,6 +648,7 @@ export class TabMonitor implements OnDestroy {
                 }
                 status = this.applyIdleGate(t.inner, rawStatus, snap.eventAt)
                 lastActiveMs = Math.max(0, Date.now() - snap.eventAt)
+                this.maybeProbeTranscriptInterrupt(t.inner, tabId, snap, status)
             } else {
                 // Adapter exists and tool is running but no hook event in our
                 // state dir yet. Either (a) hook just got installed and Claude
@@ -643,6 +674,7 @@ export class TabMonitor implements OnDestroy {
             lastActiveMs = Date.now() - since
         } else {
             this.workingSince.delete(t.inner)
+            this.lastTranscriptProbeAt.delete(t.inner)
         }
 
         // 5. Background-job count: confirmed (hook-signaled) + heuristic
@@ -890,6 +922,42 @@ export class TabMonitor implements OnDestroy {
             void this.tick()
         }, delayMs + 25)
         this.idleGateTimers.set(inner, t)
+    }
+
+    /**
+     * Slow-path interrupt probe. The fast path (EscInterruptService) catches
+     * the user pressing ESC at the keyboard. This catches the residue: agent-
+     * internal timeouts, `/clear`, pasted interrupts, anything that ends the
+     * turn without firing a Stop / interrupted-PostToolUse hook. Tails the
+     * transcript and looks for the markers `transcriptEndedAfter` knows
+     * about. Throttled per-tab; only runs after a grace window so normal
+     * Stop hook traffic gets first chance to settle the row.
+     *
+     * Fire-and-forget: the result lands as a `hooks.forceIdle()` call which
+     * re-emits HookWatcher snapshots$ and kicks another tick, surfacing
+     * Idle through the normal pipeline. We deliberately don't await — the
+     * tick loop is the hot path and should stay sync-ish.
+     */
+    private maybeProbeTranscriptInterrupt (
+        inner: BaseTabComponent,
+        tabId: string | undefined,
+        snap: HookSnapshot,
+        status: TabStatus,
+    ): void {
+        if (status !== TabStatus.Working) return
+        if (!tabId) return
+        if (!snap.transcriptPath) return
+        const now = Date.now()
+        if (now - snap.eventAt <= TRANSCRIPT_INTERRUPT_GRACE_MS) return
+        const lastProbe = this.lastTranscriptProbeAt.get(inner) ?? 0
+        if (now - lastProbe < TRANSCRIPT_INTERRUPT_INTERVAL_MS) return
+        this.lastTranscriptProbeAt.set(inner, now)
+        const txPath = snap.transcriptPath
+        const eventAt = snap.eventAt
+        const tid = tabId
+        void transcriptEndedAfter(txPath, eventAt).then(ended => {
+            if (ended) this.hooks.forceIdle(tid, 'transcript-interrupted')
+        }).catch(() => { /* transient FS errors are non-fatal */ })
     }
 
     private clearGateTimer (inner: BaseTabComponent): void {
@@ -1267,4 +1335,95 @@ async function readGlancetermTabIdFromPid (pid: number): Promise<string | null> 
     // to sess.glancetermTabId here; the mismatch only surfaces on
     // session-restore which is rarer on Windows (no native session restore).
     return null
+}
+
+/**
+ * Tail the AI agent's transcript file and check whether its last
+ * end-of-turn record landed AT OR AFTER `eventAt`. Used by the slow-path
+ * interrupt probe in TabMonitor to surface terminal turn endings the
+ * hook layer missed (user-typed `/clear`, agent-internal timeouts,
+ * pasted ESC sequences, …).
+ *
+ * Recognised markers, ordered by likelihood:
+ *   - Codex `event_msg` with payload `task_complete` / `turn_aborted` /
+ *     `task_aborted` (covers Codex's "the turn is done one way or
+ *     another" surface).
+ *   - Claude `user` record whose content begins with
+ *     `[Request interrupted by user` (the literal string Claude writes
+ *     into its `.jsonl` transcript when the user presses ESC).
+ *   - Any record carrying `toolUseResult.interrupted === true` (Claude's
+ *     tool-call interrupt shape, in case the PostToolUse hook hasn't yet
+ *     landed when we look).
+ *
+ * Returns false on any read/parse error — caller falls back to the
+ * normal hook path. Reads the last 128 KB only, which covers every
+ * realistic single-turn footprint while bounding disk traffic.
+ */
+export async function transcriptEndedAfter (transcriptPath: string, eventAt: number): Promise<boolean> {
+    let stat: fsSync.Stats
+    try {
+        stat = await fs.stat(transcriptPath)
+    } catch {
+        return false
+    }
+    const maxBytes = 128 * 1024
+    const start = Math.max(0, stat.size - maxBytes)
+    let buf: Buffer
+    try {
+        const fd = await fs.open(transcriptPath, 'r')
+        try {
+            buf = Buffer.alloc(stat.size - start)
+            await fd.read(buf, 0, buf.length, start)
+        } finally {
+            await fd.close()
+        }
+    } catch {
+        return false
+    }
+
+    const terminalPayloads = new Set(['task_complete', 'turn_aborted', 'task_aborted'])
+    for (const line of buf.toString('utf8').split('\n').reverse()) {
+        if (
+            !line.includes('"task_complete"')
+            && !line.includes('"turn_aborted"')
+            && !line.includes('"task_aborted"')
+            && !line.includes('"interrupted":true')
+            && !line.includes('[Request interrupted by user')
+        ) continue
+        try {
+            const parsed = JSON.parse(line)
+            let endedAt: number
+            if (parsed?.type === 'event_msg' && terminalPayloads.has(parsed?.payload?.type)) {
+                endedAt = typeof parsed.payload.completed_at === 'number'
+                    ? parsed.payload.completed_at * 1000
+                    : typeof parsed.payload.aborted_at === 'number'
+                        ? parsed.payload.aborted_at * 1000
+                    : Date.parse(parsed.timestamp ?? '')
+            } else if (parsed?.toolUseResult?.interrupted === true) {
+                endedAt = Date.parse(parsed.timestamp ?? '')
+            } else if (isClaudeInterruptedUserRecord(parsed)) {
+                endedAt = Date.parse(parsed.timestamp ?? '')
+            } else {
+                continue
+            }
+            return Number.isFinite(endedAt) && endedAt >= eventAt
+        } catch {
+            continue
+        }
+    }
+    return false
+}
+
+function isClaudeInterruptedUserRecord (parsed: any): boolean {
+    if (parsed?.type !== 'user' || parsed?.message?.role !== 'user') return false
+    const content = parsed.message.content
+    if (typeof content === 'string') {
+        return content.startsWith('[Request interrupted by user')
+    }
+    if (!Array.isArray(content)) return false
+    return content.some((part: any) => (
+        part?.type === 'text'
+        && typeof part.text === 'string'
+        && part.text.startsWith('[Request interrupted by user')
+    ))
 }

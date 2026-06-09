@@ -4,7 +4,8 @@ import * as fs from 'fs/promises'
 import * as fsSync from 'fs'
 import * as path from 'path'
 
-import type { AiTool, TabStatus } from './tab-monitor'
+import type { AiTool } from './tab-monitor'
+import { TabStatus } from './tab-monitor'
 import { HookAdapter } from './hook-adapters/adapter'
 import { HookAdapterRegistry } from './hook-adapters/registry'
 import { HookRuntimeService } from './hook-runtime.service'
@@ -439,6 +440,33 @@ export class HookWatcherService implements OnDestroy {
     /** Sync lookup used by the sidebar render path. */
     getStatus (tabId: string): HookSnapshot | null {
         return this.map.get(tabId) ?? null
+    }
+
+    /**
+     * Synthetic Working→Idle override. The agent CLIs (claude, codex, …)
+     * intercept ESC at raw-stdin level and abort in-flight LLM/tool work
+     * without firing any hook event during the LLM-thinking window, so
+     * without this path the row would stay stuck on `working` until the
+     * next user prompt. EscInterruptService is the caller.
+     *
+     * No-op when:
+     *   - No snapshot yet (we'd be fabricating a tool we don't know).
+     *   - Already Idle (nothing to do).
+     *   - NeedsPermission (a permission dialog is the user's call; ESC
+     *     there cancels the dialog → next PreToolUse re-establishes
+     *     status anyway, no need to race).
+     *
+     * `reason` is a label for future telemetry; not currently logged.
+     */
+    forceIdle (tabId: string, reason: string): boolean {
+        void reason
+        const current = this.map.get(tabId)
+        if (!current) return false
+        if (current.status === TabStatus.Idle) return false
+        if (current.status === TabStatus.NeedsPermission) return false
+        this.map.set(tabId, { ...current, status: TabStatus.Idle, eventAt: Date.now() })
+        this.emit()
+        return true
     }
 
     /** Sync lookup — how many subagents the main agent has spawned without a

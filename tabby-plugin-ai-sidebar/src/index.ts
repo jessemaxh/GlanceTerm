@@ -29,6 +29,7 @@ import { ScreenshotService } from './screenshot/screenshot.service'
 import { ScreenshotPasteService } from './screenshot/paste.service'
 import { ImagePasteHookService } from './image-paste-hook.service'
 import { SplitShellService } from './split-shell.service'
+import { EscInterruptService } from './esc-interrupt.service'
 
 // Public exports for cross-plugin consumers (currently
 // tabby-plugin-mobile-bridge). Surface kept deliberately narrow — every
@@ -124,6 +125,7 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
         ScreenshotPasteService,
         ImagePasteHookService,
         SplitShellService,
+        EscInterruptService,
         { provide: SidebarProvider,       useClass: AiSidebarContribProvider,      multi: true },
         { provide: ToolbarButtonProvider, useClass: ToggleAiSidebarButtonProvider, multi: true },
         { provide: HotkeyProvider,        useClass: AiSidebarHotkeyProvider,       multi: true },
@@ -159,6 +161,10 @@ export default class AiSidebarModule {
         // this, opening GlanceTerm with the sidebar hidden would skip
         // auto-resume entirely.
         _r: AutoResumeService,
+        // Eager-inject so per-tab ESC sniffers are armed before the user
+        // ever switches focus. Without this the first ESC in a freshly
+        // launched session would land before the service had subscribed.
+        _e: EscInterruptService,
     ) {
         // eslint-disable-next-line no-console
         console.log('[glanceterm] plugin loaded')
