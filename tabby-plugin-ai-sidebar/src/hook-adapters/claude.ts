@@ -101,6 +101,10 @@ const EVENTS: HookEventEntry[] = [
     // each invocation is sub-100 ms async so it doesn't block Claude.
     { event: 'PostToolUse',       async: true },
     { event: 'Stop',              async: true },
+    // Claude can end a turn through StopFailure instead of Stop. Treat it as
+    // a terminal per-turn signal so interrupted/error turns don't remain
+    // displayed as working when no Stop follows.
+    { event: 'StopFailure',       async: true },
     // Subagent lifecycle. When the main agent invokes the `Task` tool to
     // background a subagent, the main agent's response ends immediately and
     // fires Stop — so without this subscription the sidebar drops to "ready"
@@ -294,6 +298,7 @@ export class ClaudeHookAdapter extends HookAdapter {
                 // follows — actually changes display state.
                 return TabStatus.Working
             case 'Stop':
+            case 'StopFailure':
                 return TabStatus.Idle
             case 'SubagentStop':
                 // A subagent finishing is not the same as the main agent

@@ -105,4 +105,30 @@ export abstract class HookAdapter {
     signalsBgJobs (): boolean {
         return false
     }
+
+    /**
+     * True when this agent CLI maintains a long-lived native helper child
+     * under the agent's own pid — visible to our process-tree scan from the
+     * moment the agent launches, BEFORE any hook event arrives. The bg-job
+     * heuristic (child persisted for ≥BG_PERSIST_MS) would otherwise badge
+     * that helper as `1 bg` forever.
+     *
+     * When true, TabMonitor treats the adapter as hook-authoritative even
+     * BEFORE the first hook event for this tab — the heuristic is
+     * suppressed and the hook's bg arrivals queue is the only source of
+     * truth for bg-job counts. Cost: real bg jobs that occur before the
+     * first hook event are hidden until that event lands; for agents with
+     * working hooks this window is sub-second.
+     *
+     * When false (default), the heuristic runs in the gap between tab
+     * launch and first hook event — necessary for agents like Claude
+     * whose hook may install AFTER the agent starts (the install runs at
+     * GlanceTerm startup, but the user may have already started Claude in
+     * a tab spawned before install completed).
+     *
+     * Codex spawns a node + native worker pair. Claude does not.
+     */
+    spawnsNativeHelper (): boolean {
+        return false
+    }
 }

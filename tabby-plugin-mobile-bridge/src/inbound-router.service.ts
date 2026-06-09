@@ -8,7 +8,8 @@ import { TelegramBackend } from './backends/telegram/client.service'
 import { FeishuBackend } from './backends/feishu/client.service'
 import { BackendRegistry } from './backends/registry.service'
 import { InboundCallback, InboundMessage } from './backends/types'
-import { TopicService } from './topic.service'
+import { TopicService, FORCED_CLOSE_COOLDOWN_MS } from './topic.service'
+import { TopicSyncService } from './topic-sync.service'
 import { BindingStoreService } from './binding/store.service'
 import { TabIdentityService } from './tab-identity.service'
 import { KeystrokeAdapterRegistry } from './pty-keystroke/registry'
@@ -45,12 +46,23 @@ const PERM_TEXT_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 @Injectable()
 export class InboundRouterService implements OnDestroy {
     private subs: Subscription[] = []
+    /**
+     * Per-(binding,tabUuid) last-time we sent the stale-closed "wasn't
+     * delivered" reply. Stamped synchronously BEFORE the await so a burst
+     * of inbound messages racing on the same closed topic only produces
+     * one reply, not one per message. Cleared opportunistically on entries
+     * older than the cooldown — Map is keyed by `<bindingId>:<tabUuid>`
+     * so growth is bounded by `bindings × historically-closed-tabs` and
+     * each value is a single number.
+     */
+    private lastForcedCloseNoticeAt = new Map<string, number>()
 
     constructor (
         telegram: TelegramBackend,
         feishu: FeishuBackend,
         private backends: BackendRegistry,
         private topics: TopicService,
+        private topicSync: TopicSyncService,
         private store: BindingStoreService,
         private identity: TabIdentityService,
         private monitor: TabMonitor,
@@ -123,6 +135,37 @@ export class InboundRouterService implements OnDestroy {
 
         const outer = this.identity.tabOf(tabUuid)
         if (!outer) {
+            // The tab is gone in GlanceTerm but the user could be typing
+            // here because they reopened the closed topic on the platform
+            // side (TG long-press → Reopen). Two corrective actions, both
+            // gated by a per-(binding,tabUuid) cooldown so a 5-message
+            // burst doesn't fire 5 notices + 5 close calls:
+            //   1. Tell them the message wasn't delivered, so they aren't
+            //      left wondering why nothing happened.
+            //   2. Enqueue a force re-close via TopicSyncService so it
+            //      serializes against any other in-flight binding ops and
+            //      gets dedup'd inside the queue.
+            // Stamp the cooldown BEFORE the await — two concurrent message
+            // handlers entering this branch within the same tick will see
+            // the just-set timestamp and bail.
+            const noticeKey = `${binding.id}:${tabUuid}`
+            const last = this.lastForcedCloseNoticeAt.get(noticeKey) ?? 0
+            if (Date.now() - last < FORCED_CLOSE_COOLDOWN_MS) {
+                await this.audit(msg, 'tab-closed-cooldown')
+                return
+            }
+            this.lastForcedCloseNoticeAt.set(noticeKey, Date.now())
+            try {
+                await this.backends.forPlatform(msg.platform).sendText(
+                    msg.chatId,
+                    msg.threadId,
+                    "⛔ This tab was closed in GlanceTerm. Your message wasn't delivered.",
+                )
+            } catch (err) {
+                // eslint-disable-next-line no-console
+                console.warn('[mobile-bridge:inbound] closed-tab reply failed:', err)
+            }
+            this.topicSync.enqueueForceClose(binding, tabUuid)
             await this.audit(msg, 'tab-closed')
             return
         }

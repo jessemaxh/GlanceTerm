@@ -44,3 +44,6 @@ tabby-plugin-ai-sidebar/dist/
 tabby-plugin-ai-sidebar/package-lock.json
 *.log
 .DS_Store
+
+# webpack output that occasionally lands at repo root from running webpack outside app/
+/main.js

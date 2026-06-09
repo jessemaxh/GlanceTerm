@@ -1,0 +1,250 @@
+<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">
+<head>
+  <meta charset="utf-8">
+  <meta name="ProgId" content="Excel.Sheet">
+  <meta name="Generator" content="GlanceTerm Codex test plan">
+  <style>
+    table { border-collapse: collapse; font-family: Arial, sans-serif; font-size: 12px; }
+    th { background: #d9eaf7; font-weight: bold; }
+    th, td { border: 1px solid #777; padding: 6px; vertical-align: top; }
+    .auto { background: #e2f0d9; }
+    .manual { background: #fff2cc; }
+    .mixed { background: #ddebf7; }
+    .risk { background: #fce4d6; }
+  </style>
+</head>
+<body>
+<table>
+  <tr>
+    <th>ID</th>
+    <th>模块</th>
+    <th>Case</th>
+    <th>验证点</th>
+    <th>测试方式</th>
+    <th>自动化状态</th>
+    <th>手动步骤 / 备注</th>
+    <th>优先级</th>
+  </tr>
+  <tr class="auto">
+    <td>CDX-AUTO-001</td>
+    <td>Hook adapter</td>
+    <td>Codex hooks.json 首次安装</td>
+    <td>创建 ~/.codex/hooks.json，写入 SessionStart、UserPromptSubmit、PreToolUse、PostToolUse、Stop、SubagentStop、PermissionRequest。</td>
+    <td>自动</td>
+    <td>已开始：codex-adapter.test.ts</td>
+    <td>使用临时 HOME，不修改真实 ~/.codex。</td>
+    <td>P0</td>
+  </tr>
+  <tr class="auto">
+    <td>CDX-AUTO-002</td>
+    <td>Hook adapter</td>
+    <td>Codex hook entry 不写 async:true</td>
+    <td>Codex 当前手册说明 async command hooks 会被跳过，adapter 应省略 async 字段。</td>
+    <td>自动</td>
+    <td>已开始：codex-adapter.test.ts</td>
+    <td>这是 Codex 专项风险。</td>
+    <td>P0</td>
+  </tr>
+  <tr class="auto">
+    <td>CDX-AUTO-003</td>
+    <td>Hook adapter</td>
+    <td>安装幂等</td>
+    <td>重复 installHooks 不重复插入 GlanceTerm handler。</td>
+    <td>自动</td>
+    <td>已开始：codex-adapter.test.ts</td>
+    <td></td>
+    <td>P0</td>
+  </tr>
+  <tr class="auto">
+    <td>CDX-AUTO-004</td>
+    <td>Hook adapter</td>
+    <td>保留用户已有 hook</td>
+    <td>用户已有 command hook 不被删除、不被覆盖。</td>
+    <td>自动</td>
+    <td>已开始：codex-adapter.test.ts</td>
+    <td></td>
+    <td>P0</td>
+  </tr>
+  <tr class="auto">
+    <td>CDX-AUTO-005</td>
+    <td>Hook adapter</td>
+    <td>malformed hooks.json 保护</td>
+    <td>JSON 损坏时拒绝写入，避免覆盖用户配置。</td>
+    <td>自动</td>
+    <td>已开始：codex-adapter.test.ts</td>
+    <td></td>
+    <td>P0</td>
+  </tr>
+  <tr class="auto">
+    <td>CDX-AUTO-006</td>
+    <td>Hook adapter</td>
+    <td>uninstall 只移除 GlanceTerm Codex entries</td>
+    <td>保留用户 hook，并且不误删 Claude/其他 agent hook。</td>
+    <td>自动</td>
+    <td>已开始：codex-adapter.test.ts</td>
+    <td></td>
+    <td>P1</td>
+  </tr>
+  <tr class="auto">
+    <td>CDX-AUTO-007</td>
+    <td>Status mapping</td>
+    <td>Codex event 到 sidebar 状态映射</td>
+    <td>UserPromptSubmit/PreToolUse/PostToolUse -> working；Stop/SessionStart -> idle；PermissionRequest -> needs_permission；SubagentStop 不改状态。</td>
+    <td>自动</td>
+    <td>已开始：codex-adapter.test.ts</td>
+    <td></td>
+    <td>P0</td>
+  </tr>
+  <tr class="auto">
+    <td>CDX-AUTO-008</td>
+    <td>Auto resume</td>
+    <td>Codex 命令归一化</td>
+    <td>codex -m gpt-5、node .../codex-cli/... 被保存为可重放 codex 命令。</td>
+    <td>自动</td>
+    <td>已完成：auto-resume.test.ts、auto-resume-replay.test.ts</td>
+    <td>包含 /opt/homebrew/bin/codex 和 codex-cli path-segment 样例。</td>
+    <td>P1</td>
+  </tr>
+  <tr class="auto">
+    <td>CDX-AUTO-009</td>
+    <td>Auto resume</td>
+    <td>多 tab 同 cwd 恢复 quota</td>
+    <td>同 cwd 多个 Codex tab 只恢复 persisted count 数量。</td>
+    <td>自动</td>
+    <td>已完成：auto-resume-replay.test.ts</td>
+    <td>Codex 专项 replay quota 已覆盖。</td>
+    <td>P1</td>
+  </tr>
+  <tr class="auto">
+    <td>CDX-AUTO-010</td>
+    <td>Hook runtime</td>
+    <td>handler 写 Codex NDJSON log</td>
+    <td>fake GLANCETERM_TAB_ID + fake Codex payload 后写 ~/.glanceterm/hooks/&lt;uuid&gt;.log。</td>
+    <td>自动</td>
+    <td>已完成：codex-runtime-watcher.test.ts</td>
+    <td>需要实例化 HookRuntimeService 并执行生成的 shell handler。</td>
+    <td>P1</td>
+  </tr>
+  <tr class="auto">
+    <td>CDX-AUTO-011</td>
+    <td>Hook watcher</td>
+    <td>HookWatcher 读取 Codex NDJSON log</td>
+    <td>cold-load 和 append 新行后，snapshot 在 working、needs_permission、idle 间正确更新。</td>
+    <td>自动</td>
+    <td>已完成：codex-runtime-watcher.test.ts</td>
+    <td>使用临时 GLANCETERM_HOME，不读取真实 ~/.glanceterm。</td>
+    <td>P0</td>
+  </tr>
+  <tr class="auto">
+    <td>CDX-AUTO-012</td>
+    <td>TabMonitor</td>
+    <td>Codex 进程命令识别</td>
+    <td>codex、/opt/homebrew/bin/codex、node .../codex-cli/... 可识别为 codex，并避免 codexical 误匹配。</td>
+    <td>自动</td>
+    <td>已完成：tab-monitor-detection.test.ts</td>
+    <td>抽出 detectAiToolFromCommand 作为可测入口。</td>
+    <td>P0</td>
+  </tr>
+  <tr class="manual">
+    <td>CDX-MAN-001</td>
+    <td>真实 Codex CLI</td>
+    <td>Codex hook trust 流程</td>
+    <td>Codex 启动后提示 hook 需要 review；/hooks 中 trust GlanceTerm command hook。</td>
+    <td>手动</td>
+    <td>不可自动化</td>
+    <td>必须在真实 Codex TUI 中操作。</td>
+    <td>P0</td>
+  </tr>
+  <tr class="manual">
+    <td>CDX-MAN-002</td>
+    <td>真实 Codex CLI</td>
+    <td>真实 hook 事件到达</td>
+    <td>SessionStart、UserPromptSubmit、PreToolUse、PostToolUse、Stop 写入 ~/.glanceterm/hooks/&lt;tab-id&gt;.log。</td>
+    <td>手动</td>
+    <td>不可完全自动化</td>
+    <td>需要真实 codex 进程和真实 hook trust。</td>
+    <td>P0</td>
+  </tr>
+  <tr class="manual">
+    <td>CDX-MAN-003</td>
+    <td>Sidebar UI</td>
+    <td>Codex tab 显示与统计</td>
+    <td>row 显示 Codex/CDX，footer totals 计数正确。</td>
+    <td>手动</td>
+    <td>可部分 e2e</td>
+    <td>真实视觉/UI 建议人工确认。</td>
+    <td>P0</td>
+  </tr>
+  <tr class="manual">
+    <td>CDX-MAN-004</td>
+    <td>Sidebar UI</td>
+    <td>working/ready/done 状态</td>
+    <td>Codex 开始工作显示 working，Stop 后显示 ready/done，聚焦后清 unread。</td>
+    <td>手动</td>
+    <td>可部分 e2e</td>
+    <td>依赖真实 Codex hook timing。</td>
+    <td>P0</td>
+  </tr>
+  <tr class="manual">
+    <td>CDX-MAN-005</td>
+    <td>Permission</td>
+    <td>Codex permission request 状态</td>
+    <td>触发需要审批的命令时 sidebar 显示 needs_permission。</td>
+    <td>手动</td>
+    <td>不可完全自动化</td>
+    <td>需要真实 Codex approval 策略。</td>
+    <td>P0</td>
+  </tr>
+  <tr class="manual risk">
+    <td>CDX-MAN-006</td>
+    <td>Permission</td>
+    <td>Shield 对 Codex 不自动批准</td>
+    <td>打开 shield 后 Codex 仍走本地审批；不会输出 Claude decision allow。</td>
+    <td>手动</td>
+    <td>可补 handler 单测</td>
+    <td>Codex 官方 PermissionRequest 输出 schema 不支持 Claude 的 decision allow。</td>
+    <td>P0</td>
+  </tr>
+  <tr class="manual">
+    <td>CDX-MAN-007</td>
+    <td>Mobile bridge</td>
+    <td>手机 permission relay</td>
+    <td>当前 handler relay 分支是 Claude-only；Codex 应验证为不支持或不触发。</td>
+    <td>手动</td>
+    <td>不可完全自动化</td>
+    <td>如果产品期望支持 Codex，需要单独设计。</td>
+    <td>P1</td>
+  </tr>
+  <tr class="manual">
+    <td>CDX-MAN-008</td>
+    <td>Screenshot paste</td>
+    <td>截图粘贴到 Codex TUI</td>
+    <td>generic paste adapter 能把图片/路径粘到 Codex 会话。</td>
+    <td>手动</td>
+    <td>不可完全自动化</td>
+    <td>涉及剪贴板、TUI 输入和视觉确认。</td>
+    <td>P1</td>
+  </tr>
+  <tr class="manual">
+    <td>CDX-MAN-009</td>
+    <td>Auto resume</td>
+    <td>重启 GlanceTerm 后恢复 Codex</td>
+    <td>关闭 app 时捕获 cwd -> codex command；下次打开同 cwd tab 自动输入 codex 命令。</td>
+    <td>手动</td>
+    <td>自动覆盖状态机，真实重启需手动</td>
+    <td></td>
+    <td>P1</td>
+  </tr>
+  <tr class="manual">
+    <td>CDX-MAN-010</td>
+    <td>Notification</td>
+    <td>系统通知与声音</td>
+    <td>needs_permission、working -> idle/done 的通知和 chime 行为符合预期。</td>
+    <td>手动</td>
+    <td>不可完全自动化</td>
+    <td>依赖 macOS 通知权限。</td>
+    <td>P2</td>
+  </tr>
+</table>
+</body>
+</html>

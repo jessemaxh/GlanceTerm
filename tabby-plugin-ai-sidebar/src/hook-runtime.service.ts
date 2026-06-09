@@ -198,6 +198,30 @@ if [ "\$EVENT" = "PreToolUse" ] && [ "\$TOOL_NAME" = "Bash" ]; then
     fi
 fi
 
+# User-interrupted tool calls surface on PostToolUse as
+# tool_response.interrupted=true. Claude may not fire Stop after this path,
+# so preserve the bit for HookWatcher instead of leaving the tab stuck working.
+#
+# Match is scoped two ways to avoid false positives where the literal
+# string "interrupted":true appears elsewhere in the payload:
+#   1. \`"tool_response"\` must appear in the payload at all — gates against
+#      payloads that don't have a tool_response field surfacing the flag.
+#   2. The \`"interrupted"\` token must be preceded by a legal JSON key
+#      boundary ({, ',', or whitespace). A stdout / command echo of the
+#      literal \`"interrupted":true\` would be JSON-escaped as
+#      \\"interrupted\\":true, where the preceding char is a backslash —
+#      that fails the \`[{,[:space:]]\` guard and is therefore ignored.
+# Residual risk: a custom hook tool whose tool_input contains an
+# "interrupted":true field at the legal-key position would still match.
+# Documented; PowerShell handler does the JSON-typed equivalent.
+INTERRUPTED=0
+if [ "\$EVENT" = "PostToolUse" ]; then
+    if printf '%s' "\$PAYLOAD" | grep -qE '"tool_response"[[:space:]]*:' \\
+       && printf '%s' "\$PAYLOAD" | grep -qE '[{,[:space:]]"interrupted"[[:space:]]*:[[:space:]]*true'; then
+        INTERRUPTED=1
+    fi
+fi
+
 # IMPORTANT — write the per-tab .log line HERE (before any PermissionRequest
 # handling) so HookWatcher sees the event immediately, not 25 minutes later
 # when relay polling resolves. Without this, a tab sitting in permission-
@@ -209,8 +233,8 @@ OUT="\$STATE_DIR/\$TAB_ID.log"
 # other concurrent appenders. Our records are ~250 bytes — well under the
 # limit — so two handler processes firing simultaneously cannot interleave
 # bytes mid-record.
-printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s","ts":%s,"bg":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s","monitor_task_id":"%s","stop_task_id":"%s"}\\n' \\
-    "\$TAB_ID" "\$AGENT" "\$EVENT" "\$MATCHER" "\$TOOL_NAME" "\$SESSION_ID" "\$CWD" "\$TRANSCRIPT_PATH" "\$TS" "\$BG" "\$AGENT_ID" "\$AGENT_TYPE" "\$SPAWN_AGENT_ID" "\$MONITOR_TASK_ID" "\$STOP_TASK_ID" \\
+printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s","ts":%s,"bg":%s,"interrupted":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s","monitor_task_id":"%s","stop_task_id":"%s"}\\n' \\
+    "\$TAB_ID" "\$AGENT" "\$EVENT" "\$MATCHER" "\$TOOL_NAME" "\$SESSION_ID" "\$CWD" "\$TRANSCRIPT_PATH" "\$TS" "\$BG" "\$INTERRUPTED" "\$AGENT_ID" "\$AGENT_TYPE" "\$SPAWN_AGENT_ID" "\$MONITOR_TASK_ID" "\$STOP_TASK_ID" \\
     >> "\$OUT" 2>/dev/null
 
 # Auto-approve permission prompts (Claude only, P0). When the user has
@@ -405,6 +429,7 @@ $out = [ordered]@{
     transcript_path = [string]$json.transcript_path
     ts              = [int][double]::Parse((Get-Date -UFormat %s))
     bg              = [int]$bg
+    interrupted     = [int]$(if ($json.hook_event_name -eq "PostToolUse" -and $json.tool_response -and $json.tool_response.interrupted -eq $true) { 1 } else { 0 })
     agent_id        = $agentId
     agent_type      = $agentType
     spawn_agent_id  = $spawnAgentId
@@ -505,8 +530,15 @@ exit 0
  */
 @Injectable({ providedIn: 'root' })
 export class HookRuntimeService {
-    /** Root of all GlanceTerm filesystem state. */
-    readonly root = path.join(os.homedir(), '.glanceterm')
+    /** Root of all GlanceTerm filesystem state. Resolved from `$HOME`
+     *  (POSIX) / `$USERPROFILE` (Windows) at construction, matching the
+     *  embedded handler scripts which expand the same env vars. Using
+     *  the env var directly — not `os.homedir()` — because the latter
+     *  caches its result inside Node's userInfo() lookup and ignores
+     *  runtime env changes, which would silently desync the TS-side
+     *  root from the handler-side root in tests that redirect HOME
+     *  into a tempdir. */
+    readonly root = path.join(homeFromEnv(), '.glanceterm')
     /** Per-tab status files written by the handler script. */
     readonly stateDir = path.join(this.root, 'hooks')
     /** Permission-relay request/decision files. Pre-created in doEnsure()
@@ -573,6 +605,17 @@ export class HookRuntimeService {
             try { await fs.chmod(this.shHandlerPath, 0o755) } catch { /* swallow */ }
         }
     }
+}
+
+/**
+ * Read the user's home from the environment, falling back to
+ * `os.homedir()` only when neither HOME nor USERPROFILE is set. The
+ * fallback matters for daemon-launched cases where Node's startup didn't
+ * inherit the user shell's env; everywhere else, the env value is
+ * authoritative and matches what the embedded handler scripts read.
+ */
+function homeFromEnv (): string {
+    return process.env.HOME ?? process.env.USERPROFILE ?? os.homedir()
 }
 
 /**

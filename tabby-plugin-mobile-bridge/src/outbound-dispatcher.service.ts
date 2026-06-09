@@ -286,7 +286,7 @@ export class OutboundDispatcherService implements OnDestroy {
             if (err instanceof MessagingError && err.kind === 'thread_closed') {
                 reopenAttempted = true
                 try {
-                    await this.topics.syncReopenTopic(binding, identity.uuid)
+                    await this.topics.syncReopenTopic(binding, identity.uuid, identity)
                     const threadId = await this.topics.ensureTopic(binding, identity)
                     await backend.sendText(binding.chatId, threadId, text)
                     return

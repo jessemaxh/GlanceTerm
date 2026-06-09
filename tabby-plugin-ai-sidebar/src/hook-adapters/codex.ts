@@ -83,12 +83,13 @@ export class CodexHookAdapter extends HookAdapter {
     readonly displayName = 'Codex'
 
     configFilePath (): string {
-        // Codex writes settings under ~/.codex/. Project-local
+        // Codex writes settings under $CODEX_HOME if set, else ~/.codex.
+        // Project-local
         // <repo>/.codex/hooks.json is also supported by Codex, but the
         // installer runs at GlanceTerm startup with no notion of which
         // project the user will work in — the home-directory file is
         // the right default scope.
-        return path.join(os.homedir(), '.codex', 'hooks.json')
+        return path.join(codexConfigDirSync(), 'hooks.json')
     }
 
     hookEvents (): HookEventEntry[] {
@@ -197,6 +198,24 @@ export class CodexHookAdapter extends HookAdapter {
         }
     }
 
+    override signalsBgJobs (): boolean {
+        // Codex's own CLI process is a long-lived node parent plus native
+        // child. The generic "child persisted for >=2s" heuristic badges
+        // that helper as `1 bg` forever. Our handler already writes bg=1
+        // only when the hook payload says Bash run_in_background=true, so
+        // treat Codex hooks as authoritative and suppress the heuristic.
+        return true
+    }
+
+    override spawnsNativeHelper (): boolean {
+        // See signalsBgJobs() — Codex spawns its helper at launch, before
+        // any hook event arrives. TabMonitor uses this to suppress the
+        // heuristic immediately on tab discovery instead of waiting for
+        // the first hook event (which would still see the helper as a
+        // ≥2s-old child and badge it 1-bg-forever).
+        return true
+    }
+
     // ── internals (parallel to claude.ts) ─────────────────────────────────
 
     private readonly agentTokenRe = new RegExp(`(?:^|[\\s/\\\\"'])${escapeRegex(this.id)}(?:[\\s"']|$)`)
@@ -264,7 +283,11 @@ export class CodexHookAdapter extends HookAdapter {
  */
 export function codexConfigDirExistsSync (): boolean {
     try {
-        const dir = path.join(os.homedir(), '.codex')
-        return fsSync.statSync(dir).isDirectory()
+        return fsSync.statSync(codexConfigDirSync()).isDirectory()
     } catch { return false }
+}
+
+function codexConfigDirSync (): string {
+    const override = process.env.CODEX_HOME
+    return override && override.trim() ? override : path.join(os.homedir(), '.codex')
 }

@@ -96,6 +96,23 @@ export class TopicSyncService implements OnDestroy {
         for (const s of this.subs) s.unsubscribe()
     }
 
+    /**
+     * Public force-close entry point for callers outside the reconcile
+     * loop (today: InboundRouter, when a sender messages a stale-closed
+     * topic). Routes through the same per-binding queue + dedup as the
+     * proactive close path so concurrent inbound messages can't produce
+     * overlapping rename / sendText / closeThread bursts that eat into
+     * the per-chat 1 msg/s ceiling.
+     *
+     * `force=true` is passed to syncCloseTopic so the cache-closed
+     * early-exit is skipped; the cooldown inside syncCloseTopic prevents
+     * the actual flood.
+     */
+    enqueueForceClose (binding: ChannelBinding, tabUuid: string): void {
+        this.enqueue(binding.id, `force-close:${tabUuid}`, () =>
+            this.topics.syncCloseTopic(binding, tabUuid, undefined, true))
+    }
+
     private async reconcile (identities: TabIdentity[], bindings: ChannelBinding[]): Promise<void> {
         // Single-instance guard — a secondary GlanceTerm must not mutate
         // shared topic state (would clobber the primary's writes and burn
@@ -134,9 +151,15 @@ export class TopicSyncService implements OnDestroy {
             }
             if (entry.status === 'closed') {
                 this.enqueue(binding.id, `reopen:${identity.uuid}`, () =>
-                    this.topics.syncReopenTopic(binding, identity.uuid))
+                    this.topics.syncReopenTopic(binding, identity.uuid, identity))
             }
-            const expected = this.topics.formatTitle(identity)
+            // Compare against the status the entry is in NOW; reopen
+            // above is enqueued separately and updates lastTitle itself.
+            // Using entry.status here keeps a closed entry's drift check
+            // honest (lastTitle is "✓ #N · …", expected must also be
+            // "✓ #N · …" or every reconcile would queue a redundant
+            // retitle that strips the marker).
+            const expected = this.topics.formatTitle(identity, entry.status)
             if (entry.lastTitle !== expected) {
                 this.enqueue(binding.id, `retitle:${identity.uuid}`, () =>
                     this.topics.syncRetitleTopic(binding, identity))
@@ -146,6 +169,8 @@ export class TopicSyncService implements OnDestroy {
         // 2. Close topics whose tabs are gone. Already-closed entries are
         //    no-ops inside syncCloseTopic but we filter here too so they
         //    don't burn queue slots / throttle gaps.
+        //    The tab is gone, so no TabIdentity to pass — syncCloseTopic
+        //    falls back to prefixing the existing lastTitle with ✓.
         for (const { tabUuid, entry } of cached) {
             if (desiredByUuid.has(tabUuid)) continue
             if (entry.status === 'closed') continue

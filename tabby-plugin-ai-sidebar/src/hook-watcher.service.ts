@@ -4,7 +4,7 @@ import * as fs from 'fs/promises'
 import * as fsSync from 'fs'
 import * as path from 'path'
 
-import type { AiTool } from './tab-monitor'
+import type { AiTool, TabStatus as TabStatusType } from './tab-monitor'
 import { TabStatus } from './tab-monitor'
 import { HookAdapter } from './hook-adapters/adapter'
 import { HookAdapterRegistry } from './hook-adapters/registry'
@@ -42,6 +42,11 @@ interface HookStatusFile {
      *  bg job". Older log lines (pre-feature) lack the field; the
      *  watcher treats absent/0 as "not a bg invocation". */
     bg?: 0 | 1
+    /** Set to 1 when PostToolUse payload's tool_response.interrupted is true.
+     *  Claude uses this for user-interrupted Bash calls; those turns can end
+     *  without a Stop hook, so this is the authoritative "no longer working"
+     *  signal for that path. */
+    interrupted?: 0 | 1
     /** Set by the handler on PostToolUse(Monitor) to the task id Claude
      *  returned in tool_response — the lifecycle key for the Monitor tool.
      *  Adding this id to the live-monitor set is how we mirror Claude's
@@ -83,7 +88,7 @@ interface HookStatusFile {
 export interface HookSnapshot {
     tabId: string
     tool: AiTool
-    status: TabStatus
+    status: TabStatusType
     /** ms-since-epoch of the underlying event — useful for "X seconds ago". */
     eventAt: number
     sessionId: string | null
@@ -933,7 +938,10 @@ export class HookWatcherService implements OnDestroy {
 
         }
 
-        const status = adapter.mapEventToStatus(parsed.event, parsed.matcher)
+        let status = adapter.mapEventToStatus(parsed.event, parsed.matcher)
+        if (parsed.event === 'PostToolUse' && parsed.interrupted === 1) {
+            status = TabStatus.Idle
+        }
         if (!status) return changed
 
         this.map.set(parsed.tab_id, {

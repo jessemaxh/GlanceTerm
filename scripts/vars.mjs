@@ -10,7 +10,12 @@ const __dirname = url.fileURLToPath(new URL('.', import.meta.url))
 
 const electronInfo = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../node_modules/electron/package.json')))
 
-export let version = childProcess.execSync('git describe --tags', { encoding:'utf-8' })
+// `--match 'v*'` restricts the lookup to semver-shaped tags. Without
+// it, project-local checkpoint tags like `pre-mobile-bridge` get picked
+// when they're closer than the most recent `v*` release, producing a
+// non-semver string that `semver.inc` returns null for and crashes the
+// build at line 18 with "Cannot read properties of null".
+export let version = childProcess.execSync('git describe --tags --match "v*"', { encoding:'utf-8' })
 version = version.substring(1).trim()
 version = version.replace('-', '-c')
 

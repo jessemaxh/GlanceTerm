@@ -9,6 +9,35 @@ import { BackendRegistry } from './backends/registry.service'
 import { MessagingError, ThreadRef } from './backends/types'
 
 /**
+ * Mirrors `sidebar.component.ts`'s helper of the same name. Returns the
+ * trailing path segment, or `undefined` for empty / root-only inputs so
+ * the caller can fall back cleanly.
+ */
+function folderName (p: string | undefined): string | undefined {
+    if (!p) return undefined
+    const trimmed = p.replace(/[/\\]+$/, '')
+    if (!trimmed) return undefined
+    const m = trimmed.match(/[^/\\]+$/)
+    return m ? m[0] : undefined
+}
+
+/** Local-time HH:MM. Used in archive notices that surface in the mobile
+ *  topic-list preview row — full timestamp would line-wrap on iPhone. */
+function formatHHMM (d: Date): string {
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+}
+
+/**
+ * Cooldown window for repeat force-closes on the same topic. Inbound
+ * messages on stale-closed topics get one "wasn't delivered" reply +
+ * one force-close per window — burst typing or platform-side reopens
+ * inside the window are absorbed silently. 30 s comfortably covers a
+ * user typing a paragraph onto a wrong topic while not permanently
+ * masking a legitimate re-open hours later.
+ */
+export const FORCED_CLOSE_COOLDOWN_MS = 30_000
+
+/**
  * Persisted cache entry: which thread we created for a given tab, the
  * title we last pushed (rename detection), and the open/closed status
  * mirror so we can tell "tab still alive" from "tab was closed, topic is
@@ -40,9 +69,15 @@ export interface TopicEntry {
  * backend implementation, not here.
  *
  * Title format:
- *     #<displayIndex> · <tab-name> · <uuid-suffix>
- * where uuid-suffix is the last 4 chars of the UUID. We rebuild on every
- * sync — if the user reorders tabs, displayIndex drifts and we re-edit.
+ *     #<displayIndex> · <label> · <uuid-suffix>
+ * where `<label>` mirrors the sidebar primary text (folder name from cwd
+ * when available, falling back to the tab title) so a phone glance lines
+ * up with what the user sees in GlanceTerm; `<uuid-suffix>` is the last
+ * 4 chars of the UUID. Closed topics get a leading `✓ ` prefix so the
+ * archive state is legible in Telegram's mobile topic list (the native
+ * lock badge alone is too subtle on iPhone). We rebuild on every sync —
+ * reorder/title/cwd changes all drift `displayIndex` or `<label>` and
+ * trigger a re-edit.
  */
 @Injectable()
 export class TopicService {
@@ -126,6 +161,19 @@ export class TopicService {
 
     // ── TopicSyncService surface ─────────────────────────────────────────
 
+    /**
+     * Synchronous peek into the cache. Returns the entry if the cache has
+     * already been loaded AND the key is present; null otherwise. Callers
+     * that need the cache loaded should use the async lookups instead —
+     * peekEntry exists for the hot path in InboundRouter where doing
+     * `await this.load()` per inbound message would queue up disk reads
+     * on a busy chat.
+     */
+    peekEntry (bindingId: string, tabUuid: string): TopicEntry | null {
+        if (!this.loaded) return null
+        return this.cache.get(this.key(bindingId, tabUuid)) ?? null
+    }
+
     async snapshotForBinding (bindingId: string): Promise<Array<{ tabUuid: string; entry: TopicEntry }>> {
         await this.load()
         const prefix = `${bindingId}|`
@@ -165,18 +213,69 @@ export class TopicService {
         return promise
     }
 
-    async syncCloseTopic (binding: ChannelBinding, tabUuid: string): Promise<void> {
+    /**
+     * Close a topic. `force=true` skips the cache-status early-exit so
+     * callers can re-assert closed state when the platform side diverged
+     * (e.g. user manually reopened a TG topic and our cache still says
+     * closed — InboundRouter calls force when an inbound lands on a
+     * cache-closed topic).
+     */
+    async syncCloseTopic (
+        binding: ChannelBinding,
+        tabUuid: string,
+        identity?: TabIdentity,
+        force = false,
+    ): Promise<void> {
         await this.load()
         const key = this.key(binding.id, tabUuid)
         const entry = this.cache.get(key)
         if (!entry) return
-        if (entry.status === 'closed') return
+        if (!force && entry.status === 'closed') return
+        // Cooldown: even when force=true, a repeat close within the window
+        // is suppressed. Catches the inbound-flood case (5 fast messages on
+        // a stale-closed topic) where each message would otherwise replay
+        // rename + archive notice + closeThread, eat into the per-chat
+        // 1 msg/s ceiling, and pollute the audit log. The cooldown does NOT
+        // gate the legitimate "user manually reopened the topic on the
+        // platform" path — `closedAt` is reset every successful close, so
+        // a user-initiated reopen followed by a wait > FORCED_CLOSE_COOLDOWN_MS
+        // sees the close fire normally.
+        if (force && entry.status === 'closed' && entry.closedAt
+            && Date.now() - entry.closedAt < FORCED_CLOSE_COOLDOWN_MS) return
+        const backend = this.backends.forPlatform(binding.platform)
+        // Telegram's native lock badge is too subtle on iPhone — rename
+        // first so the ✓ prefix is the primary visible signal in the
+        // mobile topic list. `identity` may be absent when called via
+        // the tab-already-closed path (TopicSyncService can no longer
+        // resolve displayIndex/name); in that case just prefix the
+        // existing lastTitle without recomputing.
+        const closedTitle = identity
+            ? this.formatTitle(identity, 'closed')
+            : entry.lastTitle.startsWith('✓ ') ? entry.lastTitle : `✓ ${entry.lastTitle}`
         try {
+            if (closedTitle !== entry.lastTitle) {
+                await backend.renameThread(binding.chatId, entry.threadId, closedTitle)
+                entry.lastTitle = closedTitle
+            }
+            // Send the archive notice BEFORE close — this becomes the
+            // topic's last message and shows up in the mobile topic-list
+            // preview line, which is far more visible than the small
+            // lock badge / title prefix. Failure is non-fatal; the close
+            // itself is the important part.
+            try {
+                await backend.sendText(
+                    binding.chatId,
+                    entry.threadId,
+                    `🗑️ Tab archived at ${formatHHMM(new Date())}`,
+                )
+            } catch (notifyErr) {
+                // eslint-disable-next-line no-console
+                console.warn('[mobile-bridge:topic] archive notice failed (continuing to close):', notifyErr)
+            }
             // Pass the last-known title so backends that emulate close
             // via title-prefix (Feishu) can preserve the original. TG
             // ignores the param.
-            await this.backends.forPlatform(binding.platform)
-                .closeThread(binding.chatId, entry.threadId, entry.lastTitle)
+            await backend.closeThread(binding.chatId, entry.threadId, entry.lastTitle)
         } catch (err: unknown) {
             if (err instanceof MessagingError && err.kind === 'thread_not_found') {
                 this.cache.delete(key)
@@ -190,18 +289,28 @@ export class TopicService {
         this.scheduleSave()
     }
 
-    async syncReopenTopic (binding: ChannelBinding, tabUuid: string): Promise<void> {
+    async syncReopenTopic (binding: ChannelBinding, tabUuid: string, identity?: TabIdentity): Promise<void> {
         await this.load()
         const key = this.key(binding.id, tabUuid)
         const entry = this.cache.get(key)
         if (!entry) return
         if (entry.status === 'open') return
+        const backend = this.backends.forPlatform(binding.platform)
+        // Strip the ✓ prefix on reopen. Prefer recomputing from identity
+        // (also picks up any displayIndex/cwd drift while it was closed);
+        // fall back to plain prefix removal.
+        const openTitle = identity
+            ? this.formatTitle(identity, 'open')
+            : entry.lastTitle.startsWith('✓ ') ? entry.lastTitle.slice(2) : entry.lastTitle
         try {
             // Restore the pre-close title so Feishu can strip its
             // closed-marker prefix in one edit instead of waiting for
             // syncRetitleTopic to overwrite with '(reopening)'.
-            await this.backends.forPlatform(binding.platform)
-                .reopenThread(binding.chatId, entry.threadId, entry.lastTitle)
+            await backend.reopenThread(binding.chatId, entry.threadId, openTitle)
+            if (openTitle !== entry.lastTitle) {
+                await backend.renameThread(binding.chatId, entry.threadId, openTitle)
+                entry.lastTitle = openTitle
+            }
         } catch (err: unknown) {
             if (err instanceof MessagingError && err.kind === 'thread_not_found') {
                 this.cache.delete(key)
@@ -220,7 +329,11 @@ export class TopicService {
         const key = this.key(binding.id, identity.uuid)
         const entry = this.cache.get(key)
         if (!entry) return
-        const expected = this.formatTitle(identity)
+        // Preserve the ✓ marker across reorders / tab-rename events: a
+        // retitle on a closed topic must still produce a closed-format
+        // title, otherwise the mobile-visible marker would flicker off
+        // any time displayIndex drifted.
+        const expected = this.formatTitle(identity, entry.status)
         if (entry.lastTitle === expected) return
         try {
             await this.backends.forPlatform(binding.platform)
@@ -286,10 +399,17 @@ export class TopicService {
         return `${bindingId}|${tabUuid}`
     }
 
-    /** Public so TopicSyncService can diff against entry.lastTitle. */
-    formatTitle (identity: TabIdentity): string {
+    /**
+     * Public so TopicSyncService can diff against entry.lastTitle.
+     * `status` defaults to 'open'; pass 'closed' to bake in the leading
+     * ✓ marker so a subsequent retitle (e.g. user reorders tabs while
+     * the topic is closed) doesn't strip it.
+     */
+    formatTitle (identity: TabIdentity, status: 'open' | 'closed' = 'open'): string {
         const suffix = identity.uuid.slice(-4)
-        return `#${identity.displayIndex} · ${identity.name} · ${suffix}`
+        const label = folderName(identity.cwd) ?? identity.name
+        const base = `#${identity.displayIndex} · ${label} · ${suffix}`
+        return status === 'closed' ? `✓ ${base}` : base
     }
 
     private async load (): Promise<void> {

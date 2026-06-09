@@ -182,6 +182,11 @@ const AI_PATTERNS: Array<{ tool: AiTool; regexes: RegExp[] }> = [
     },
 ]
 
+export function detectAiToolFromCommand (command: string): AiTool | null {
+    const match = AI_PATTERNS.find(p => p.regexes.some(r => r.test(command)))
+    return match?.tool ?? null
+}
+
 export interface TabState {
     /** Outer tab in app.tabs[]. Pass to AppService.selectTab() to focus. */
     outerTab: BaseTabComponent
@@ -576,8 +581,8 @@ export class TabMonitor implements OnDestroy {
         for (const c of candidates) {
             const real = realCmds.get(c.pid) ?? c.command
             if (!real) continue
-            const match = AI_PATTERNS.find(p => p.regexes.some(r => r.test(real)))
-            if (match) { aiTool = match.tool; aiPid = c.pid; aiCommandLine = real; break }
+            const match = detectAiToolFromCommand(real)
+            if (match) { aiTool = match; aiPid = c.pid; aiCommandLine = real; break }
         }
 
         // First-detection trigger for late hook install — if Claude (etc.)
@@ -791,15 +796,28 @@ export class TabMonitor implements OnDestroy {
             }
         }
 
-        // Is the hook authoritative for THIS tab? Two conditions:
+        // Is the hook authoritative for THIS tab? Three conditions:
         //   (a) the adapter promises a bg classification on every Bash
-        //       (adapter.signalsBgJobs() — Claude yes, Codex no), AND
-        //   (b) we've actually seen at least one hook event for this tab
-        //       (hooks.getStatus(tabId) — proves the hook is installed
-        //       and firing; without this we'd suppress the heuristic on
-        //       a tab whose hooks were never wired, under-counting bg jobs).
+        //       (adapter.signalsBgJobs() — Claude/Codex yes), AND
+        //   (b) we've resolved this tab's stable GLANCETERM_TAB_ID, AND
+        //   (c) EITHER we've already seen a hook event for this tab
+        //       (hooks.getStatus → real first-event seen → hook pipeline
+        //       proven live), OR the adapter spawns a long-lived native
+        //       helper child that would otherwise be misclassified by the
+        //       heuristic the moment the process-tree poll spots it
+        //       (Codex true, Claude false — see adapter.spawnsNativeHelper).
+        //
+        // The split keeps Claude's pre-first-event window safe: real bg
+        // jobs that fire before the first PreToolUse still get counted by
+        // the heuristic. For Codex, the helper child appears before any
+        // hook event, so the heuristic must be suppressed from t=0 — done
+        // via the per-adapter spawnsNativeHelper() escape hatch.
         const adapter = this.registry.forTool(aiTool)
-        const hookAuthoritative = !!(adapter?.signalsBgJobs() && tabId && this.hooks.getStatus(tabId))
+        const hookAuthoritative = !!(
+            adapter?.signalsBgJobs()
+            && tabId
+            && (this.hooks.getStatus(tabId) || adapter.spawnsNativeHelper())
+        )
 
         if (hookAuthoritative) {
             // Race-recovery: a Bash hook event can flush AFTER the child
@@ -1337,28 +1355,10 @@ async function readGlancetermTabIdFromPid (pid: number): Promise<string | null> 
     return null
 }
 
-/**
- * Tail the AI agent's transcript file and check whether its last
- * end-of-turn record landed AT OR AFTER `eventAt`. Used by the slow-path
- * interrupt probe in TabMonitor to surface terminal turn endings the
- * hook layer missed (user-typed `/clear`, agent-internal timeouts,
- * pasted ESC sequences, …).
- *
- * Recognised markers, ordered by likelihood:
- *   - Codex `event_msg` with payload `task_complete` / `turn_aborted` /
- *     `task_aborted` (covers Codex's "the turn is done one way or
- *     another" surface).
- *   - Claude `user` record whose content begins with
- *     `[Request interrupted by user` (the literal string Claude writes
- *     into its `.jsonl` transcript when the user presses ESC).
- *   - Any record carrying `toolUseResult.interrupted === true` (Claude's
- *     tool-call interrupt shape, in case the PostToolUse hook hasn't yet
- *     landed when we look).
- *
- * Returns false on any read/parse error — caller falls back to the
- * normal hook path. Reads the last 128 KB only, which covers every
- * realistic single-turn footprint while bounding disk traffic.
- */
+export async function codexTranscriptCompletedAfter (transcriptPath: string, eventAt: number): Promise<boolean> {
+    return transcriptEndedAfter(transcriptPath, eventAt)
+}
+
 export async function transcriptEndedAfter (transcriptPath: string, eventAt: number): Promise<boolean> {
     let stat: fsSync.Stats
     try {

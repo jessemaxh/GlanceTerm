@@ -614,4 +614,53 @@ describe('AutoResumeService — integration', () => {
             expect(b2.sentInputs).toEqual(['claude --r bar\r'])
         })
     })
+
+    describe('Codex-specific replay', () => {
+        it('captures a Codex command with flags and replays it on a restored focused tab', async () => {
+            const session1 = new AutoResumeHarness()
+            session1.start()
+            const a1 = session1.addTab()
+            session1.emitTick([
+                makeTabState(a1, {
+                    aiTool: 'codex',
+                    cwd: '/repo',
+                    aiCommandLine: '/opt/homebrew/bin/codex --model gpt-5 --sandbox workspace-write',
+                }),
+            ])
+            await Promise.resolve()
+
+            const persisted = session1.getPersisted()
+            expect(persisted).toEqual({
+                '/repo': { command: 'codex --model gpt-5 --sandbox workspace-write', count: 1 },
+            })
+
+            const session2 = new AutoResumeHarness({ persisted })
+            const a2 = session2.addTab({ restored: 'preexisting', active: true })
+            session2.start()
+            session2.emitTick([makeTabState(a2, { cwd: '/repo' })])
+            session2.advance(2000)
+
+            expect(a2.sentInputs).toEqual(['codex --model gpt-5 --sandbox workspace-write\r'])
+        })
+
+        it('applies per-cwd quota to Codex tabs just like Claude tabs', async () => {
+            const h = new AutoResumeHarness({
+                persisted: { '/repo': { command: 'codex -m gpt-5', count: 1 } },
+            })
+            const a = h.addTab({ restored: 'preexisting', active: true })
+            const b = h.addTab({ restored: 'preexisting' })
+            h.start()
+            h.emitTick([
+                makeTabState(a, { cwd: '/repo' }),
+                makeTabState(b, { cwd: '/repo' }),
+            ])
+            h.advance(2000)
+            expect(a.sentInputs).toEqual(['codex -m gpt-5\r'])
+            expect(b.sentInputs).toEqual([])
+
+            h.focus(b)
+            h.advance(2000)
+            expect(b.sentInputs).toEqual([])
+        })
+    })
 })

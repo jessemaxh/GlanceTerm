@@ -44,6 +44,7 @@ export interface TraceEvent {
     cwd?: string
     ts: number
     bg?: 0 | 1
+    interrupted?: 0 | 1
     /** Top-level on subagent-context events (its tool calls, its
      *  SubagentStop). Empty / missing on main-agent events. */
     agent_id?: string
