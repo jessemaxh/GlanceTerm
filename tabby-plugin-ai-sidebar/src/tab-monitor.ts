@@ -39,6 +39,7 @@ async function runProbe (cmd: string, args: string[], timeoutMs: number): Promis
 import { HookAdapterRegistry } from './hook-adapters/registry'
 import { HookWatcherService, HookSnapshot } from './hook-watcher.service'
 import { HookInstallerService } from './hook-installer.service'
+import { UsageTrackerService } from './usage-tracker.service'
 
 /** Poll cadence for process-tree scans. Hooks deliver state pushes; the poll
  * is only here to discover when an AI tool starts/stops in a tab. */
@@ -252,6 +253,15 @@ export interface TabState {
      * makeState.
      */
     model: string | null
+    /**
+     * Cumulative session token usage for this tab — `in`/`out` (uncached
+     * input + output). Null when unknown. Summed from the agent's transcript
+     * (hook events don't carry session totals); cache-read/creation tokens are
+     * deliberately excluded (they dwarf real usage and would mislead). Sidebar
+     * renders `↑<in> ↓<out>` in k/M units. See the transcript usage reader.
+     */
+    tokensIn: number | null
+    tokensOut: number | null
 }
 
 interface ChildProcessInfo { pid: number; ppid: number; command: string }
@@ -427,6 +437,7 @@ export class TabMonitor implements OnDestroy {
         private registry: HookAdapterRegistry,
         private hooks: HookWatcherService,
         private installer: HookInstallerService,
+        private usage: UsageTrackerService,
     ) {
         void this.tick()
         this.timer = setInterval(() => { void this.tick() }, POLL_MS)
@@ -612,6 +623,10 @@ export class TabMonitor implements OnDestroy {
         // (Codex every event / Claude SessionStart / opencode plugin). Null
         // for unsupported tools or before any model-bearing event.
         let model: string | null = null
+        // Cumulative session token usage (uncached input/output). Summed from
+        // the transcript by UsageTrackerService — see below.
+        let tokensIn: number | null = null
+        let tokensOut: number | null = null
 
         if (!aiTool) {
             status = TabStatus.NoAi
@@ -639,6 +654,11 @@ export class TabMonitor implements OnDestroy {
             const snap = tabId ? this.hooks.getStatus(tabId) : null
             if (snap) {
                 model = snap.model
+                // Cumulative token usage from the transcript (Claude today;
+                // other agents return null until their reader lands). Throttled
+                // + incremental inside the tracker, so this is cheap per tick.
+                const usage = await this.usage.compute(t.inner, aiTool, snap.transcriptPath)
+                if (usage) { tokensIn = usage.inTok; tokensOut = usage.outTok }
                 // Subagent in-flight override: when the main agent has
                 // spawned a backgrounded Task subagent, the main agent's
                 // response ends → Stop → raw status = idle. The subagent
@@ -715,6 +735,8 @@ export class TabMonitor implements OnDestroy {
             backgroundJobCount,
             monitorCount: tabId ? this.hooks.getMonitorInFlight(tabId) : 0,
             model,
+            tokensIn,
+            tokensOut,
         }
     }
 
@@ -1031,6 +1053,8 @@ export class TabMonitor implements OnDestroy {
             backgroundJobCount: 0,
             monitorCount: 0,
             model: null,
+            tokensIn: null,
+            tokensOut: null,
         }
     }
 

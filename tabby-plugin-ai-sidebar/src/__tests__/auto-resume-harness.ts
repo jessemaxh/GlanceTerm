@@ -99,6 +99,8 @@ export function makeTabState (tab: FakeTab, overrides: FakeStateOverrides = {}):
         backgroundJobCount: 0,
         monitorCount: 0,
         model: null,
+        tokensIn: null,
+        tokensOut: null,
     }
 }
 

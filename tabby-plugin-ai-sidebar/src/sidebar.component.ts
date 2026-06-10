@@ -133,6 +133,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                             <span *ngIf="s.subagentCount > 0" class="micro accent" [title]="subagentTitle(s)">{{ s.subagentCount }} {{ s.subagentCount === 1 ? 'agent' : 'agents' }}</span>
                             <span *ngIf="s.backgroundJobCount > 0" class="micro accent" [title]="bgJobTitle(s)">{{ s.backgroundJobCount }} {{ bgLabel(s) }}</span>
                             <span *ngIf="s.monitorCount > 0" class="micro accent" [title]="monitorTitle(s)">{{ s.monitorCount }} {{ s.monitorCount === 1 ? 'monitor' : 'monitors' }}</span>
+                            <span *ngIf="s.tokensIn !== null || s.tokensOut !== null" class="micro tokens" [title]="tokensTitle(s)">↑{{ fmtTokens(s.tokensIn) }} ↓{{ fmtTokens(s.tokensOut) }}</span>
                         </div>
                         <div *ngIf="s.cwd && effStatus(s) !== TabStatus.NeedsPermission" class="line3">
                             <span class="path-sub" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
@@ -2058,6 +2059,19 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
             m = m.slice(tool.length + 1)
         }
         return m
+    }
+
+    /** Compact token count: <1k raw, then `k`, then `M` (1 decimal). null→0. */
+    fmtTokens (n: number | null): string {
+        const v = n ?? 0
+        if (v < 1000) return String(v)
+        if (v < 1_000_000) return `${(v / 1000).toFixed(v < 10_000 ? 1 : 0)}k`
+        return `${(v / 1_000_000).toFixed(1)}M`
+    }
+
+    /** Hover text for the token chip — exact counts. */
+    tokensTitle (s: TabState): string {
+        return `session tokens — input ${s.tokensIn ?? 0}, output ${s.tokensOut ?? 0} (cache excluded)`
     }
 
     ageStr (ms: number | null): string {
