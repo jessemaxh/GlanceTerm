@@ -56,6 +56,10 @@ export interface TraceEvent {
     /** Extracted from PostToolUse(Monitor).tool_response.{taskId,task_id}
      *  in the real handler. Empty / missing on every other event. */
     monitor_task_id?: string
+    /** Extracted from PostToolUse(Monitor).tool_input.timeout_ms in the
+     *  real handler — the monitor's give-up deadline, used for TTL
+     *  eviction. Missing / 0 → watcher falls back to its default cap. */
+    monitor_timeout_ms?: number
     /** Extracted from PreToolUse(TaskStop).tool_input.{task_id,taskId}
      *  in the real handler. Empty / missing on every other event. */
     stop_task_id?: string
@@ -75,6 +79,13 @@ export interface TraceEvent {
  *     a future test can assert "this event was a no-op for state".
  */
 class ReplayWatcher extends (HookWatcherService as any) {
+    /** Controllable wall-clock for monitor-TTL eviction. Defaults to 0 so
+     *  every monitor a spec adds stays live (deadlines are positive — a
+     *  monitor's eventAt + timeout is always > 0), preserving the
+     *  lifecycle assertions that predate the TTL. A spec that exercises
+     *  eviction calls setNow() to advance past a monitor's deadline. */
+    private _now = 0
+
     async start (): Promise<void> {
         // Intentionally empty — see class docstring.
     }
@@ -85,6 +96,14 @@ class ReplayWatcher extends (HookWatcherService as any) {
         // because the parent set it from Date.now() before this body runs;
         // overwriting `private readonly` here is a deliberate test seam.
         ;(this as any).startupTs = 0
+    }
+
+    protected now (): number {
+        return this._now
+    }
+
+    setNow (ms: number): void {
+        this._now = ms
     }
 
     replay (parsed: TraceEvent): boolean {
@@ -139,6 +158,13 @@ export class ReplayHarness {
 
     getMonitorInFlight (tabId: string): number {
         return this.watcher.getMonitorInFlight(tabId)
+    }
+
+    /** Advance the harness's monitor-TTL clock (ms-since-epoch). Lets a
+     *  spec assert that a monitor self-evicts once `now` passes its
+     *  `eventAt + timeout_ms + grace` deadline, without real time. */
+    setNow (ms: number): void {
+        this.watcher.setNow(ms)
     }
 
     getStatus (tabId: string): HookSnapshot | null {

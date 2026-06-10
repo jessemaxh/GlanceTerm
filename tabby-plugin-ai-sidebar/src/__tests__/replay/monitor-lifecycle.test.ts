@@ -29,10 +29,11 @@ import { ReplayHarness, TraceEvent } from './harness'
 const TAB = '11111111-2222-3333-4444-555555555555'
 const TAB2 = '66666666-7777-8888-9999-aaaaaaaaaaaa'
 
-function monitorStarted (taskId: string, tabId = TAB, ts = 1_000): TraceEvent {
+function monitorStarted (taskId: string, tabId = TAB, ts = 1_000, timeoutMs?: number): TraceEvent {
     return {
         tab_id: tabId, agent: 'claude', event: 'PostToolUse', tool_name: 'Monitor',
         ts, monitor_task_id: taskId,
+        ...timeoutMs !== undefined ? { monitor_timeout_ms: timeoutMs } : {},
     }
 }
 function monitorStopped (taskId: string, tabId = TAB, ts = 2_000): TraceEvent {
@@ -172,6 +173,57 @@ describe('Monitor lifecycle', () => {
     it('reports zero for tabs we have never seen', () => {
         const h = new ReplayHarness()
         expect(h.getMonitorInFlight('unknown-tab')).toBe(0)
+    })
+
+    it('self-evicts a monitor past its timeout_ms deadline (no TaskStop hook)', () => {
+        // The core bug: Claude fires NO hook when a monitor ends naturally
+        // (condition met / timeout), so without a deadline the id sits in
+        // the live set forever and the badge over-counts. ts is in seconds
+        // → eventAt = 1000 * 1000 = 1_000_000 ms; timeout 120_000 ms +
+        // 5_000 grace → deadline 1_125_000 ms.
+        const h = new ReplayHarness()
+        h.process(monitorStarted('mon-1', TAB, 1_000, 120_000))
+        h.setNow(1_124_999)            // one ms before the deadline
+        expect(h.getMonitorInFlight(TAB)).toBe(1)
+        h.setNow(1_125_001)            // one ms after
+        expect(h.getMonitorInFlight(TAB)).toBe(0)
+    })
+
+    it('falls back to the default cap when timeout_ms is absent', () => {
+        // Older Claude builds / pre-feature log lines have no timeout_ms.
+        // deadline = eventAt(1_000_000) + DEFAULT(30min=1_800_000) + grace.
+        const h = new ReplayHarness()
+        h.process(monitorStarted('mon-1'))   // no timeout_ms
+        h.setNow(1_500_000)                  // within the default window
+        expect(h.getMonitorInFlight(TAB)).toBe(1)
+        h.setNow(2_805_001)                  // past 1_000_000 + 1_800_000 + 5_000
+        expect(h.getMonitorInFlight(TAB)).toBe(0)
+    })
+
+    it('TaskStop removes a monitor before its deadline is reached', () => {
+        // Explicit stop must win immediately — the TTL is only the backstop
+        // for monitors that end WITHOUT a TaskStop.
+        const h = new ReplayHarness()
+        h.process(monitorStarted('mon-1', TAB, 1_000, 1_800_000))
+        h.process(monitorStopped('mon-1', TAB, 1_001))
+        h.setNow(1_400_000)   // well before the deadline
+        expect(h.getMonitorInFlight(TAB)).toBe(0)
+    })
+
+    it('converges to Claude\'s footer: 4 started, 3 expired early → badge shows 1', () => {
+        // The exact reported drift: pipely showed 4 monitor ids accumulated
+        // in the badge while Claude's footer read "1 monitor". Three short
+        // monitors ended (timeout elapsed, no TaskStop); one long monitor
+        // is still live. The badge must read 1, matching the footer.
+        const h = new ReplayHarness()
+        h.process(monitorStarted('bo4gjl160', TAB, 1_000, 120_000))   // deadline 1_125_000
+        h.process(monitorStarted('bndmoo3gk', TAB, 1_100, 120_000))   // deadline 1_225_000
+        h.process(monitorStarted('blnc3ieu0', TAB, 1_200, 120_000))   // deadline 1_325_000
+        h.process(monitorStarted('b79mj47ec', TAB, 1_300, 1_800_000)) // deadline 3_105_000
+        // Without the TTL this would read 4 forever. Advance past the three
+        // short deadlines but before the long one.
+        h.setNow(1_400_000)
+        expect(h.getMonitorInFlight(TAB)).toBe(1)
     })
 
     it('handles the reported scenario: 1 shell + 1 monitor live concurrently', () => {

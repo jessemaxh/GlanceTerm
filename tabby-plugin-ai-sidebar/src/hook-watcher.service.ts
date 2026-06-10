@@ -55,6 +55,16 @@ interface HookStatusFile {
      *  SessionStart/End boundary resets it. Empty on every other event.
      *  Older log lines (pre-feature) lack the field. */
     monitor_task_id?: string
+    /** Set by the handler on PostToolUse(Monitor) to the started Monitor's
+     *  `tool_input.timeout_ms` — the monitor's own give-up deadline. We
+     *  use it to auto-evict the task id at `eventAt + timeout_ms` because
+     *  Claude fires NO hook when a monitor ends naturally (condition met
+     *  or timeout); without this bound a completed monitor's id would sit
+     *  in the live set until the next SessionStart/End. A monitor never
+     *  runs past its timeout, so this is a safe upper bound on liveness.
+     *  Absent on older log lines / older Claude builds → falls back to
+     *  {@link DEFAULT_MONITOR_TTL_MS}. */
+    monitor_timeout_ms?: number
     /** Set by the handler on PreToolUse(TaskStop) to the task id Claude
      *  passed in tool_input — the decrement signal for the live-monitor
      *  set. We process the stop BEFORE the monitor add in `processEvent`
@@ -141,6 +151,28 @@ const BG_ARRIVAL_TTL_MS = 10_000
  * is negligible.
  */
 const SUBAGENT_TOMBSTONE_TTL_MS = 60_000
+
+/**
+ * Fallback live-window for a Monitor task whose start event carried no
+ * `monitor_timeout_ms` (older Claude builds, or a future Monitor schema
+ * that renames the field). A Monitor never runs past its own timeout, so
+ * `start + timeout` is a hard upper bound on liveness; when we don't know
+ * the timeout we assume this generous cap rather than pinning the badge
+ * forever. Chosen long enough not to prematurely drop a genuinely
+ * long-running monitor, short enough to bound the over-count to one
+ * window instead of a whole multi-hour session.
+ */
+const DEFAULT_MONITOR_TTL_MS = 30 * 60_000
+
+/**
+ * Slack added to a Monitor's `timeout_ms` before we evict its id. The
+ * monitor gives up AT `start + timeout_ms`; Claude then needs a beat to
+ * surface the result, and our handler's `date +%s` start stamp is
+ * whole-second-quantised. The grace ensures we never evict a monitor the
+ * footer still counts as live — eviction only ever trails the real end,
+ * never leads it.
+ */
+const MONITOR_TTL_GRACE_MS = 5_000
 
 /**
  * Startup-sweep retention window for `~/.glanceterm/hooks/<tab_uuid>.log`
@@ -353,31 +385,45 @@ export class HookWatcherService implements OnDestroy {
     private readonly pendingBgArrivals = new Map<string, number[]>()
 
     /**
-     * Per-tab set of currently-live Monitor task ids. Mirrors Claude's
-     * footer "M monitor" count: a Monitor tool call adds its
-     * tool_response.taskId to the set on PostToolUse(Monitor); the
-     * matching PreToolUse(TaskStop) removes it. SessionStart/SessionEnd
-     * resets the whole set so a Claude crash that didn't fire TaskStop
-     * for in-flight monitors doesn't pin the badge forever across the
-     * next session.
+     * Per-tab map of currently-live Monitor task id → eviction deadline
+     * (ms-since-epoch). Mirrors Claude's footer "M monitor" count: a
+     * Monitor tool call adds its task id on PostToolUse(Monitor); the
+     * matching PreToolUse(TaskStop) removes it; SessionStart/SessionEnd
+     * resets the whole map.
      *
-     * Why a Set of ids, not a counter:
+     * Why a map of id→deadline, not a bare Set or counter:
      *
-     *   Claude can interleave many Monitor invocations and only stop
-     *   some of them by id. A bare counter would let a TaskStop for an
-     *   unknown id decrement the count, drifting from Claude's footer.
-     *   Set semantics — add only if absent, delete by exact match —
-     *   make every transition idempotent and silently drop TaskStops
-     *   for ids we never saw (the same robustness shape the
-     *   liveAgentIds reducer uses for phantom SubagentStops).
+     *   - id keys (not a counter): Claude can interleave many Monitor
+     *     invocations and only stop some by id. A bare counter would let
+     *     a TaskStop for an unknown id decrement the count, drifting from
+     *     the footer. Keyed semantics — add only if absent, delete by
+     *     exact match — make every transition idempotent and silently
+     *     drop TaskStops for ids we never saw (the same robustness shape
+     *     the liveAgentIds reducer uses for phantom SubagentStops).
      *
-     *   Edge case the set does NOT model: a Monitor task that exits on
-     *   its own timeout (no TaskStop fires). The id sits in the set
-     *   forever and the badge over-counts. SessionStart/SessionEnd
-     *   reset is the only escape. v1 limitation — Claude doesn't expose
-     *   a "monitor naturally completed" hook event today.
+     *   - deadline values (not a Set): Claude fires NO hook when a
+     *     monitor ends naturally — condition met ("stream ended") or
+     *     timeout. Only an explicit TaskStop decrements. So a completed
+     *     monitor's id would otherwise sit here until the next
+     *     SessionStart/End, over-counting the badge (the bug this map
+     *     fixes). Each id is stamped with `start + timeout_ms + grace`;
+     *     {@link getMonitorInFlight} lazily evicts ids past their
+     *     deadline. TaskStop still removes early on explicit stop.
+     *
+     *     Safety of the bound — a non-persistent monitor ends at first
+     *     match OR timeout_ms, whichever is first, so its lifetime is
+     *     ≤ timeout_ms and eviction trails the real end, never leads it.
+     *     Verified against a real Claude trace (2026-06-10): four monitors
+     *     with timeouts 120s / 1800s ran 118.4s / 241s / 244s / 291s — all
+     *     inside their timeout, the 120s one with only 1.6s to spare (the
+     *     grace covers that margin comfortably). CAVEAT: persistent
+     *     monitors (`persistent: true`) keep streaming past first match;
+     *     none appear in observed traces, and whether timeout_ms still
+     *     bounds their total lifetime is unverified. If a persistent
+     *     monitor outlives timeout_ms it would under-count until the next
+     *     session — revisit with a real persistent trace if that surfaces.
      */
-    private readonly liveMonitorTaskIds = new Map<string, Set<string>>()
+    private readonly liveMonitorTaskIds = new Map<string, Map<string, number>>()
 
     /**
      * Per-tab byte offset of the next unread byte in `<TAB_ID>.log`. Append-only
@@ -481,11 +527,32 @@ export class HookWatcherService implements OnDestroy {
         return this.liveAgentIds.get(tabId)?.size ?? 0
     }
 
-    /** Sync lookup — how many Monitor tasks have been started without a
-     *  matching TaskStop yet. Drives the sidebar's "M monitor" badge,
-     *  paired with the bg-shell count to mirror Claude's footer. */
+    /** Sync lookup — how many Monitor tasks are currently live. Drives the
+     *  sidebar's "M monitor" badge, paired with the bg-shell count to
+     *  mirror Claude's footer. Lazily evicts ids whose deadline has passed
+     *  (a monitor that ended naturally without a TaskStop hook), so the
+     *  badge converges to Claude's footer within one TabMonitor poll of
+     *  the monitor's timeout — no dedicated sweep timer needed since this
+     *  is read every poll. */
     getMonitorInFlight (tabId: string): number {
-        return this.liveMonitorTaskIds.get(tabId)?.size ?? 0
+        const live = this.liveMonitorTaskIds.get(tabId)
+        if (!live) return 0
+        const now = this.now()
+        for (const [taskId, deadline] of live) {
+            if (deadline <= now) live.delete(taskId)
+        }
+        if (live.size === 0) {
+            this.liveMonitorTaskIds.delete(tabId)
+            return 0
+        }
+        return live.size
+    }
+
+    /** Wall-clock seam — overridden by the replay harness so monitor-TTL
+     *  eviction is testable against fixture timestamps instead of real
+     *  time. Production reads the real clock. */
+    protected now (): number {
+        return Date.now()
     }
 
     /**
@@ -917,21 +984,27 @@ export class HookWatcherService implements OnDestroy {
             // session-scoped trackers so the boundary semantics stay in
             // one place.
             if (parsed.event === 'PostToolUse' && parsed.tool_name === 'Monitor' && parsed.monitor_task_id) {
-                const set = this.liveMonitorTaskIds.get(parsed.tab_id) ?? new Set<string>()
-                if (!set.has(parsed.monitor_task_id)) {
-                    set.add(parsed.monitor_task_id)
-                    this.liveMonitorTaskIds.set(parsed.tab_id, set)
+                const live = this.liveMonitorTaskIds.get(parsed.tab_id) ?? new Map<string, number>()
+                if (!live.has(parsed.monitor_task_id)) {
+                    // Stamp the id with its give-up deadline so it self-evicts
+                    // even though Claude fires no end-of-monitor hook. A
+                    // non-positive / absent timeout falls back to the cap.
+                    const timeout = parsed.monitor_timeout_ms && parsed.monitor_timeout_ms > 0
+                        ? parsed.monitor_timeout_ms
+                        : DEFAULT_MONITOR_TTL_MS
+                    live.set(parsed.monitor_task_id, eventAt + timeout + MONITOR_TTL_GRACE_MS)
+                    this.liveMonitorTaskIds.set(parsed.tab_id, live)
                     changed = true
                 }
             }
             if (parsed.event === 'PreToolUse' && parsed.tool_name === 'TaskStop' && parsed.stop_task_id) {
-                const set = this.liveMonitorTaskIds.get(parsed.tab_id)
+                const live = this.liveMonitorTaskIds.get(parsed.tab_id)
                 // TaskStop also targets backgrounded Bash shells (same tool,
                 // different task-id domain). Stop ids for non-monitor tasks
-                // simply fall through with no set match — silently ignored
+                // simply fall through with no map match — silently ignored
                 // exactly like phantom SubagentStops, no over-decrement risk.
-                if (set?.delete(parsed.stop_task_id)) {
-                    if (set.size === 0) this.liveMonitorTaskIds.delete(parsed.tab_id)
+                if (live?.delete(parsed.stop_task_id)) {
+                    if (live.size === 0) this.liveMonitorTaskIds.delete(parsed.tab_id)
                     changed = true
                 }
             }

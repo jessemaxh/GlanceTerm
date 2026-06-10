@@ -165,11 +165,24 @@ fi
 # casing returns empty — costs us one extra grep per Monitor / TaskStop
 # event, buys us robustness against any future field-naming drift.
 MONITOR_TASK_ID=""
+# Monitor's own give-up deadline (tool_input.timeout_ms). HookWatcher
+# stamps the live-monitor id with start+timeout so it self-evicts —
+# Claude fires no hook when a monitor ends naturally, so without this
+# bound a completed monitor would inflate the "M monitor" badge until the
+# next session. Number-valued, so \`extract\` (string-only) can't read it;
+# grep the digits directly. Scoped to PostToolUse(Monitor) like the id,
+# so the only place "timeout_ms" can appear is this monitor's tool_input.
+MONITOR_TIMEOUT_MS=0
 if [ "\$EVENT" = "PostToolUse" ] && [ "\$TOOL_NAME" = "Monitor" ]; then
     MONITOR_TASK_ID=$(extract taskId)
     if [ -z "\$MONITOR_TASK_ID" ]; then
         MONITOR_TASK_ID=$(extract task_id)
     fi
+    MONITOR_TIMEOUT_MS=$(printf '%s' "\$PAYLOAD" \\
+        | grep -oE '"timeout_ms"[[:space:]]*:[[:space:]]*[0-9]+' \\
+        | head -1 \\
+        | grep -oE '[0-9]+$')
+    [ -z "\$MONITOR_TIMEOUT_MS" ] && MONITOR_TIMEOUT_MS=0
 fi
 STOP_TASK_ID=""
 if [ "\$EVENT" = "PreToolUse" ] && [ "\$TOOL_NAME" = "TaskStop" ]; then
@@ -233,8 +246,8 @@ OUT="\$STATE_DIR/\$TAB_ID.log"
 # other concurrent appenders. Our records are ~250 bytes — well under the
 # limit — so two handler processes firing simultaneously cannot interleave
 # bytes mid-record.
-printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s","ts":%s,"bg":%s,"interrupted":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s","monitor_task_id":"%s","stop_task_id":"%s"}\\n' \\
-    "\$TAB_ID" "\$AGENT" "\$EVENT" "\$MATCHER" "\$TOOL_NAME" "\$SESSION_ID" "\$CWD" "\$TRANSCRIPT_PATH" "\$TS" "\$BG" "\$INTERRUPTED" "\$AGENT_ID" "\$AGENT_TYPE" "\$SPAWN_AGENT_ID" "\$MONITOR_TASK_ID" "\$STOP_TASK_ID" \\
+printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s","ts":%s,"bg":%s,"interrupted":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s","monitor_task_id":"%s","monitor_timeout_ms":%s,"stop_task_id":"%s"}\\n' \\
+    "\$TAB_ID" "\$AGENT" "\$EVENT" "\$MATCHER" "\$TOOL_NAME" "\$SESSION_ID" "\$CWD" "\$TRANSCRIPT_PATH" "\$TS" "\$BG" "\$INTERRUPTED" "\$AGENT_ID" "\$AGENT_TYPE" "\$SPAWN_AGENT_ID" "\$MONITOR_TASK_ID" "\$MONITOR_TIMEOUT_MS" "\$STOP_TASK_ID" \\
     >> "\$OUT" 2>/dev/null
 
 # Auto-approve permission prompts (Claude only, P0). When the user has
@@ -386,6 +399,10 @@ if ([string]$json.hook_event_name -eq "PostToolUse" -and $toolName -eq "Agent") 
 # casing that matches the per-section precedent first (camelCase under
 # tool_response, snake_case under tool_input), fall back to the other.
 $monitorTaskId = ""
+# Monitor's give-up deadline (tool_input.timeout_ms) — see HANDLER_SH for
+# why HookWatcher needs it to self-evict completed monitors. Number-valued;
+# default 0 when absent so HookWatcher falls back to DEFAULT_MONITOR_TTL_MS.
+$monitorTimeoutMs = 0
 if ([string]$json.hook_event_name -eq "PostToolUse" -and $toolName -eq "Monitor") {
     if ($json.tool_response) {
         if ($json.tool_response.taskId) {
@@ -393,6 +410,13 @@ if ([string]$json.hook_event_name -eq "PostToolUse" -and $toolName -eq "Monitor"
         } elseif ($json.tool_response.task_id) {
             $monitorTaskId = [string]$json.tool_response.task_id
         }
+    }
+    if ($json.tool_input -and $json.tool_input.timeout_ms) {
+        # [long] + floor for parity with HANDLER_SH's digit-truncating
+        # grep: [int] is Int32 and THROWS on > ~24.8 days of ms (aborting
+        # the handler → the Monitor add is lost), and rounds floats where
+        # the SH path truncates. [long] floors a fractional timeout_ms.
+        $monitorTimeoutMs = [long][math]::Floor([double]$json.tool_input.timeout_ms)
     }
 }
 $stopTaskId = ""
@@ -434,6 +458,7 @@ $out = [ordered]@{
     agent_type      = $agentType
     spawn_agent_id  = $spawnAgentId
     monitor_task_id = $monitorTaskId
+    monitor_timeout_ms = [long]$monitorTimeoutMs
     stop_task_id    = $stopTaskId
 }
 
