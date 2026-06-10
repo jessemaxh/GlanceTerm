@@ -33,9 +33,9 @@ export interface InstallReport {
  *      through to the hook handler we register).
  *   3. Lets us pipe a payload (typically JSON on stdin) into our handler.
  *
- * Agents without any such mechanism (aider, opencode, goose, …) get a degraded
- * "running / not running" experience via the process-tree detector, not via
- * an adapter — they never appear in this registry.
+ * Agents without an adapter yet (opencode, until its plugin/SSE integration
+ * lands) get a degraded "running / not running" experience via the process-
+ * tree detector, not via an adapter — they never appear in this registry.
  */
 export abstract class HookAdapter {
     /** Identifier — must match the AiTool string used elsewhere. */

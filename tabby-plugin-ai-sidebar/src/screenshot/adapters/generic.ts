@@ -4,7 +4,7 @@ import { PasteAdapter, PasteArgs, PasteResult } from './adapter'
  * Fallback adapter used when:
  *   - the focused tab has no AI tool (`state.aiTool === null`), OR
  *   - the focused tab's tool has no registered adapter yet (codex, gemini,
- *     opencode, aider, goose — until they get their own).
+ *     opencode — until they get their own).
  *
  * Behaviour matches [[ClaudePasteAdapter]]: writes a shell-quoted path with
  * a trailing space, no newline. Most CLI agents will at least let the user

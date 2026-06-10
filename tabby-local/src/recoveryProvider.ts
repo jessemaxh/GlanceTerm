@@ -18,6 +18,11 @@ export class RecoveryProvider extends TabRecoveryProvider<TerminalTabComponent> 
             inputs: {
                 profile: this.injector.get(ProfilesService).getConfigProxyForProfile(recoveryToken.profile),
                 savedState: recoveryToken.savedState,
+                // Restore the per-tab AI agent command so AutoResumeService can
+                // replay it into THIS recovered terminal. Object.assign in
+                // TabsService applies it straight onto the component instance;
+                // undefined when the tab had no agent at save time.
+                glancetermResumeCommand: recoveryToken.glancetermResumeCommand,
             },
         }
     }

@@ -117,7 +117,12 @@ describe('HookRuntimeService — Codex handler', () => {
         })
     })
 
-    it('does not emit Claude auto-approve output for Codex PermissionRequest', async () => {
+    it('emits the auto-approve allow decision for Codex PermissionRequest (PR #17563)', async () => {
+        // Updated 2026-06-10: Codex DOES support hook-driven auto-approve and
+        // honors the same decision JSON as Claude (source-confirmed against
+        // codex-rs). With the shield flag on, the shared handler emits the
+        // allow decision for codex too. (Previously this asserted no output,
+        // back when codex auto-approve was believed unsupported.)
         const runtime = makeRuntime()
         await runtime.ensureReady()
         await fs.writeFile(path.join(runtime.root, 'auto-approve.flag'), '1')
@@ -129,7 +134,8 @@ describe('HookRuntimeService — Codex handler', () => {
             tool_name: 'Bash',
         })
 
-        expect(stdout).toBe('')
+        expect(stdout).toContain('"hookSpecificOutput"')
+        expect(stdout).toContain('"behavior":"allow"')
         const raw = await fs.readFile(path.join(runtime.stateDir, `${TAB_ID}.log`), 'utf8')
         expect(JSON.parse(raw.trim())).toMatchObject({
             agent: 'codex',

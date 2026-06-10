@@ -7,7 +7,7 @@ import { AiTool } from 'tabby-plugin-ai-sidebar'
  *
  * v0 default for every agent is `text + '\r'` — type-and-submit. The
  * structure exists so per-agent quirks (Codex `y`/`n` vs Claude
- * `1`/`2`/`3` permission menus vs Aider `/yes` slash commands) can be
+ * `1`/`2`/`3` permission menus vs Gemini / opencode prompt shapes) can be
  * specialised in one place when dogfooding surfaces them. Don't add
  * mappings speculatively — wait for "I typed X and the agent didn't
  * do the right thing" feedback, then add the rule + a comment quoting

@@ -47,27 +47,13 @@ export class AiSidebarConfigProvider extends ConfigProvider {
             // re-type `claude` everywhere") is what users were complaining
             // about. See AutoResumeService.
             autoResumeAgents: true,
-            // Per-cwd record of the re-runnable command to launch the AI
-            // tool that was running there at quit time (or, more precisely,
-            // "last observed alive there during the last session"), plus
-            // the COUNT of distinct outer tabs at that cwd that had an
-            // agent. Command is the line typed into the restored shell
-            // with flags preserved — e.g. `claude --resume`,
-            // `codex --model gpt-5`. Count gates how many restored tabs
-            // sharing the same cwd actually get the relaunch on next
-            // start: 3 tabs in /repo with only 1 having had claude
-            // resume claude exactly once, not three times. Captured
-            // every TabMonitor tick that sees an aiTool by reducing the
-            // raw `ps` cmdline (which may include the node interpreter
-            // and absolute paths) to a portable invocation. Decremented
-            // when the user is observed quitting the agent in one of
-            // the tabs (had-agent → no-agent transition); fully
-            // deleted when the count reaches 0. Map keyed by cwd, not
-            // per-tab, because cwd is the only stable identifier
-            // across restarts. Reads also accept the legacy bare-
-            // string shape from pre-fix installs — see
-            // `parsePersistedEntry`.
-            autoResumeCommandByCwd: {} as Record<string, string | { command: string; count: number }>,
+            // NOTE: the re-runnable command per terminal is no longer stored
+            // in config. It rides each tab's own Tabby recovery token
+            // (TerminalTabComponent.glancetermResumeCommand) so two tabs
+            // sharing a cwd but running different agents each get their own
+            // command back. See AutoResumeService. The old cwd-keyed
+            // `autoResumeCommandByCwd` map has been removed — any leftover
+            // entry in a user's config is simply ignored.
         },
     }
 

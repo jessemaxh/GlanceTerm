@@ -92,6 +92,11 @@ interface HookStatusFile {
      *  subagent is live until a SubagentStop with matching `agent_id`
      *  arrives. Empty on every other event. */
     spawn_agent_id?: string
+    /** Active model slug (e.g. `gpt-5.5`, `claude-opus-4-8`). Codex emits it
+     *  on every hook event; Claude only on SessionStart; empty otherwise. The
+     *  watcher keeps the last NON-EMPTY value per tab (see processEvent), so a
+     *  one-shot SessionStart model persists across later model-less events. */
+    model?: string
 }
 
 /** Per-tab snapshot the rest of the plugin consumes. */
@@ -108,6 +113,10 @@ export interface HookSnapshot {
      *  agents that don't emit a transcript_path field). Prefer this over
      *  reconstructing from cwd — see HookStatusFile.transcript_path. */
     transcriptPath: string | null
+    /** Active model slug for this tab, or null until an event surfaces one.
+     *  Sticky: holds the last non-empty model seen (so Claude's one-shot
+     *  SessionStart value survives later model-less events). */
+    model: string | null
 }
 
 /**
@@ -1017,6 +1026,7 @@ export class HookWatcherService implements OnDestroy {
         }
         if (!status) return changed
 
+        const prev = this.map.get(parsed.tab_id)
         this.map.set(parsed.tab_id, {
             tabId: parsed.tab_id,
             tool: adapter.id,
@@ -1025,6 +1035,9 @@ export class HookWatcherService implements OnDestroy {
             sessionId: parsed.session_id || null,
             cwd: parsed.cwd || null,
             transcriptPath: parsed.transcript_path || null,
+            // Sticky: keep the last non-empty model so Claude's one-shot
+            // SessionStart slug survives later model-less events.
+            model: parsed.model || prev?.model || null,
         })
         return true
     }

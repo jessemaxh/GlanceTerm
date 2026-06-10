@@ -56,11 +56,26 @@ set -u
 umask 077
 
 AGENT="\${1:-unknown}"
+# Tab id resolution. All agents inherit GLANCETERM_TAB_ID into the hook env, so
+# the env read below is the primary (and usually only) path — including Gemini:
+# gemini-cli runs hooks via \`bash -c\`/PowerShell with the FULL inherited env
+# (source-confirmed; "sanitization" is opt-in and off by default), so the var
+# is present here. As belt-and-braces, Gemini's installed command also appends
+# the id as a 2nd arg (the shell expands it from gemini's env), which we use
+# ONLY when the env var is somehow absent (e.g. a future build that sanitizes).
+# An arg that arrives as an unexpanded literal (still containing '$', i.e. a
+# shell that didn't expand it) is ignored so we never make a garbage-named log.
 TAB_ID="\${GLANCETERM_TAB_ID:-}"
+if [ -z "$TAB_ID" ]; then
+    _arg="\${2:-}"
+    case "$_arg" in
+        ''|*'$'*) : ;;            # empty or unexpanded placeholder → ignore
+        *) TAB_ID="$_arg" ;;      # a real id (UUID never contains '$')
+    esac
+fi
 
-# No env var = pre-injection Claude session (started before GlanceTerm). We
-# can't attribute this event to any sidebar row, so emit nothing rather than
-# poisoning a shared "unknown.json".
+# No env var / arg = pre-injection session (started before GlanceTerm) or a tab
+# we can't attribute. Emit nothing rather than poisoning a shared "unknown.json".
 if [ -z "$TAB_ID" ] || [ "$TAB_ID" = "unknown" ]; then exit 0; fi
 
 STATE_DIR="\${HOME}/.glanceterm/hooks"
@@ -111,6 +126,12 @@ extract () {
 EVENT=$(extract hook_event_name)
 SESSION_ID=$(extract session_id)
 MATCHER=$(extract matcher)
+# Active model slug. Codex sends a top-level "model" on EVERY hook event
+# (live); Claude sends it only on SessionStart. Empty for events/agents that
+# don't carry it — HookWatcher keeps the last non-empty value, so a one-shot
+# SessionStart model sticks. (Gemini nests it under llm_request on BeforeModel
+# which we don't subscribe to, so it stays empty here — see feature-matrix.)
+MODEL=$(extract model)
 # tool_name only present on PreToolUse / PostToolUse payloads. We need it to
 # know which PreToolUse events spawn a subagent (tool_name = "Task" on older
 # Claude Code, "Agent" on current) vs every other tool — only those bump the
@@ -246,26 +267,39 @@ OUT="\$STATE_DIR/\$TAB_ID.log"
 # other concurrent appenders. Our records are ~250 bytes — well under the
 # limit — so two handler processes firing simultaneously cannot interleave
 # bytes mid-record.
-printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s","ts":%s,"bg":%s,"interrupted":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s","monitor_task_id":"%s","monitor_timeout_ms":%s,"stop_task_id":"%s"}\\n' \\
-    "\$TAB_ID" "\$AGENT" "\$EVENT" "\$MATCHER" "\$TOOL_NAME" "\$SESSION_ID" "\$CWD" "\$TRANSCRIPT_PATH" "\$TS" "\$BG" "\$INTERRUPTED" "\$AGENT_ID" "\$AGENT_TYPE" "\$SPAWN_AGENT_ID" "\$MONITOR_TASK_ID" "\$MONITOR_TIMEOUT_MS" "\$STOP_TASK_ID" \\
+printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s","ts":%s,"bg":%s,"interrupted":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s","monitor_task_id":"%s","monitor_timeout_ms":%s,"stop_task_id":"%s","model":"%s"}\\n' \\
+    "\$TAB_ID" "\$AGENT" "\$EVENT" "\$MATCHER" "\$TOOL_NAME" "\$SESSION_ID" "\$CWD" "\$TRANSCRIPT_PATH" "\$TS" "\$BG" "\$INTERRUPTED" "\$AGENT_ID" "\$AGENT_TYPE" "\$SPAWN_AGENT_ID" "\$MONITOR_TASK_ID" "\$MONITOR_TIMEOUT_MS" "\$STOP_TASK_ID" "\$MODEL" \\
     >> "\$OUT" 2>/dev/null
 
-# Auto-approve permission prompts (Claude only, P0). When the user has
+# Auto-approve permission prompts (Claude + Codex). When the user has
 # explicitly enabled the feature via the sidebar toggle, AutoApproveService
-# writes "1" to ~/.glanceterm/auto-approve.flag; when disabled, "0". For
-# Claude's PermissionRequest event (registered with async:false in
-# claude.ts so Claude reads stdout), emit the allow-decision JSON. For all
-# other events / agents / when flag is 0, emit nothing — Claude's normal
-# approval flow runs. Each grant is appended to ~/.glanceterm/auto-approve.log
-# (tab-separated: ts, tab_id, tool_name, cwd) so a user can review what
-# was auto-approved after the fact.
+# writes "1" to ~/.glanceterm/auto-approve.flag; when disabled, "0". On a
+# PermissionRequest, emit the allow-decision JSON. Both Claude and Codex read
+# the hook's stdout for PermissionRequest and honor the SAME shape
+# (hookSpecificOutput.decision.behavior = "allow") — Codex added this in
+# PR #17563 (2026-04), verified against codex-rs source. For all other events /
+# agents / when flag is 0, emit nothing — the agent's normal approval flow runs.
+# (Note: the JSON we emit carries ONLY "behavior" — no updatedInput/
+# updatedPermissions/interrupt, which Codex rejects fail-closed.) Each grant is
+# appended to ~/.glanceterm/auto-approve.log (tab-separated: ts, tab_id,
+# tool_name, cwd) so a user can review what was auto-approved after the fact.
 # \`head -c 1\` deliberately reads only ONE byte: tolerates a trailing newline
 # in the flag file (most editors add one) without an extra \`tr -d\`.
 #
 # Precedence (decided 2026-06-08): auto-approve short-circuits — if it
 # fires, the relay branch never runs and the phone never sees this
 # request. Two independent switches; users can have any combination.
-if [ "\$AGENT" = "claude" ] && [ "\$EVENT" = "PermissionRequest" ]; then
+#
+# EXCLUDE AskUserQuestion: it is a multiple-choice question, not a yes/no
+# permission — the tool's RESULT is whichever option the user picks. An
+# auto "allow" (or a relayed allow/deny) runs it with NO selection, so the
+# agent gets an empty answer and the turn either dies ("no answer") or
+# silently proceeds on a wrong default. We emit nothing for it: the agent then
+# shows its interactive A/B/C selector and the user actually chooses, and
+# the sidebar row stays needs_permission ("needs you") until they do. It's a
+# Claude tool name; harmless to also guard for Codex. Add any other
+# selection-class tools to the guard below as they surface.
+if { [ "\$AGENT" = "claude" ] || [ "\$AGENT" = "codex" ]; } && [ "\$EVENT" = "PermissionRequest" ] && [ "\$TOOL_NAME" != "AskUserQuestion" ]; then
     AUTO_FLAG=$(head -c 1 "\${HOME}/.glanceterm/auto-approve.flag" 2>/dev/null)
     RELAY_FLAG=$(head -c 1 "\${HOME}/.glanceterm/permission-relay.flag" 2>/dev/null)
     if [ "\$AUTO_FLAG" = "1" ]; then
@@ -345,11 +379,18 @@ exit 0
  */
 const HANDLER_PS1 = `# GlanceTerm hook handler (Windows / PowerShell) — see hook-runtime.service.ts.
 # DO NOT EDIT BY HAND — regenerated on every GlanceTerm launch.
-param([string]$Agent = "unknown")
+param([string]$Agent = "unknown", [string]$TabIdArg = "")
 $ErrorActionPreference = "SilentlyContinue"
 
+# Tab id: env var for Claude/Codex (inherited into the hook env); for Gemini
+# (sanitized env) the installed hook command passes the id as a 2nd arg, which
+# gemini expands from "$GLANCETERM_TAB_ID" against its own process env. Ignore
+# an unexpanded placeholder (still contains '$') so we don't make a garbage log.
 $tabId = $env:GLANCETERM_TAB_ID
-# No env var = pre-injection session; can't attribute, so silently exit
+if (-not $tabId) {
+    if ($TabIdArg -and ($TabIdArg -notmatch '\\$')) { $tabId = $TabIdArg }
+}
+# No env var / arg = pre-injection session; can't attribute, so silently exit
 # rather than writing to a shared "unknown.json" the watcher would have to
 # disambiguate later.
 if (-not $tabId -or $tabId -eq "unknown") { exit 0 }
@@ -460,6 +501,9 @@ $out = [ordered]@{
     monitor_task_id = $monitorTaskId
     monitor_timeout_ms = [long]$monitorTimeoutMs
     stop_task_id    = $stopTaskId
+    # Active model slug — Codex sends it on every event, Claude on SessionStart;
+    # empty otherwise (HookWatcher keeps the last non-empty). See HANDLER_SH.
+    model           = [string]$json.model
 }
 
 # IMPORTANT — write the per-tab .log line HERE (before any PermissionRequest
@@ -469,11 +513,17 @@ $outPath = Join-Path $stateDir "\$tabId.log"
 $line = ($out | ConvertTo-Json -Compress) + "\`n"
 [System.IO.File]::AppendAllText($outPath, $line, [System.Text.Encoding]::UTF8)
 
-# Auto-approve permission prompts (Claude only, P0) — mirror of the POSIX
+# Auto-approve permission prompts (Claude + Codex) — mirror of the POSIX
 # block in HANDLER_SH. See hook-runtime.service.ts comments there for the
-# full rationale. When the user has enabled the feature, AutoApproveService
-# writes "1" to %USERPROFILE%\\.glanceterm\\auto-approve.flag.
-if ($Agent -eq "claude" -and $out.event -eq "PermissionRequest") {
+# full rationale (both agents honor the same decision JSON; Codex since
+# PR #17563). When enabled, AutoApproveService writes "1" to
+# %USERPROFILE%\\.glanceterm\\auto-approve.flag.
+#
+# EXCLUDE AskUserQuestion (see HANDLER_SH): it's a multiple-choice question,
+# not a yes/no permission, so "allow" runs it with no selection and the agent
+# gets an empty answer. Emit nothing — the agent shows its interactive selector
+# and the row stays needs_permission until the user picks.
+if (($Agent -eq "claude" -or $Agent -eq "codex") -and $out.event -eq "PermissionRequest" -and $out.tool_name -ne "AskUserQuestion") {
     $autoFlagFile = Join-Path $env:USERPROFILE ".glanceterm\\auto-approve.flag"
     $relayFlagFile = Join-Path $env:USERPROFILE ".glanceterm\\permission-relay.flag"
     $autoFlag = ""; $relayFlag = ""

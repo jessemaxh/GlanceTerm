@@ -4,6 +4,8 @@ import type { AiTool } from '../tab-monitor'
 import { HookAdapter } from './adapter'
 import { ClaudeHookAdapter } from './claude'
 import { CodexHookAdapter } from './codex'
+import { GeminiHookAdapter } from './gemini'
+import { OpencodeHookAdapter } from './opencode'
 
 /**
  * Single point that hands out HookAdapter instances by tool id. The whole
@@ -19,13 +21,24 @@ import { CodexHookAdapter } from './codex'
 export class HookAdapterRegistry {
     private readonly adapters: Map<AiTool, HookAdapter> = new Map<AiTool, HookAdapter>([
         ['claude', new ClaudeHookAdapter()],
-        // Codex: status detection only — auto-approve not supported by
-        // Codex's hook output schema (PermissionRequest doesn't accept the
-        // decision JSON the way Claude's does). UNTESTED — adapter written
-        // from Codex hooks docs, see codex.ts head comment.
+        // Codex: status detection + auto-approve (Codex added hook-driven
+        // PermissionRequest allow/deny in PR #17563, same decision JSON as
+        // Claude — verified against codex-rs source 2026-06-10). UNTESTED
+        // end-to-end — adapter written from Codex hooks docs. See codex.ts.
         ['codex',  new CodexHookAdapter()],
-        // Future:
-        // ['gemini', new GeminiHookAdapter()],
+        // Gemini CLI: working/idle status via shell hooks in
+        // ~/.gemini/settings.json (BeforeAgent/AfterAgent). UNTESTED
+        // end-to-end, but the tab-id routing is source-confirmed (gemini runs
+        // hooks via `bash -c` with the full env, so "$GLANCETERM_TAB_ID"
+        // expands). See gemini.ts head comment. needs_permission + auto-approve
+        // are not supported (see the matrix).
+        ['gemini', new GeminiHookAdapter()],
+        // opencode: status via a shipped JS plugin (no config-file shell
+        // hook). Routing is clean — the plugin runs in opencode's process and
+        // reads GLANCETERM_TAB_ID from process.env directly. UNTESTED; the
+        // global plugin dir name + event firing are the validation points.
+        // See opencode.ts head comment.
+        ['opencode', new OpencodeHookAdapter()],
     ])
 
     /** All adapters in registration order. */

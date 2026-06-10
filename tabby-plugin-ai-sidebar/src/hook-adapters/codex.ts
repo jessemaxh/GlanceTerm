@@ -26,13 +26,18 @@ import { withFileLock, escapeRegex } from './claude'
  *      a per-hook async flag — we omit it on every entry and let Codex run
  *      hooks however it normally runs them. Our handler is fast (<100ms),
  *      so blocking is fine.
- *   3. No auto-approve hookSpecificOutput. Codex docs explicitly call out
- *      that PermissionRequest only supports `systemMessage` — `continue`,
- *      `stopReason`, and `suppressOutput` aren't supported, and there's no
- *      documented `decision: { behavior: "allow" }` channel. The shield
- *      toggle therefore stays inert for Codex tabs (status detection still
- *      works, the auto-allow path doesn't). Marked clearly in the feature
- *      matrix.
+ *   3. Auto-approve IS supported (updated 2026-06-10, was previously believed
+ *      unsupported). Codex added hook-driven PermissionRequest allow/deny in
+ *      PR #17563 (merged 2026-04-17) and reads the hook's stdout for that
+ *      event synchronously — verified against codex-rs source
+ *      (`hooks/src/schema.rs`, `engine/output_parser.rs`,
+ *      `core/src/tools/orchestrator.rs`). The accepted JSON is byte-identical
+ *      to Claude's `{"hookSpecificOutput":{"hookEventName":"PermissionRequest",
+ *      "decision":{"behavior":"allow"}}}`, so the shared handler's existing
+ *      output works for Codex as-is. One caveat: Codex fails CLOSED if the
+ *      reserved fields `updatedInput`/`updatedPermissions`/`interrupt` appear
+ *      inside `decision` — our handler emits only `behavior`, so we're fine.
+ *      The shield toggle is now live for Codex tabs.
  *
  * STATUS: UNTESTED. Written from the Codex hooks docs without a
  * verifying install on this machine. Architecture confidence is high

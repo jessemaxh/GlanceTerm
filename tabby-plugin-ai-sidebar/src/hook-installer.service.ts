@@ -4,6 +4,8 @@ import { HookAdapterRegistry } from './hook-adapters/registry'
 import { HookRuntimeService } from './hook-runtime.service'
 import { claudeConfigDirExistsSync } from './hook-adapters/claude'
 import { codexConfigDirExistsSync } from './hook-adapters/codex'
+import { geminiConfigDirExistsSync } from './hook-adapters/gemini'
+import { opencodeConfigDirExistsSync } from './hook-adapters/opencode'
 import type { HookAdapter } from './hook-adapters/adapter'
 import type { AiTool } from './tab-monitor'
 
@@ -90,14 +92,18 @@ export class HookInstallerService {
 
     /**
      * Per-adapter "is this agent established on the machine" check. Each
-     * adapter would ideally expose its own gate as a method on HookAdapter,
-     * but with a 2-entry switch the indirection isn't earning its keep yet.
-     * When a third gate lands, move this to `adapter.installedOnMachine()`.
+     * adapter would ideally expose its own gate as a method on HookAdapter;
+     * now at three entries (claude/codex/gemini) this switch is a candidate
+     * to move to `adapter.installedOnMachine()` — left inline for now since
+     * each gate is a one-liner and the indirection would spread the logic
+     * across three more files. Refactor when the 4th lands.
      */
     private gatePasses (adapter: HookAdapter): boolean {
         switch (adapter.id) {
             case 'claude': return claudeConfigDirExistsSync()
             case 'codex':  return codexConfigDirExistsSync()
+            case 'gemini': return geminiConfigDirExistsSync()
+            case 'opencode': return opencodeConfigDirExistsSync()
             default: return false       // unknown adapter — fail closed
         }
     }

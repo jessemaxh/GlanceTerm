@@ -135,8 +135,6 @@ export type AiTool =
     | 'codex'
     | 'gemini'
     | 'opencode'
-    | 'aider'
-    | 'goose'
 
 const AI_PATTERNS: Array<{ tool: AiTool; regexes: RegExp[] }> = [
     {
@@ -165,19 +163,6 @@ const AI_PATTERNS: Array<{ tool: AiTool; regexes: RegExp[] }> = [
         regexes: [
             /\bopencode(\s|$)/,
             /\/opencode\/[^\s]+\.[mc]?js/,
-        ],
-    },
-    {
-        tool: 'aider',
-        regexes: [
-            /\baider(\s|$)/,
-            /python[\d.]*\s+(?:-m\s+aider|.+\/aider\/(?:__main__|main)\.py)/,
-        ],
-    },
-    {
-        tool: 'goose',
-        regexes: [
-            /\bgoose(\s|$)/,
         ],
     },
 ]
@@ -258,6 +243,15 @@ export interface TabState {
      * > 0. Mirrors the "M monitor" half of Claude's footer pair.
      */
     monitorCount: number
+    /**
+     * Active model id for this tab's agent, if known (e.g. `claude-opus-4-8`,
+     * `gpt-5.5`). Sidebar renders it next to the agent tag. Null when unknown
+     * (no event yet / source unavailable). Live — updates if the user switches
+     * model mid-session. Source is per-agent (hook payload field where the
+     * agent provides one, else the transcript's last assistant `model`); see
+     * makeState.
+     */
+    model: string | null
 }
 
 interface ChildProcessInfo { pid: number; ppid: number; command: string }
@@ -278,8 +272,8 @@ interface ChildProcessInfo { pid: number; ppid: number; command: string }
  *      tab's hook snapshot to decide working/idle/needs_permission.
  *
  * Tools with adapters but no event yet show as `idle` with awaitingFirstEvent
- * = true. Tools without adapters (aider, opencode, goose) show as `working`
- * for as long as the process is alive — degraded but visible. Their
+ * = true. Tools without adapters (opencode, until its adapter lands) show as
+ * `working` for as long as the process is alive — degraded but visible. Their
  * granular state will arrive when those adapters land.
  */
 @Injectable({ providedIn: 'root' })
@@ -614,6 +608,10 @@ export class TabMonitor implements OnDestroy {
         // undefined for tabs without an adapter-supported AI tool, which
         // short-circuits the side-channel read.
         let tabId: string | undefined
+        // Active model slug for this tab, surfaced from the hook snapshot
+        // (Codex every event / Claude SessionStart / opencode plugin). Null
+        // for unsupported tools or before any model-bearing event.
+        let model: string | null = null
 
         if (!aiTool) {
             status = TabStatus.NoAi
@@ -640,6 +638,7 @@ export class TabMonitor implements OnDestroy {
             tabId = envId ?? sess.glancetermTabId
             const snap = tabId ? this.hooks.getStatus(tabId) : null
             if (snap) {
+                model = snap.model
                 // Subagent in-flight override: when the main agent has
                 // spawned a backgrounded Task subagent, the main agent's
                 // response ends → Stop → raw status = idle. The subagent
@@ -715,6 +714,7 @@ export class TabMonitor implements OnDestroy {
             subagentCount: tabId ? this.hooks.getSubagentInFlight(tabId) : 0,
             backgroundJobCount,
             monitorCount: tabId ? this.hooks.getMonitorInFlight(tabId) : 0,
+            model,
         }
     }
 
@@ -1030,6 +1030,7 @@ export class TabMonitor implements OnDestroy {
             subagentCount: 0,
             backgroundJobCount: 0,
             monitorCount: 0,
+            model: null,
         }
     }
 

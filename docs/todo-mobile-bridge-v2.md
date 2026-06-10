@@ -28,7 +28,7 @@ landscape:
 
 Two hard constraints from product owner (2026-06-08):
 1. **No own app / no own server.** Telegram + Feishu only.
-2. **Must work for non-Claude agents** (codex, aider, goose) — rules out
+2. **Must work for non-Claude agents** (codex, gemini, opencode) — rules out
    Anthropic's official plugin.
 
 Given those, the only viable shape is "keep our mobile-bridge plugin, add the
@@ -292,8 +292,12 @@ InboundRouter
 
 ---
 
-### Block 4 — Multi-agent outbound (codex / aider / goose)
+### Block 4 — Multi-agent outbound (codex / gemini / opencode)
 **Effort: ~3 days.**
+
+> Supported set as of 2026-06-10 is Claude / Codex / Gemini / opencode.
+> `aider` and `goose` were dropped (see docs/feature-matrix.md) — no longer
+> in scope here.
 
 Today's `TranscriptTailerService` only knows Claude's `.jsonl` format. For
 non-Claude agents:
@@ -302,8 +306,10 @@ non-Claude agents:
 Per-agent adapter (in tabby-plugin-ai-sidebar/src/hook-adapters/):
   - claude.ts (exists) — already maps PreToolUse/PostToolUse/Stop/etc → status
   - codex.ts (exists?) — verify; add transcript-path extraction if Codex emits one
-  - aider.ts (NEW) — Aider writes .aider.chat.history.md; tail that
-  - goose.ts (NEW) — Goose has its own session format; tail it
+  - gemini.ts (NEW) — shell-command hooks (~/.gemini/settings.json); route by
+    session_id (sanitized env — no GLANCETERM_TAB_ID passthrough)
+  - opencode (NEW) — no JSON-shell-hook; ship a TS plugin or subscribe to
+    `opencode serve` /event SSE (session.idle / permission.asked / ...)
 
 PtyTailerService (NEW, fallback for agents without structured transcript):
   - subscribe to inner.session.output$
@@ -315,7 +321,8 @@ PtyTailerService (NEW, fallback for agents without structured transcript):
 ```
 
 **Files touched:**
-- `tabby-plugin-ai-sidebar/src/hook-adapters/{aider,goose}.ts` — NEW
+- `tabby-plugin-ai-sidebar/src/hook-adapters/gemini.ts` — NEW (+ opencode
+  integration, mechanism TBD: TS plugin vs SSE)
 - `tabby-plugin-mobile-bridge/src/transcript/pty-tailer.service.ts` — NEW
   (parallel to existing TranscriptTailerService, same events$ shape)
 - `tabby-plugin-mobile-bridge/src/outbound-dispatcher.service.ts` — wire
@@ -324,13 +331,15 @@ PtyTailerService (NEW, fallback for agents without structured transcript):
 **Decision rule per agent:**
 - Claude → TranscriptTailer (structured jsonl, no false positives)
 - Codex → if it writes a structured transcript: tailer; otherwise PtyTailer
-- Aider → tail `.aider.chat.history.md` (markdown, parseable)
-- Goose → TBD on inspection of its session format
+- Gemini → hook-driven status via `gemini.ts`; transcript content via PtyTailer
+  until a structured transcript path is confirmed
+- opencode → bus events (session.idle / message.part.updated) via plugin or
+  SSE; PtyTailer fallback for content
 - Unknown/future → PtyTailer (ANSI-stripped, debounced)
 
 **Out of v1:** permission relay for non-Claude agents. Each has its own
-permission protocol (codex sandbox approval, aider's `--yes-always`, goose's
-allow-list config). v2 work.
+permission protocol (codex sandbox approval, gemini's advisory ToolPermission
+notification, opencode's permission.asked/ask). v2 work.
 
 ---
 

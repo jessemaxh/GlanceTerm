@@ -85,7 +85,7 @@ export class OutboundDispatcherService implements OnDestroy {
         //   - TranscriptTailerService: Claude jsonl (structured + carries
         //     tool_use blocks). Fires only for Claude tabs.
         //   - PtyTailerService: ANSI-stripped output debounced 1.2s.
-        //     Fires only for non-Claude tabs (Codex / Aider / Goose /
+        //     Fires only for non-Claude tabs (Codex / Gemini / opencode /
         //     anything else). Skips raw shells (no aiTool).
         // The dispatchTranscript path is identical for both — both emit
         // TranscriptEvent with kind='assistant_text', tabId from the

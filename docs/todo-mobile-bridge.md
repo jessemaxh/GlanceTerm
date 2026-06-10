@@ -103,7 +103,7 @@ on the lowest-friction platform.
   `TabMonitor.states$`, attention triggers from `AttentionNotifierService`.
 - Topic → PTY input router (UUID → tab → PTY write).
 - Per-AI-tool keystroke adapter: Claude (Enter), Codex (`y` / `n`),
-  Aider (TBD), opencode (TBD). Empirically verified, version-pinned.
+  Gemini (TBD), opencode (TBD). Empirically verified, version-pinned.
 - `/bind <code>` pairing flow that locks `chatId`, `ownerUserId`,
   and seeds `approvedSenders = [ownerUserId]`.
 - Bot token stored via keytar (system keychain), never in settings.json.
@@ -175,7 +175,7 @@ on the lowest-friction platform.
 
 ### Open design questions
 1. **Per-agent approve keystroke mapping** — Claude (Enter), Codex (`y`),
-   Aider (?), Gemini (?), opencode (?). Need empirical verification per
+   Gemini (?), opencode (?). Need empirical verification per
    tool version. Document version pins as we go. Even with text-first
    interaction, the router still needs to know what a user-typed "yes"
    becomes at the PTY layer (might be Enter, might be `y\n`, might be

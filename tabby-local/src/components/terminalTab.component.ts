@@ -16,6 +16,18 @@ export class TerminalTabComponent extends BaseTerminalTabComponent<LocalProfile>
     @Input() sessionOptions: SessionOptions // Deprecated
     session: Session|null = null
 
+    /**
+     * GlanceTerm — the re-runnable AI agent command (e.g. `claude --resume foo`)
+     * last observed alive in THIS terminal, written by the ai-sidebar plugin's
+     * AutoResumeService on each capture tick and cleared when the agent exits.
+     * Serialized into the recovery token (see getRecoveryToken) and restored
+     * onto the recovered instance (see RecoveryProvider.recover) so the auto-
+     * resume replay is keyed per-tab — two tabs sharing a cwd but running
+     * different agents each get their own command back, instead of collapsing
+     * onto a single cwd-keyed entry. Undefined when no agent is/was running.
+     */
+    glancetermResumeCommand?: string
+
     // eslint-disable-next-line @typescript-eslint/no-useless-constructor
     constructor (
         injector: Injector,
@@ -88,6 +100,14 @@ export class TerminalTabComponent extends BaseTerminalTabComponent<LocalProfile>
                 },
             },
             savedState: options?.includeState && this.frontend?.saveState(),
+            // Only carried on the state-bearing recovery path (app restart /
+            // close-tab stack), not on profile duplication (includeState
+            // false) — duplicating a tab running claude shouldn't auto-launch
+            // claude in the copy. `|| undefined` so JSON.stringify drops the
+            // key entirely when there's no pending command.
+            glancetermResumeCommand: options?.includeState
+                ? (this.glancetermResumeCommand || undefined)
+                : undefined,
         }
     }
 

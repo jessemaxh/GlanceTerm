@@ -8,7 +8,7 @@ import { HookWatcherService } from './hook-watcher.service'
 
 /**
  * Fast path for the "ESC while LLM is thinking leaves the row stuck on
- * working" bug. The agent CLIs (claude, codex, aider, goose) all run on
+ * working" bug. The agent CLIs (claude, codex, gemini, opencode) all run on
  * raw-mode stdin and treat a bare ESC as their interrupt key. They abort
  * the in-flight LLM/SSE request and the running tool subprocess locally,
  * but during the LLM-thinking window they fire no hook event at all — so

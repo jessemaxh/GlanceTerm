@@ -207,7 +207,7 @@ export class PermissionRelayService implements OnDestroy {
         // the .req payload — Claude is the only agent that writes the
         // permission-request JSON shape today, but the bridge runs for
         // any agent. Looking up via TabState gives us 'claude' / 'codex'
-        // / 'aider' / ... or undefined for raw shells.
+        // / 'gemini' / 'opencode' or undefined for raw shells.
         const tabState = this.monitor.current.find(s => {
             const uuid = this.identity.uuidOf(s.outerTab)
             return uuid === ident.uuid
@@ -429,8 +429,8 @@ function summarisePayloadForPhone (p: ClaudePermissionPayload): string {
  * still answer with `yes <id>` or `no <id>` text — same convention
  * Anthropic uses in their official Channels plugin.
  *
- * Agent name comes from TabState.aiTool — 'claude' / 'codex' / 'aider'
- * etc. — so non-Claude users see "codex wants to run Bash" instead of
+ * Agent name comes from TabState.aiTool — 'claude' / 'codex' / 'gemini'
+ * / 'opencode' — so non-Claude users see "codex wants to run Bash" instead of
  * the previously hard-coded "Claude wants to run …" which was wrong
  * everywhere except Claude tabs.
  */

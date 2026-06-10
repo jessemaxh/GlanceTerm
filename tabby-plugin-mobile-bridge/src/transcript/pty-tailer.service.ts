@@ -12,8 +12,8 @@ import type { TranscriptEvent } from './tailer.service'
  * because the v1 implementation has a fundamental limitation that makes
  * it useless for the agents most users care about.
  *
- * **Why it's opt-in:** modern interactive AI agents (Codex, Aider,
- * Goose, Claude Code's TUI) run the terminal in raw mode + alt-screen
+ * **Why it's opt-in:** modern interactive AI agents (Codex, Gemini,
+ * opencode, Claude Code's TUI) run the terminal in raw mode + alt-screen
  * and rewrite the entire visible region on every keystroke. The PTY
  * output stream is the post-redraw screen content, NOT the agent's
  * logical reply text. ANSI-stripping that stream gives you the input
@@ -21,7 +21,7 @@ import type { TranscriptEvent } from './tailer.service'
  * all flattened into one unreadable blob.
  *
  * For Claude, use {@link TranscriptTailerService} which reads the
- * structured jsonl. For Codex / Aider / Goose / future agents, the
+ * structured jsonl. For Codex / Gemini / opencode / future agents, the
  * right answer is a per-agent adapter that knows the transcript file
  * shape — those don't exist yet (see Block 4 of
  * docs/todo-mobile-bridge-v2.md).

@@ -120,10 +120,19 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                         </div>
                         <div class="line2">
                             <span *ngIf="s.aiTool" class="tag" [attr.data-tool]="s.aiTool">{{ toolTag(s.aiTool) }}</span>
+                            <span *ngIf="s.model" class="model-tag" [attr.title]="s.model">{{ modelLabel(s.aiTool, s.model) }}</span>
                             <span class="status" [attr.data-status]="effStatus(s)">{{ statusLabel(s) }}</span>
-                            <span *ngIf="s.subagentCount > 0" class="micro accent">{{ s.subagentCount }} {{ s.subagentCount === 1 ? 'agent' : 'agents' }}</span>
+                            <!-- Full-word concurrency counts. They WRAP to the
+                                 next line when the row is too narrow (see
+                                 .line2 flex-wrap) rather than ellipsis-
+                                 truncating the label — the old behaviour cut
+                                 "1 agent · 3 shell · 9 monitor" down to a
+                                 meaningless "1 … · 3 … · 9 m…". Plain English
+                                 words so the meaning is obvious without a
+                                 legend. -->
+                            <span *ngIf="s.subagentCount > 0" class="micro accent" [title]="subagentTitle(s)">{{ s.subagentCount }} {{ s.subagentCount === 1 ? 'agent' : 'agents' }}</span>
                             <span *ngIf="s.backgroundJobCount > 0" class="micro accent" [title]="bgJobTitle(s)">{{ s.backgroundJobCount }} {{ bgLabel(s) }}</span>
-                            <span *ngIf="s.monitorCount > 0" class="micro accent" [title]="monitorTitle(s)">{{ s.monitorCount }} monitor</span>
+                            <span *ngIf="s.monitorCount > 0" class="micro accent" [title]="monitorTitle(s)">{{ s.monitorCount }} {{ s.monitorCount === 1 ? 'monitor' : 'monitors' }}</span>
                         </div>
                         <div *ngIf="s.cwd && effStatus(s) !== TabStatus.NeedsPermission" class="line3">
                             <span class="path-sub" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
@@ -763,6 +772,14 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             gap: 8px;
             margin-top: 5px;
             min-width: 0;
+            /* Wrap the concurrency counts to a second line when the row is
+               too narrow to hold them all, instead of letting each .micro
+               shrink + ellipsis-truncate its label (which produced the
+               unreadable "1 … · 3 … · 9 m…"). Tag + status stay on the
+               first line; full-word counts flow underneath only when
+               crowded, so the common 0–1-count case is unchanged. */
+            flex-wrap: wrap;
+            row-gap: 3px;
         }
         .status {
             font-size: 15px;
@@ -787,10 +804,10 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             font-weight: 500;
             color: var(--gt-text-faint);
             white-space: nowrap;
-            min-width: 0;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            flex: 0 1 auto;
+            /* Don't shrink/clip — the count label must stay whole. When the
+               row can't hold them, .line2's flex-wrap drops them to the next
+               line rather than truncating mid-word. */
+            flex: none;
         }
         .micro::before {
             content: "· ";
@@ -852,13 +869,25 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             white-space: nowrap;
             flex: none;
         }
-        /* Palette: claude moved off honey (brand), aider moved off red (error). */
+        /* Palette: claude moved off honey (brand) so the brand colour isn't
+           overloaded onto a status chip. */
         .tag[data-tool="claude"]      { color: #E879A6; background: rgba(232, 121, 166, 0.16); }
         .tag[data-tool="codex"]       { color: #5BC8E5; background: rgba(91, 200, 229, 0.16); }
         .tag[data-tool="gemini"]      { color: #6FA0F2; background: rgba(111, 160, 242, 0.16); }
         .tag[data-tool="opencode"]    { color: #B794F4; background: rgba(183, 148, 244, 0.16); }
-        .tag[data-tool="aider"]       { color: #3FC9B0; background: rgba(63, 201, 176, 0.16); }
-        .tag[data-tool="goose"]       { color: #8ED1A4; background: rgba(142, 209, 164, 0.16); }
+
+        /* Active-model chip next to the agent tag — deliberately subtle
+           (dimmed, no background) so the agent tag stays the primary label. */
+        .model-tag {
+            font-family: var(--gt-mono);
+            font-size: 11px;
+            font-weight: 500;
+            line-height: 1;
+            opacity: 0.62;
+            white-space: nowrap;
+            align-self: center;
+            flex: none;
+        }
 
         /* ---- footer (aggregate stats) ---- */
         .sb-footer {
@@ -2009,10 +2038,26 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
             codex:    'Codex',
             gemini:   'Gemini',
             opencode: 'OpenCode',
-            aider:    'Aider',
-            goose:    'Goose',
         }
         return tags[tool] || tool.charAt(0).toUpperCase() + tool.slice(1)
+    }
+
+    /** Short, de-noised model label for the chip next to the agent tag. Drops
+     *  a provider prefix (opencode `anthropic/claude-…` → `claude-…`), a
+     *  trailing `-YYYYMMDD` date (Claude dated ids), and the redundant
+     *  agent-name prefix (`claude-opus-4-8` → `opus-4-8`, `gemini-2.5-pro` →
+     *  `2.5-pro`). Codex (`gpt-5.5`) is left as-is. The full id is in the
+     *  chip's title attribute. */
+    modelLabel (tool: string | null, model: string | null): string {
+        if (!model) return ''
+        let m = model
+        const slash = m.lastIndexOf('/')
+        if (slash >= 0) m = m.slice(slash + 1)
+        m = m.replace(/-\d{8}$/, '')
+        if (tool && m.toLowerCase().startsWith(tool.toLowerCase() + '-')) {
+            m = m.slice(tool.length + 1)
+        }
+        return m
     }
 
     ageStr (ms: number | null): string {
@@ -2024,6 +2069,12 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         const h = Math.floor(m / 60)
         if (h < 24) return `${h}h`
         return `${Math.floor(h / 24)}d`
+    }
+
+    subagentTitle (s: TabState): string {
+        const n = s.subagentCount
+        const noun = n === 1 ? 'subagent' : 'subagents'
+        return `${n} ${noun} in flight (spawned via the Agent/Task tool, not yet retired by a matching SubagentStop).`
     }
 
     bgJobTitle (s: TabState): string {
