@@ -190,13 +190,15 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                     <div *ngIf="screenshotMenuOpen" class="action-menu" role="menu">
                         <button type="button"
                                 class="action-menu-item"
-                                role="menuitemcheckbox"
-                                [attr.aria-checked]="screenshotHideWindow"
-                                (click)="toggleScreenshotHideWindow()">
+                                role="menuitem"
+                                [disabled]="capturing"
+                                (click)="onScreenshotHideWindow()">
                             <svg class="check" width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                                <path *ngIf="screenshotHideWindow" d="M3 8.5 L6.5 12 L13 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                                <path d="M2.5 5 L2.5 11.5 A1 1 0 0 0 3.5 12.5 L12.5 12.5 A1 1 0 0 0 13.5 11.5 L13.5 5 M2 4.5 L6 4.5 L7 6 L13.5 6"
+                                      stroke="currentColor" stroke-width="1.2" stroke-linejoin="round" opacity="0.55"/>
+                                <path d="M8 1.5 L8 5.5 M6 3.5 L8 5.5 L10 3.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
                             </svg>
-                            <span class="lbl">Hide GlanceTerm window</span>
+                            <span class="lbl">Hide Window Screenshot</span>
                         </button>
                     </div>
                 </div>
@@ -1334,24 +1336,6 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         }
     }
 
-    /**
-     * Read-through to the persisted setting. Default `true` matches
-     * AiSidebarConfigProvider — when the store hasn't loaded yet we still
-     * read as "hide enabled" so the menu's checkmark matches the actual
-     * behavior the ScreenshotService will apply on its own first-read.
-     */
-    get screenshotHideWindow (): boolean {
-        return this.config.store?.ai?.screenshotHideWindow !== false
-    }
-
-    toggleScreenshotHideWindow (): void {
-        this.config.store.ai.screenshotHideWindow = !this.screenshotHideWindow
-        void this.config.save()
-        // Close the menu after the choice — single-item menu, no reason to
-        // linger and force a second click.
-        this.screenshotMenuOpen = false
-    }
-
     toggleScreenshotMenu (ev: MouseEvent): void {
         // The document:click listener uses contains() to keep the menu open
         // when the click is inside the split-action group. We still call
@@ -1434,12 +1418,36 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     }
 
     /**
-     * Capture flow: open the WeChat-style overlay, then route the cropped PNG
-     * through the per-agent paste adapter (Claude first, fallback = generic).
-     * `capturing` flips the button into a disabled / "Capturing…" state so
-     * users don't double-trigger.
+     * Main button: capture WITHOUT hiding GlanceTerm — the common case is
+     * snipping something inside another GlanceTerm tab to route at the
+     * focused agent, so the window stays on-screen and in the frame.
      */
     async onScreenshot (): Promise<void> {
+        // Clicking the main action means "go" — close the options popover if
+        // it's open. The document:click handler treats the whole split-action
+        // group as "inside" so it wouldn't auto-close on its own.
+        this.screenshotMenuOpen = false
+        await this.runCapture(false)
+    }
+
+    /**
+     * Split-button menu action: hide the GlanceTerm window first, THEN
+     * capture — for snipping something behind GlanceTerm without its UI in
+     * the frame. A direct action (not a persisted toggle): the hide is
+     * applied for this one capture inside ScreenshotService.capture().
+     */
+    async onScreenshotHideWindow (): Promise<void> {
+        this.screenshotMenuOpen = false
+        await this.runCapture(true)
+    }
+
+    /**
+     * Shared capture flow: open the WeChat-style overlay, then route the
+     * cropped PNG through the per-agent paste adapter (Claude first,
+     * fallback = generic). `capturing` flips the button into a disabled /
+     * "Capturing…" state so users don't double-trigger.
+     */
+    private async runCapture (hideWindow: boolean): Promise<void> {
         if (this.capturing) return
         // Non-AI tab: the paste step has no target. Tell the user instead of
         // silently dropping the click — disabling the button leaves users
@@ -1448,13 +1456,9 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
             this.notifications.info('Focus an AI agent tab (Claude, Codex, …) to use screenshot paste.')
             return
         }
-        // Close the options popover if it's open — clicking the main action
-        // means "I'm done configuring, go". The document:click handler treats
-        // the whole split-action group as "inside" so it wouldn't auto-close.
-        this.screenshotMenuOpen = false
         this.capturing = true
         try {
-            const result = await this.screenshot.capture()
+            const result = await this.screenshot.capture({ hideWindow })
             if (!result) return   // user cancelled or capture failed
             await this.screenshotPaste.paste(result.buffer)
         } finally {
@@ -1465,7 +1469,9 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     screenshotTitle (): string {
         if (this.capturing) return 'Capture in progress…'
         if (!this.activeIsAi) return 'Focus an AI agent tab to enable screenshot paste'
-        return 'Take a screenshot — drag to select, annotate, then confirm to paste the path into the focused AI agent.'
+        return 'Take a screenshot (GlanceTerm stays visible) — drag to select, '
+            + 'annotate, then double-click / Enter to paste the path into the focused AI agent. '
+            + 'Use the ▾ menu to hide GlanceTerm first.'
     }
 
     splitTitle (): string {

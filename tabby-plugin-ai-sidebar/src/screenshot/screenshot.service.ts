@@ -1,21 +1,22 @@
 import { Injectable } from '@angular/core'
 
-import { ConfigService, NotificationsService } from 'tabby-core'
+import { NotificationsService } from 'tabby-core'
 
 import { openCaptureWindow, CaptureResult } from './capture-window'
 
 /**
  * Public surface used by the sidebar button.
  *
- * `capture()` does the full flow: optionally hide the main GlanceTerm window
- * (default on — `ai.screenshotHideWindow`), grab the primary display via
- * `desktopCapturer`, hand it to the overlay window, await the user's
- * confirm/cancel, then restore the main window. Returns a Node Buffer of the
- * cropped PNG, or null on cancel.
+ * `capture({ hideWindow })` does the full flow: optionally hide the main
+ * GlanceTerm window, grab the primary display via `desktopCapturer`, hand it
+ * to the overlay window, await the user's confirm/cancel, then restore the
+ * main window. Returns a Node Buffer of the cropped PNG, or null on cancel.
  *
- * Hide toggle: when off, GlanceTerm stays on-screen and shows up in the
- * captured frame — the WeChat default. Useful when the user wants to capture
- * something inside another GlanceTerm tab and route it to a different agent.
+ * `hideWindow` is now a per-invocation intent set by the caller, not a
+ * persisted toggle: the main screenshot button passes `false` (GlanceTerm
+ * stays on-screen — the common "snip another GlanceTerm tab and route it to
+ * a different agent" case), and the split-button's "Hide Window Screenshot"
+ * menu action passes `true` (hide GlanceTerm so its UI isn't in the frame).
  *
  * Multi-display support: v1 captures the display where the GlanceTerm window
  * currently lives (`screen.getDisplayMatching(window.bounds)`). A user with
@@ -48,7 +49,6 @@ export class ScreenshotService {
 
     constructor (
         private notifications: NotificationsService,
-        private config: ConfigService,
     ) {}
 
     /**
@@ -58,7 +58,8 @@ export class ScreenshotService {
      * still gets feedback when something blew up (otherwise the click looks
      * like a no-op).
      */
-    async capture (): Promise<{ buffer: Buffer; ext: 'png' } | null> {
+    async capture (opts?: { hideWindow?: boolean }): Promise<{ buffer: Buffer; ext: 'png' } | null> {
+        const hideWindow = opts?.hideWindow ?? false
         if (this.inProgress) return null
         this.inProgress = true
         // Outer try/finally guarantees `inProgress = false` on EVERY exit
@@ -133,7 +134,6 @@ export class ScreenshotService {
             // bad run.
             ensureDockVisible(remote)
 
-            const hideWindow = this.config.store?.ai?.screenshotHideWindow !== false
             const wasVisible = !ourWindow.isMinimized() && ourWindow.isVisible()
             try {
                 if (hideWindow) {

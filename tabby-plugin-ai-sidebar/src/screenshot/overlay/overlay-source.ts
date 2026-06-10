@@ -210,7 +210,7 @@ const OVERLAY_HTML = `<!doctype html>
   <canvas id="ann"></canvas>
   <canvas id="ann-preview"></canvas>
 
-  <div id="hint">Drag to capture · click inside to draw a red box · <kbd>Esc</kbd> cancel · <kbd>⏎</kbd> confirm</div>
+  <div id="hint">Drag to capture · click inside to draw a red box · <kbd>Esc</kbd> cancel · <kbd>⏎</kbd> / double-click confirm</div>
 
   <div id="magnifier">
     <canvas width="13" height="13"></canvas>
@@ -599,6 +599,17 @@ const OVERLAY_JS = `
     }
     dragKind = null;
     dragStart = null;
+  });
+
+  // Double-click anywhere over a finished selection = confirm, same as the
+  // Confirm button / Enter. The two underlying clicks only ever start a
+  // zero-size draw, which finalizeDrawing() discards (< 3px), so the crop is
+  // never polluted by the gesture. Guarded to the 'edit' phase so a stray
+  // double-click during initial framing (no selection yet) can't fall
+  // through to confirm()'s empty-selection branch and cancel.
+  document.addEventListener('dblclick', (e) => {
+    if (e.target.closest('#toolbar')) return;
+    if (phase === 'edit' && sel) { e.preventDefault(); confirm(); }
   });
 
   // ── drawing in-progress preview ──────────────────────────────────────────
