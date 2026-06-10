@@ -31,8 +31,12 @@ import { appendAudit, redactToken } from './audit-log'
  * This service:
  *   - watches the permissions dir; on `.req` arrival, picks the tab from
  *     the payload's `cwd` -> session match (via TabIdentityService), then
- *     for every enabled binding allowed for that tab, sends a Telegram
- *     message with an inline-keyboard ✅ Allow / ❌ Deny;
+ *     sends a message with an inline-keyboard ✅ Allow / ❌ Deny to EVERY
+ *     enabled binding. There is no per-tab binding scope in v0 — every
+ *     enabled binding sees and may answer every prompt. Fine while all
+ *     bindings belong to the same user (one binding per platform, paired
+ *     from this machine); MUST grow a binding↔tab scope check here and
+ *     in applyVerdict before bindings can ever span users.
  *   - records the sent (chat_id, message_id) per id so it can later
  *     editMessageText to remove the keyboard after a verdict;
  *   - on `.decision` arrival, edits the message to show who answered;

@@ -40,6 +40,13 @@ export class KeystoreService {
     private cached: KeystoreFile | null = null
     private key: Buffer | null = null
     private loadPromise: Promise<void> | null = null
+    /** Non-null iff the secrets file existed but failed to load (corrupt
+     *  JSON, EACCES, truncated sync). In that state reads answer "no
+     *  entry" but writes are refused — a save would replace the original
+     *  file with our empty in-memory copy and destroy every secret it
+     *  still holds. Cleared only by a process restart after the user
+     *  repairs or deletes the file. */
+    private degradedReason: string | null = null
     /** Serialises writes so a settings-UI flurry (add binding immediately
      *  followed by toggle enabled, etc.) doesn't race on the JSON file
      *  and silently drop the earlier write. */
@@ -63,9 +70,12 @@ export class KeystoreService {
         }
     }
 
-    /** Persist `plaintext` under `id`. Overwrites if `id` already exists. */
+    /** Persist `plaintext` under `id`. Overwrites if `id` already exists.
+     *  Throws without touching disk if the store is degraded (existing
+     *  file failed to load) — see {@link assertWritable}. */
     async write (id: string, plaintext: string): Promise<void> {
         await this.load()
+        this.assertWritable()
         this.cached!.entries[id] = this.encrypt(plaintext)
         await this.enqueueSave()
     }
@@ -100,15 +110,23 @@ export class KeystoreService {
                 this.key = await this.deriveKey()
                 try {
                     const raw = await fs.readFile(KeystoreService.FILE, 'utf8')
-                    const parsed = JSON.parse(raw) as Partial<KeystoreFile>
+                    const parsed = JSON.parse(raw) as unknown
+                    // A JSON primitive (42, "x", true) would survive the
+                    // property reads below via the ?? fallbacks and leave
+                    // the store writable — same overwrite risk as corrupt
+                    // JSON, so route it into the degraded path.
+                    if (typeof parsed !== 'object' || parsed === null) {
+                        throw new Error('secrets file is valid JSON but not an object')
+                    }
                     this.cached = {
-                        version: parsed.version ?? 1,
-                        entries: parsed.entries ?? {},
+                        version: (parsed as Partial<KeystoreFile>).version ?? 1,
+                        entries: (parsed as Partial<KeystoreFile>).entries ?? {},
                     }
                 } catch (err: unknown) {
                     if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+                        this.degradedReason = err instanceof Error ? err.message : String(err)
                         // eslint-disable-next-line no-console
-                        console.warn('[mobile-bridge:keystore] load failed, starting empty:', err)
+                        console.warn('[mobile-bridge:keystore] load failed — entering degraded (write-refuse) mode:', err)
                     }
                     this.cached = { version: 1, entries: {} }
                 }
@@ -130,8 +148,20 @@ export class KeystoreService {
         return next
     }
 
+    private assertWritable (): void {
+        if (this.degradedReason) {
+            throw new Error(
+                `KeystoreService: refusing to write — the existing secrets file failed to load (${this.degradedReason}). `
+                + 'Saving now would overwrite it with an empty store and destroy the secrets it still holds. '
+                + `To recover: restore ${KeystoreService.FILE} from backup, or delete it `
+                + '(and re-pair every binding) to start fresh, then restart GlanceTerm.',
+            )
+        }
+    }
+
     private async save (): Promise<void> {
         if (!this.cached) throw new Error('KeystoreService: save before load')
+        this.assertWritable()
         const dir = path.dirname(KeystoreService.FILE)
         await fs.mkdir(dir, { recursive: true })
         const tmp = `${KeystoreService.FILE}.${process.pid}.tmp`

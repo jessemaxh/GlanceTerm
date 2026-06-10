@@ -7,7 +7,12 @@ import { randomUUID } from 'crypto'
 
 import { BackendCredentials, PlaintextBackendCredentials, SecretRef } from '../backends/types'
 import { KeystoreService } from '../keystore.service'
+import { redactToken } from '../audit-log'
 import { BindingDraft, ChannelBinding, LegacyChannelBinding, LegacyCredentials } from './types'
+
+function errMessage (err: unknown): string {
+    return err instanceof Error ? err.message : String(err)
+}
 
 /**
  * Persistent storage for {@link ChannelBinding}s. Writes through to a flat
@@ -30,6 +35,18 @@ export class BindingStoreService {
     private bindingsSubject = new BehaviorSubject<ChannelBinding[]>([])
     private loaded = false
     private loadPromise: Promise<void> | null = null
+    /** Non-null iff load() could not produce a trustworthy in-memory
+     *  view of the persisted bindings. Three distinct sources, each with
+     *  its own recovery guidance baked into the reason string:
+     *    - bindings file unreadable / corrupt JSON (restore or delete it)
+     *    - bindings file is valid JSON but not an array (inspect/fix it)
+     *    - credential migration failed (KEYSTORE problem — the bindings
+     *      file is intact and must NOT be deleted)
+     *  In this state the in-memory view stays empty for reads, but every
+     *  mutation is refused — saving would replace the original file with
+     *  the empty list and silently destroy the user's bindings. Cleared
+     *  only by restarting after the underlying problem is fixed. */
+    private degradedReason: string | null = null
     /**
      * Serializes all mutations through a single promise chain. Without
      * this, two concurrent callers (e.g. settings UI toggle racing with
@@ -57,39 +74,98 @@ export class BindingStoreService {
         if (this.loadPromise) return this.loadPromise
         this.loadPromise = (async () => {
             try {
-                const raw = await fs.readFile(BindingStoreService.FILE, 'utf8')
-                const parsed = JSON.parse(raw) as LegacyChannelBinding[]
-                if (!Array.isArray(parsed)) {
+                // Phase 1: read + parse. Only failures HERE may blame the
+                // bindings file — the recovery text tells the user to
+                // restore or delete it, which is only safe advice when the
+                // file itself is actually the problem.
+                let parsed: LegacyChannelBinding[]
+                try {
+                    const raw = await fs.readFile(BindingStoreService.FILE, 'utf8')
+                    const maybe = JSON.parse(raw) as unknown
+                    if (!Array.isArray(maybe)) {
+                        // Valid JSON of the wrong shape (hand-edit, partial
+                        // restore, foreign format) carries the same
+                        // destruction risk as corrupt JSON: treating it as
+                        // empty and later saving would overwrite the user's
+                        // real data with [].
+                        this.degrade(
+                            'the bindings file is valid JSON but not an array. '
+                            + `Inspect/fix ${BindingStoreService.FILE} (restore from backup if needed), then restart GlanceTerm.`,
+                        )
+                        this.bindingsSubject.next([])
+                        return
+                    }
+                    parsed = maybe as LegacyChannelBinding[]
+                } catch (err: unknown) {
+                    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+                        // redactToken: a JSON.parse error can quote file
+                        // content, and legacy bindings files held plaintext
+                        // bot tokens.
+                        this.degrade(
+                            `the existing bindings file failed to load (${redactToken(errMessage(err))}). `
+                            + 'Saving would overwrite it with an empty list and destroy the bindings it still holds. '
+                            + `To recover: restore ${BindingStoreService.FILE} from backup, or delete it `
+                            + 'to start fresh, then restart GlanceTerm.',
+                        )
+                    }
                     this.bindingsSubject.next([])
                     return
                 }
+
+                // Phase 2: credential migration. A failure here is a
+                // KEYSTORE problem (its file corrupt, disk full, EACCES) —
+                // the bindings file itself read fine, so the guidance must
+                // not point the user at deleting an intact file.
+                //
                 // Sequential migration so keystore writes don't pile up in
                 // an unbounded parallel fan-out; KeystoreService serialises
                 // saves internally but the JSON round-trip of each write
                 // dominates wall-clock anyway.
-                const results: Array<{ binding: ChannelBinding; changed: boolean }> = []
-                for (const raw of parsed) {
-                    results.push(await this.migrate(raw))
+                try {
+                    const results: Array<{ binding: ChannelBinding; changed: boolean }> = []
+                    for (const raw of parsed) {
+                        results.push(await this.migrate(raw))
+                    }
+                    const migrated = results.map(r => r.binding)
+                    this.bindingsSubject.next(migrated)
+                    if (results.some(r => r.changed)) {
+                        await this.save().catch(err => {
+                            // eslint-disable-next-line no-console
+                            console.warn('[mobile-bridge:store] migration save failed:', err)
+                        })
+                    }
+                } catch (err: unknown) {
+                    this.degrade(
+                        `credential migration failed (${redactToken(errMessage(err))}). `
+                        + `The bindings file (${BindingStoreService.FILE}) is intact — do NOT delete it. `
+                        + 'Fix the keystore problem (see earlier errors), then restart GlanceTerm.',
+                    )
+                    this.bindingsSubject.next([])
                 }
-                const migrated = results.map(r => r.binding)
-                this.bindingsSubject.next(migrated)
-                if (results.some(r => r.changed)) {
-                    await this.save().catch(err => {
-                        // eslint-disable-next-line no-console
-                        console.warn('[mobile-bridge:store] migration save failed:', err)
-                    })
-                }
-            } catch (err: unknown) {
-                if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
-                    // eslint-disable-next-line no-console
-                    console.warn('[mobile-bridge:store] load failed, starting empty:', err)
-                }
-                this.bindingsSubject.next([])
             } finally {
                 this.loaded = true
             }
         })()
         return this.loadPromise
+    }
+
+    /** Enter degraded (mutation-refuse) mode with a reason that already
+     *  carries source-specific recovery guidance. */
+    private degrade (reason: string): void {
+        this.degradedReason = reason
+        // eslint-disable-next-line no-console
+        console.warn('[mobile-bridge:store] entering degraded (mutation-refuse) mode:', reason)
+    }
+
+    /** Throws if the store is degraded. Called at every mutation entry
+     *  point so add() fails BEFORE persisting a secret to the keystore —
+     *  without this, each retry of a doomed add() leaks one orphan
+     *  keystore entry (save() would still refuse, but only after the
+     *  keystore write already hit disk). */
+    private assertWritable (): void {
+        if (this.degradedReason) {
+            throw new Error(`BindingStore: refusing to modify bindings — ${this.degradedReason}`)
+        }
     }
 
     /**
@@ -217,6 +293,7 @@ export class BindingStoreService {
     add (draft: BindingDraft): Promise<ChannelBinding> {
         return this.serialize(async () => {
             await this.load()
+            this.assertWritable()
             // v0 cap: one binding per platform. Defence in depth — the
             // settings UI only shows bindings[0] and only one pairing flow
             // can be active at a time, but a duplicate /bind landing
@@ -253,6 +330,7 @@ export class BindingStoreService {
     update (id: string, patch: Partial<Omit<ChannelBinding, 'id'>>): Promise<ChannelBinding> {
         return this.serialize(async () => {
             await this.load()
+            this.assertWritable()
             const idx = this.current.findIndex(b => b.id === id)
             if (idx < 0) throw new Error(`BindingStore: no binding with id=${id}`)
             const next = [...this.current]
@@ -267,6 +345,7 @@ export class BindingStoreService {
     remove (id: string): Promise<void> {
         return this.serialize(async () => {
             await this.load()
+            this.assertWritable()
             const target = this.current.find(b => b.id === id)
             await this.applyOrRewind(this.current.filter(b => b.id !== id), () => undefined as void)
             if (target) {
@@ -339,6 +418,12 @@ export class BindingStoreService {
      * against) don't trample each other's staging file.
      */
     private async save (): Promise<void> {
+        // Defence in depth behind assertWritable() at the mutation entry
+        // points — the reason string already carries the right recovery
+        // guidance for whichever failure put us in degraded mode.
+        if (this.degradedReason) {
+            throw new Error(`BindingStore: refusing to save — ${this.degradedReason}`)
+        }
         const dir = path.dirname(BindingStoreService.FILE)
         await fs.mkdir(dir, { recursive: true })
         const tmp = `${BindingStoreService.FILE}.${process.pid}.tmp`
