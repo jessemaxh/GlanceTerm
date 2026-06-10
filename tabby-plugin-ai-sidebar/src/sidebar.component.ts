@@ -118,22 +118,22 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                             <span class="primary" [attr.title]="s.cwd || s.title">{{ s.cwd ? folderName(s.cwd) : s.title }}</span>
                             <span *ngIf="effStatus(s) === TabStatus.NeedsPermission" class="attn" aria-hidden="true"></span>
                         </div>
-                        <div class="line2">
-                            <span *ngIf="s.aiTool" class="tag" [attr.data-tool]="s.aiTool">{{ toolTag(s.aiTool) }}</span>
+                        <!-- line2 — agent identity + token usage: "Claude opus-4-8 20k input 20k output".
+                             Only for AI tabs; a plain shell skips it (its "shell" status shows on line2b). -->
+                        <div class="line2" *ngIf="s.aiTool">
+                            <span class="tag" [attr.data-tool]="s.aiTool">{{ toolTag(s.aiTool) }}</span>
                             <span *ngIf="s.model" class="model-tag" [attr.title]="s.model">{{ modelLabel(s.aiTool, s.model) }}</span>
+                            <span *ngIf="s.tokensIn !== null" class="usage" [title]="tokensTitle(s)">{{ fmtTokens(s.tokensIn) }} input</span>
+                            <span *ngIf="s.tokensOut !== null" class="usage" [title]="tokensTitle(s)">{{ fmtTokens(s.tokensOut) }} output</span>
+                        </div>
+                        <!-- line2b — state + concurrency counts: "working · 2 agents · 3 shell · 9 monitor".
+                             Full-word counts flex-wrap rather than ellipsis-truncating (the old
+                             behaviour cut "1 agent · 3 shell" to "1 … · 3 …"). -->
+                        <div class="line2b">
                             <span class="status" [attr.data-status]="effStatus(s)">{{ statusLabel(s) }}</span>
-                            <!-- Full-word concurrency counts. They WRAP to the
-                                 next line when the row is too narrow (see
-                                 .line2 flex-wrap) rather than ellipsis-
-                                 truncating the label — the old behaviour cut
-                                 "1 agent · 3 shell · 9 monitor" down to a
-                                 meaningless "1 … · 3 … · 9 m…". Plain English
-                                 words so the meaning is obvious without a
-                                 legend. -->
                             <span *ngIf="s.subagentCount > 0" class="micro accent" [title]="subagentTitle(s)">{{ s.subagentCount }} {{ s.subagentCount === 1 ? 'agent' : 'agents' }}</span>
                             <span *ngIf="s.backgroundJobCount > 0" class="micro accent" [title]="bgJobTitle(s)">{{ s.backgroundJobCount }} {{ bgLabel(s) }}</span>
                             <span *ngIf="s.monitorCount > 0" class="micro accent" [title]="monitorTitle(s)">{{ s.monitorCount }} {{ s.monitorCount === 1 ? 'monitor' : 'monitors' }}</span>
-                            <span *ngIf="s.tokensIn !== null || s.tokensOut !== null" class="micro tokens" [title]="tokensTitle(s)">↑{{ fmtTokens(s.tokensIn) }} ↓{{ fmtTokens(s.tokensOut) }}</span>
                         </div>
                         <div *ngIf="s.cwd && effStatus(s) !== TabStatus.NeedsPermission" class="line3">
                             <span class="path-sub" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
@@ -781,6 +781,31 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                crowded, so the common 0–1-count case is unchanged. */
             flex-wrap: wrap;
             row-gap: 3px;
+        }
+        /* line2b — the state/concurrency row directly under the agent-identity
+           row. Same flex layout; tighter top margin so the two read as a
+           grouped pair. */
+        .line2b {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 3px;
+            min-width: 0;
+            flex-wrap: wrap;
+            row-gap: 3px;
+        }
+        /* Token usage on line2 ("20k input  20k output") — dim, no bullet, so
+           it reads as quiet metadata beside the model. */
+        .usage {
+            font-family: var(--gt-mono);
+            font-size: 11px;
+            font-weight: 500;
+            line-height: 1;
+            color: var(--gt-text-faint);
+            opacity: 0.85;
+            white-space: nowrap;
+            align-self: center;
+            flex: none;
         }
         .status {
             font-size: 15px;
