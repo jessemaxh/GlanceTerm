@@ -290,13 +290,33 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                          (click)="openSidebarSettingsSection(s)">
                         <div class="gt-setting-text">
                             <div class="gt-setting-title">{{ s.title }}</div>
-                            <div class="gt-setting-desc" *ngIf="s.description">{{ s.description }}</div>
+                            <!-- Live status replaces the static description when
+                                 the section provides one (mobile-bridge). -->
+                            <div class="gt-section-status"
+                                 *ngIf="s.status$ && (s.status$ | async) as st"
+                                 [attr.data-tone]="st.tone">
+                                <span class="gt-status-dot"></span>{{ st.label }}
+                            </div>
+                            <div class="gt-setting-desc"
+                                 *ngIf="s.description && !s.status$">{{ s.description }}</div>
                         </div>
-                        <button type="button" class="gt-section-btn"
-                                (click)="openSidebarSettingsSection(s); $event.stopPropagation()"
-                                [attr.aria-label]="'Open ' + s.title + ' settings'">
-                            Configure…
-                        </button>
+                        <div class="gt-section-actions">
+                            <!-- Inline enable/disable — only when the section
+                                 is configured (enabled$ emits non-null). Lets
+                                 the user flip the binding without opening the
+                                 full Configure modal. -->
+                            <input *ngIf="s.enabled$ && (s.enabled$ | async) !== null"
+                                   type="checkbox" class="gt-switch"
+                                   [checked]="(s.enabled$ | async) === true"
+                                   (click)="$event.stopPropagation()"
+                                   (change)="onSectionToggle(s, $event)"
+                                   [attr.aria-label]="s.title + ' enabled'"/>
+                            <button type="button" class="gt-section-btn"
+                                    (click)="openSidebarSettingsSection(s); $event.stopPropagation()"
+                                    [attr.aria-label]="'Open ' + s.title + ' settings'">
+                                Configure…
+                            </button>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1120,6 +1140,44 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             color: #6B7178;
         }
 
+        /* Live status line for a contributed section (e.g. mobile-bridge
+           "Telegram @bot · connected"). Sits where the description would. */
+        .gt-section-status {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            font-size: 12.5px;
+            line-height: 1.5;
+            color: #9BA1A8;
+        }
+        .gt-status-dot {
+            flex: none;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #6B7178;   /* idle default */
+        }
+        .gt-section-status[data-tone="connected"] { color: #B6C2B8; }
+        .gt-section-status[data-tone="connected"] .gt-status-dot {
+            background: #54D183;
+            box-shadow: 0 0 0 3px rgba(84, 209, 131, 0.16);
+        }
+        .gt-section-status[data-tone="disabled"] .gt-status-dot { background: #6B7178; }
+        .gt-section-status[data-tone="error"] { color: #E6A2A2; }
+        .gt-section-status[data-tone="error"] .gt-status-dot {
+            background: #E66B6B;
+            box-shadow: 0 0 0 3px rgba(230, 107, 107, 0.16);
+        }
+
+        /* Right-hand controls for a contributed section row: optional
+           inline toggle + the Configure button, kept on one line. */
+        .gt-section-actions {
+            flex: none;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
         /* iOS-style toggle. Native checkbox, native a11y. */
         .gt-switch {
             appearance: none;
@@ -1374,6 +1432,19 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      */
     openSidebarSettingsSection (section: SidebarSettingsSection): void {
         this.ngbModal.open(section.component, { centered: true, size: 'lg' })
+    }
+
+    /**
+     * Apply a contributed section's inline enable/disable switch. The
+     * section owns the actual mutation (e.g. mobile-bridge's
+     * BindingStore.update); we just forward the new checked state. No-op
+     * if the section didn't supply a setter (defensive — the toggle only
+     * renders when enabled$ is present, but setEnabled is independently
+     * optional in the contract).
+     */
+    onSectionToggle (section: SidebarSettingsSection, ev: Event): void {
+        const checked = (ev.target as HTMLInputElement).checked
+        section.setEnabled?.(checked)
     }
 
     /**

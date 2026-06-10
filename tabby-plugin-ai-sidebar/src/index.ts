@@ -38,7 +38,7 @@ import { EscInterruptService } from './esc-interrupt.service'
 export { TabMonitor, TabStatus } from './tab-monitor'
 export type { TabState, AiTool } from './tab-monitor'
 export { SidebarSettingsRegistry } from './sidebar-settings-registry.service'
-export type { SidebarSettingsSection } from './sidebar-settings-registry.service'
+export type { SidebarSettingsSection, SectionStatus, SectionStatusTone } from './sidebar-settings-registry.service'
 export { HookWatcherService } from './hook-watcher.service'
 export type { HookSnapshot } from './hook-watcher.service'
 
