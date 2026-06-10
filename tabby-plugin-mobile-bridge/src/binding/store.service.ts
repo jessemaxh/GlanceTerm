@@ -238,6 +238,13 @@ export class BindingStoreService {
             }
             return { creds: { platform: 'telegram', botToken: creds.botToken }, changed: false }
         }
+        if (creds.platform === 'discord') {
+            if (typeof creds.botToken === 'string') {
+                const ref = await this.storeSecret(creds.botToken, this.secretIdFor(bindingId, 'bot-token'))
+                return { creds: { platform: 'discord', botToken: ref }, changed: true }
+            }
+            return { creds: { platform: 'discord', botToken: creds.botToken }, changed: false }
+        }
         // feishu
         if (typeof creds.appSecret === 'string') {
             const ref = await this.storeSecret(creds.appSecret, this.secretIdFor(bindingId, 'app-secret'))
@@ -272,6 +279,10 @@ export class BindingStoreService {
         if (plain.platform === 'telegram') {
             const ref = await this.storeSecret(plain.botToken, this.secretIdFor(bindingId, 'bot-token'))
             return { platform: 'telegram', botToken: ref }
+        }
+        if (plain.platform === 'discord') {
+            const ref = await this.storeSecret(plain.botToken, this.secretIdFor(bindingId, 'bot-token'))
+            return { platform: 'discord', botToken: ref }
         }
         const ref = await this.storeSecret(plain.appSecret, this.secretIdFor(bindingId, 'app-secret'))
         return { platform: 'feishu', appId: plain.appId, region: plain.region, appSecret: ref }
@@ -361,6 +372,7 @@ export class BindingStoreService {
 
     private secretRefsOf (creds: BackendCredentials): SecretRef[] {
         if (creds.platform === 'telegram') return [creds.botToken]
+        if (creds.platform === 'discord') return [creds.botToken]
         return [creds.appSecret]
     }
 

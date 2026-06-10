@@ -30,11 +30,17 @@ export const AUDIT_LOG_PATH = path.join(os.homedir(), '.glanceterm', 'mobile-bri
 const TG_TOKEN_PATTERN = /\/bot\d+:[A-Za-z0-9_-]+\//g
 const NAMED_SECRET_PATTERN = /\b(tenant_access_token|app_access_token|access_token|refresh_token|app_secret|app_id)["']?\s*[:=]\s*["']?([A-Za-z0-9_-]{8,})/gi
 const FEISHU_BEARER_PATTERN = /\b(t-g_[A-Za-z0-9_-]{10,})\b/g
+// Discord bot token: three dot-separated base64url segments
+// (user-id ≥20 chars · 6-8 char timestamp · ≥24 char HMAC). The token
+// rides the Authorization header so URLs never leak it, but fetch /
+// gateway error strings assembled from user-supplied tokens might.
+const DISCORD_TOKEN_PATTERN = /\b[\w-]{20,}\.[\w-]{5,8}\.[\w-]{24,}\b/g
 export function redactToken (s: string): string {
     return s
         .replace(TG_TOKEN_PATTERN, '/bot<REDACTED>/')
         .replace(NAMED_SECRET_PATTERN, '$1=<REDACTED>')
         .replace(FEISHU_BEARER_PATTERN, '<REDACTED>')
+        .replace(DISCORD_TOKEN_PATTERN, '<REDACTED>')
 }
 
 /** Per-session de-dup so a sustained disk-full error doesn't flood the

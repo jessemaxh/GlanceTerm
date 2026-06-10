@@ -6,6 +6,7 @@ import { TabMonitor } from 'tabby-plugin-ai-sidebar'
 
 import { TelegramBackend } from './backends/telegram/client.service'
 import { FeishuBackend } from './backends/feishu/client.service'
+import { DiscordBackend } from './backends/discord/client.service'
 import { BackendRegistry } from './backends/registry.service'
 import { InboundCallback, InboundMessage } from './backends/types'
 import { TopicService, FORCED_CLOSE_COOLDOWN_MS } from './topic.service'
@@ -60,6 +61,7 @@ export class InboundRouterService implements OnDestroy {
     constructor (
         telegram: TelegramBackend,
         feishu: FeishuBackend,
+        discord: DiscordBackend,
         private backends: BackendRegistry,
         private topics: TopicService,
         private topicSync: TopicSyncService,
@@ -73,7 +75,7 @@ export class InboundRouterService implements OnDestroy {
         // is one entry. Each event carries enough context (chatId,
         // senderId, platform) for the per-binding routing below to
         // disambiguate platforms.
-        for (const backend of [telegram, feishu]) {
+        for (const backend of [telegram, feishu, discord]) {
             this.subs.push(backend.inbound$.subscribe(msg => void this.route(msg)))
             this.subs.push(backend.callbacks$.subscribe(cb => void this.routeCallback(cb)))
         }

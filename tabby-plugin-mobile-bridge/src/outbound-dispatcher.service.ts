@@ -118,7 +118,7 @@ export class OutboundDispatcherService implements OnDestroy {
         // Drive lifecycle per platform — enabled binding starts the
         // backend, absent enabled binding stops it. Adding a new platform
         // is one entry in this list.
-        const platforms: Array<ChannelBinding['platform']> = ['telegram', 'feishu']
+        const platforms: Array<ChannelBinding['platform']> = ['telegram', 'feishu', 'discord']
         await Promise.all(platforms.map(p => this.syncBackend(p, bindings)))
     }
 

@@ -11,7 +11,7 @@ import { InstanceLockService } from '../instance-lock.service'
 import { ChannelBinding, PendingPairing } from '../binding/types'
 import { BackendLastError, BotIdentity } from '../backends/types'
 
-type Platform = 'telegram' | 'feishu'
+type Platform = 'telegram' | 'feishu' | 'discord'
 
 /**
  * Settings panel for the Mobile Bridge plugin. Opened from the AI
@@ -99,6 +99,12 @@ type Platform = 'telegram' | 'feishu'
                                     [class.btn-outline-secondary]="platform !== 'feishu'"
                                     (click)="platform = 'feishu'">
                                 Feishu / Lark
+                            </button>
+                            <button type="button" class="btn btn-sm"
+                                    [class.btn-primary]="platform === 'discord'"
+                                    [class.btn-outline-secondary]="platform !== 'discord'"
+                                    (click)="platform = 'discord'">
+                                Discord
                             </button>
                         </div>
                     </div>
@@ -268,13 +274,80 @@ type Platform = 'telegram' | 'feishu'
                         </button>
                     </ng-container>
 
+                    <!-- Discord form -->
+                    <ng-container *ngIf="platform === 'discord'">
+                        <div class="border rounded p-2 mb-3 bg-dark small">
+                            <a class="text-decoration-none d-block fw-bold"
+                               href="javascript:void(0)"
+                               (click)="showSetupSteps = !showSetupSteps">
+                                {{ showSetupSteps ? '▼' : '▶' }} Discord setup checklist
+                            </a>
+                            <ol *ngIf="showSetupSteps" class="mb-0 mt-2 ps-3">
+                                <li>
+                                    Visit <strong>discord.com/developers/applications</strong>
+                                    → New Application → name it.
+                                </li>
+                                <li>
+                                    <strong>Bot</strong> tab → Reset Token → copy the
+                                    <strong>bot token</strong>.
+                                </li>
+                                <li>
+                                    Same Bot tab → Privileged Gateway Intents →
+                                    enable <strong>Message Content Intent</strong>.
+                                    <span class="text-warning">
+                                        (Without it the bot hears empty messages
+                                        and /bind never matches.)
+                                    </span>
+                                </li>
+                                <li>
+                                    <strong>OAuth2 → URL Generator</strong> → scope
+                                    <code>bot</code> → permissions:
+                                    <em>View Channels, Send Messages, Create Public
+                                    Threads, Send Messages in Threads, Manage
+                                    Threads</em>. Open the generated URL and invite
+                                    the bot into your (private) server.
+                                </li>
+                                <li>
+                                    Pick (or create) a <strong>text channel</strong>
+                                    for the bridge — one thread per tab will be
+                                    created in it.
+                                </li>
+                                <li>
+                                    Paste the bot token below and click
+                                    <strong>Generate pairing code</strong>.
+                                </li>
+                                <li>
+                                    In that channel, send <code>/bind XXXXXX</code>
+                                    as a normal message. Binding completes
+                                    automatically.
+                                </li>
+                            </ol>
+                        </div>
+
+                        <div class="form-group mb-2">
+                            <label class="small">Bot token (from the Bot tab):</label>
+                            <input type="password" class="form-control" [(ngModel)]="botToken"
+                                   placeholder="MTIz…"/>
+                        </div>
+                        <div class="form-group mb-3">
+                            <label class="small">Label (optional):</label>
+                            <input type="text" class="form-control" [(ngModel)]="label"
+                                   placeholder="My Discord"/>
+                        </div>
+                        <button class="btn btn-primary" (click)="startPair()"
+                                [disabled]="!canPair() || busy || !(isPrimary$ | async)">
+                            Generate pairing code
+                        </button>
+                    </ng-container>
+
                     <div *ngIf="error" class="text-danger small mt-2">{{ error }}</div>
                 </div>
 
                 <div *ngIf="pairing" class="alert alert-info">
                     <p class="mb-2">
-                        In the {{ platformLabel(pairing.platform) }} group's
-                        General topic, send:
+                        {{ pairing.platform === 'discord'
+                            ? 'In the Discord text channel the bot was invited to, send:'
+                            : 'In the ' + platformLabel(pairing.platform) + " group's General topic, send:" }}
                     </p>
                     <pre class="bg-dark text-white p-2 rounded mb-2">/bind {{ pairing.code }}</pre>
                     <p class="small text-muted mb-2">
@@ -346,6 +419,20 @@ type Platform = 'telegram' | 'feishu'
                                 A typo on App Secret shows up as
                                 <em>no inbound messages</em> here (the WS
                                 handshake silently fails).
+                            </li>
+                            <li *ngIf="pairing.platform === 'discord'">
+                                On Discord, the bot's
+                                <strong>Message Content Intent</strong> must be
+                                enabled (Developer Portal → Bot → Privileged
+                                Gateway Intents) — without it every message the
+                                bot hears has empty text and /bind can never
+                                match.
+                            </li>
+                            <li *ngIf="pairing.platform === 'discord'">
+                                Make sure the bot was invited with
+                                <em>View Channels + Send Messages</em> and can
+                                actually see the channel you're typing in
+                                (check the channel's permission overrides).
                             </li>
                             <li>
                                 Codes expire in 5 min. If you waited too long
@@ -514,9 +601,11 @@ export class BridgeSettingsComponent implements OnDestroy {
     }
 
     canPair (): boolean {
-        return this.platform === 'telegram'
-            ? this.botToken.length > 0
-            : this.appId.length > 0 && this.appSecret.length > 0
+        if (this.platform === 'feishu') {
+            return this.appId.length > 0 && this.appSecret.length > 0
+        }
+        // telegram + discord both pair on a single bot token
+        return this.botToken.length > 0
     }
 
     async startPair (): Promise<void> {
@@ -527,6 +616,11 @@ export class BridgeSettingsComponent implements OnDestroy {
             let result: PendingPairing
             if (this.platform === 'telegram') {
                 result = await this.pairingSvc.beginTelegramPairing(
+                    this.botToken,
+                    this.label || undefined,
+                )
+            } else if (this.platform === 'discord') {
+                result = await this.pairingSvc.beginDiscordPairing(
                     this.botToken,
                     this.label || undefined,
                 )
@@ -642,7 +736,11 @@ export class BridgeSettingsComponent implements OnDestroy {
     }
 
     platformLabel (p: Platform): string {
-        return p === 'telegram' ? 'Telegram' : 'Feishu / Lark'
+        switch (p) {
+            case 'telegram': return 'Telegram'
+            case 'discord':  return 'Discord'
+            default:         return 'Feishu / Lark'
+        }
     }
 
     private formatStatus (running: boolean, identity: BotIdentity | null): string {

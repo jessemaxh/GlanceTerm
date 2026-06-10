@@ -35,13 +35,20 @@ export interface MessageRef {
 
 /** Bot identity surfaced in the settings UI status row. */
 export interface BotIdentity {
-    /** Platform-native bot id. Telegram: numeric stringified. Feishu: app_id. */
+    /** Platform-native bot id. Telegram: numeric stringified. Feishu:
+     *  app_id. Discord: application/user snowflake. */
     id: string
-    /** UI-friendly handle. Telegram: "@MyBot"; Feishu: app display name. */
+    /** UI-friendly handle. Telegram: "@MyBot"; Feishu: app display name;
+     *  Discord: "@botname". */
     displayName: string
-    /** "Telegram" | "Feishu" | "Lark" — used by the settings status row. */
+    /** "Telegram" | "Feishu" | "Lark" | "Discord" — used by the settings
+     *  status row. */
     platformLabel: string
 }
+
+/** Every platform a backend exists for. Single source of truth for the
+ *  platform tag unions below and for ChannelBinding.platform. */
+export type BackendPlatform = 'telegram' | 'feishu' | 'discord'
 
 /** User-sent text the bot can hear. Subscribers (InboundRouter, Pairing)
  *  filter on chatId / sender. */
@@ -50,7 +57,7 @@ export interface InboundMessage {
      *  binding lookups by platform — otherwise a TG chatId that happens
      *  to collide with a Feishu chatId (or vice versa) would cross-match.
      *  Symmetric with {@link InboundCallback.platform}. */
-    platform: 'telegram' | 'feishu'
+    platform: BackendPlatform
     chatId: ChatRef
     /** null when the message arrived outside a thread (DM, general topic). */
     threadId: ThreadRef | null
@@ -65,10 +72,11 @@ export interface InboundCallback {
     /** Which backend emitted this callback. The InboundRouter uses this
      *  to ack via the right backend instance — TelegramBackend.ackCallback
      *  hits the answerCallbackQuery API; FeishuBackend.ackCallback is a
-     *  no-op because Feishu auto-acks card actions on receipt. Mismatching
-     *  would silently fail-with-warn but the button on the user's phone
-     *  would spin until Telegram's ~30s timeout. */
-    platform: 'telegram' | 'feishu'
+     *  no-op because Feishu auto-acks card actions on receipt; Discord
+     *  requires the interaction callback within ~3s. Mismatching would
+     *  silently fail-with-warn but the button on the user's phone would
+     *  spin until the platform's timeout. */
+    platform: BackendPlatform
     /** Platform-supplied click event id. Pass to
      *  {@link MessagingBackend.ackCallback} so the user's button stops
      *  spinning. Telegram requires the ack within ~30s. */
@@ -139,6 +147,7 @@ export type SecretRef =
 export type BackendCredentials =
     | { platform: 'telegram'; botToken: SecretRef }
     | { platform: 'feishu'; appId: string; appSecret: SecretRef; region: 'feishu' | 'lark' }
+    | { platform: 'discord'; botToken: SecretRef }
 
 /**
  * Plaintext counterpart of {@link BackendCredentials} accepted at the
@@ -149,6 +158,7 @@ export type BackendCredentials =
 export type PlaintextBackendCredentials =
     | { platform: 'telegram'; botToken: string }
     | { platform: 'feishu'; appId: string; appSecret: string; region: 'feishu' | 'lark' }
+    | { platform: 'discord'; botToken: string }
 
 /** Cross-platform error category. Backends translate
  *  platform-specific errors (HTTP codes, error descriptions) into this

@@ -2,6 +2,7 @@ import { Injectable } from '@angular/core'
 
 import { TelegramBackend } from './telegram/client.service'
 import { FeishuBackend } from './feishu/client.service'
+import { DiscordBackend } from './discord/client.service'
 import { MessagingBackend } from './types'
 import { ChannelBinding } from '../binding/types'
 
@@ -21,12 +22,14 @@ export class BackendRegistry {
     constructor (
         private tg: TelegramBackend,
         private feishu: FeishuBackend,
+        private discord: DiscordBackend,
     ) {}
 
     forPlatform (platform: ChannelBinding['platform']): MessagingBackend {
         switch (platform) {
             case 'telegram': return this.tg
             case 'feishu':   return this.feishu
+            case 'discord':  return this.discord
             default: {
                 // Exhaustiveness check: adding a new platform to the
                 // ChannelBinding union surfaces here as a TS error.
@@ -40,6 +43,6 @@ export class BackendRegistry {
      *  single-instance guard to force-stop all backends without enumerating
      *  platform tags by hand. */
     all (): MessagingBackend[] {
-        return [this.tg, this.feishu]
+        return [this.tg, this.feishu, this.discord]
     }
 }

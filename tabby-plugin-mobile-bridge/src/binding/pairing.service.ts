@@ -3,7 +3,8 @@ import { BehaviorSubject, Observable, Subject, Subscription } from 'rxjs'
 
 import { TelegramBackend } from '../backends/telegram/client.service'
 import { FeishuBackend } from '../backends/feishu/client.service'
-import { InboundMessage } from '../backends/types'
+import { DiscordBackend } from '../backends/discord/client.service'
+import { BackendPlatform, InboundMessage } from '../backends/types'
 import { BindingStoreService } from './store.service'
 import { ChannelBinding, PendingPairing } from './types'
 
@@ -13,7 +14,7 @@ import { ChannelBinding, PendingPairing } from './types'
  *  didn't match" (typo / expired). */
 export interface PairingDiagnostic {
     ts: number
-    platform: 'telegram' | 'feishu'
+    platform: BackendPlatform
     chatId: string
     senderId: string
     senderName?: string
@@ -88,24 +89,26 @@ export class PairingService implements OnDestroy {
     constructor (
         private telegram: TelegramBackend,
         private feishu: FeishuBackend,
+        private discord: DiscordBackend,
         private store: BindingStoreService,
     ) {
         this.sweepHandle = setInterval(() => this.sweepExpired(), PairingService.SWEEP_MS)
-        // Subscribe to BOTH backends so /bind from either platform routes
+        // Subscribe to EVERY backend so /bind from any platform routes
         // through the same matcher. The platform tag is preserved via the
         // closure so we know which PendingPairing list to scan.
-        this.subs.push(this.telegram.inbound$.subscribe(msg => {
-            this.onInbound(msg, 'telegram').catch(err => {
-                // eslint-disable-next-line no-console
-                console.warn('[mobile-bridge:pairing] telegram inbound handler failed:', err)
-            })
-        }))
-        this.subs.push(this.feishu.inbound$.subscribe(msg => {
-            this.onInbound(msg, 'feishu').catch(err => {
-                // eslint-disable-next-line no-console
-                console.warn('[mobile-bridge:pairing] feishu inbound handler failed:', err)
-            })
-        }))
+        const sources: Array<[BackendPlatform, TelegramBackend | FeishuBackend | DiscordBackend]> = [
+            ['telegram', this.telegram],
+            ['feishu', this.feishu],
+            ['discord', this.discord],
+        ]
+        for (const [platform, backend] of sources) {
+            this.subs.push(backend.inbound$.subscribe(msg => {
+                this.onInbound(msg, platform).catch(err => {
+                    // eslint-disable-next-line no-console
+                    console.warn(`[mobile-bridge:pairing] ${platform} inbound handler failed:`, err)
+                })
+            }))
+        }
     }
 
     ngOnDestroy (): void {
@@ -173,6 +176,28 @@ export class PairingService implements OnDestroy {
         return pending
     }
 
+    /**
+     * Begin Discord pairing. The user must already have created an app +
+     * bot at discord.com/developers, enabled the Message Content Intent,
+     * and invited the bot into a server text channel with thread
+     * permissions. They paste the bot token here and send `/bind <code>`
+     * in that channel.
+     */
+    async beginDiscordPairing (botToken: string, label?: string): Promise<PendingPairing> {
+        await this.store.load()
+        await this.discord.start({ platform: 'discord', botToken })
+        const code = this.mintCode()
+        const pending: PendingPairing = {
+            code,
+            platform: 'discord',
+            credentials: { platform: 'discord', botToken },
+            label,
+            expiresAt: Date.now() + PairingService.PAIRING_TTL_MS,
+        }
+        this.pendingSubject.next([...this.pendingSubject.value, pending])
+        return pending
+    }
+
     /** Cancel a still-pending code (UI "back" button). */
     cancelPending (code: string): void {
         this.pendingSubject.next(this.pendingSubject.value.filter(p => p.code !== code))
@@ -196,11 +221,15 @@ export class PairingService implements OnDestroy {
         const needFeishu =
             this.store.current.some(b => b.platform === 'feishu' && b.enabled)
             || this.pendingSubject.value.some(p => p.platform === 'feishu')
+        const needDiscord =
+            this.store.current.some(b => b.platform === 'discord' && b.enabled)
+            || this.pendingSubject.value.some(p => p.platform === 'discord')
         if (!needTg) await this.telegram.stop()
         if (!needFeishu) await this.feishu.stop()
+        if (!needDiscord) await this.discord.stop()
     }
 
-    private async onInbound (msg: InboundMessage, platform: 'telegram' | 'feishu'): Promise<void> {
+    private async onInbound (msg: InboundMessage, platform: BackendPlatform): Promise<void> {
         // Diagnostics path runs FIRST so a stale-code or malformed /bind
         // is still visible in the settings UI's recent-activity log.
         // Skip if no pending pairing exists for this platform — we don't
@@ -250,9 +279,10 @@ export class PairingService implements OnDestroy {
         this.pendingSubject.next(value.filter(p => p.code !== code))
 
         const senderTag = msg.senderName ?? msg.senderId
-        const defaultLabel = platform === 'telegram'
-            ? `Telegram ${senderTag}`
-            : `Feishu ${senderTag}`
+        const platformName = platform === 'telegram' ? 'Telegram'
+            : platform === 'discord' ? 'Discord'
+                : 'Feishu'
+        const defaultLabel = `${platformName} ${senderTag}`
 
         let binding: ChannelBinding
         try {
@@ -280,7 +310,7 @@ export class PairingService implements OnDestroy {
 
     private emitDiagnostic (
         msg: InboundMessage,
-        platform: 'telegram' | 'feishu',
+        platform: BackendPlatform,
         result: PairingDiagnosticResult,
     ): void {
         this.diagnosticsSubject.next({

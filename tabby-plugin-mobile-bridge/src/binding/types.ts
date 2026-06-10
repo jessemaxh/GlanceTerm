@@ -1,4 +1,4 @@
-import { BackendCredentials, PlaintextBackendCredentials, SecretRef } from '../backends/types'
+import { BackendCredentials, BackendPlatform, PlaintextBackendCredentials, SecretRef } from '../backends/types'
 
 /**
  * Persisted binding records. One per (platform × chat) the user has linked.
@@ -19,7 +19,7 @@ export interface ChannelBinding {
      *  call sites that don't need the credentials themselves. Kept in
      *  sync via the type system + a one-shot migration in
      *  BindingStoreService.load. */
-    platform: 'telegram' | 'feishu'
+    platform: BackendPlatform
     /** Display label the user chose (or auto-generated from bot getMe). */
     label: string
     /** Platform-tagged credentials with SecretRef pointers to actual
@@ -54,7 +54,7 @@ export interface PendingPairing {
     /** 6 uppercase alphanumeric chars. */
     code: string
     /** Platform the user is binding. */
-    platform: 'telegram' | 'feishu'
+    platform: BackendPlatform
     /** Plaintext credentials staged for the binding-to-be. Lives in
      *  memory only — never persisted. BindingStoreService.add converts
      *  to the SecretRef form before writing the binding record. */
@@ -72,7 +72,7 @@ export interface PendingPairing {
  * through keystore and persists with a SecretRef.
  */
 export interface BindingDraft {
-    platform: 'telegram' | 'feishu'
+    platform: BackendPlatform
     label: string
     credentials: PlaintextBackendCredentials
     chatId: string
@@ -96,7 +96,7 @@ export interface BindingDraft {
 export interface LegacyChannelBinding {
     botToken?: string
     credentials?: LegacyCredentials
-    platform: 'telegram' | 'feishu'
+    platform: BackendPlatform
     [k: string]: unknown
 }
 
@@ -104,3 +104,4 @@ export interface LegacyChannelBinding {
 export type LegacyCredentials =
     | { platform: 'telegram'; botToken: string | SecretRef }
     | { platform: 'feishu'; appId: string; appSecret: string | SecretRef; region: 'feishu' | 'lark' }
+    | { platform: 'discord'; botToken: string | SecretRef }

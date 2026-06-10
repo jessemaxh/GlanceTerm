@@ -154,7 +154,7 @@ on the lowest-friction platform.
 
 | Platform | Native per-tab primitive | Mechanism | Effort | When |
 |---|---|---|---|---|
-| Discord BYO | Threads | Gateway WebSocket | ~30h | Western OSS community signal |
+| Discord BYO | Threads | Gateway WebSocket | ~30h | **shipped 2026-06-10** (owner request — see [todo-discord-bridge.md](./todo-discord-bridge.md)) |
 | Slack BYO | Threads | Socket Mode | ~30h | Enterprise/team-use signal |
 | 钉钉 BYO | 互动卡片 | Stream API (2024+) | ~30h | Chinese enterprise signal |
 | 企业微信 | (push-only, no per-tab reply) | webhook | — | parked, breaks bidirectional rule |
