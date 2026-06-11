@@ -878,11 +878,22 @@ export class HookWatcherService implements OnDestroy {
                 events.push({ kind: 'spawn', agentId: parsed.spawn_agent_id })
             }
             if (parsed.agent_id) {
-                // Passive liveness — any hook event from inside a subagent's
-                // turn carries its agent_id. Re-adding the same id is a no-op
-                // in the reducer, so this is safe even when PostToolUse(Agent)
-                // already added it above.
-                if (parsed.event === 'SubagentStop') {
+                // A subagent's turn ends with EITHER `SubagentStop` (normal) or
+                // `StopFailure` (abnormal — interrupt / stream timeout / error),
+                // both carrying the subagent's agent_id. Treat BOTH as a stop.
+                //
+                // Everything else carrying an agent_id (PreToolUse/PostToolUse
+                // from inside the subagent's turn) is passive liveness — re-add
+                // the id (a no-op in the reducer if already tracked).
+                //
+                // Bug this fixes: when `StopFailure` was added (commit a4bf2448)
+                // for the MAIN agent's idle, a subagent that ended via
+                // StopFailure fell into the `else` and was re-added as a SPAWN —
+                // so it never left liveAgentIds, the in-flight counter stuck at
+                // ≥1, and TabMonitor's idle→working override pinned the row to
+                // "working · N agents" forever. Any interrupted/timed-out
+                // subagent reproduced it.
+                if (parsed.event === 'SubagentStop' || parsed.event === 'StopFailure') {
                     events.push({ kind: 'stop', agentId: parsed.agent_id })
                 } else {
                     events.push({ kind: 'spawn', agentId: parsed.agent_id })
