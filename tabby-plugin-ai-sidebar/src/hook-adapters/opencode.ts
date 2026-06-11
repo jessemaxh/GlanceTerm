@@ -80,6 +80,15 @@ export const GlanceTerm = async () => {
     // edge and hold it until session.idle, so we don't append hundreds of
     // lines per turn.
     let working = false
+    // Wall-clock (ms) of the last session.idle, gating the post-idle guard.
+    let lastIdleAt = 0
+    // After session.idle, ignore message re-arms for this long. opencode emits
+    // a stray message.part.updated for the JUST-FINISHED turn AFTER idle; left
+    // unguarded it flips the row back to "working" with no closing idle and
+    // wedges it there forever. A genuine next turn keeps emitting past the
+    // grace and re-arms then (worst case: "working" shows up to this late), so
+    // only an isolated post-idle stray is suppressed.
+    const IDLE_GRACE_MS = 1500
     // Active model slug, captured from assistant message.updated events
     // (event.properties.info.modelID). Included in every emitted record once
     // known so the sidebar can show it next to the opencode tag.
@@ -97,8 +106,17 @@ export const GlanceTerm = async () => {
             // Capture the model from an assistant message (info.modelID); the
             // event carries the full Message under event.properties.info.
             const info = event.properties && event.properties.info
-            if (info && info.role === "assistant" && info.modelID) {
+            if (info && info.role === "assistant" && info.modelID && info.modelID !== model) {
+                // First time we learn the model (or it changes): surface it
+                // immediately. The "working" edge fires on the FIRST message
+                // event — which is usually BEFORE the assistant message that
+                // carries modelID — and every later message event is swallowed
+                // by the !working guard below, so without this the model would
+                // not reach the sidebar until the turn ends (session.idle).
+                // Emit a model-carrying record now if we're already working; if
+                // we're not yet working, the working edge below emits it.
                 model = info.modelID
+                if (working) emit("working")
             }
             // NOTE: session.idle is the turn-end signal (source-confirmed). It
             // is marked deprecated upstream in favour of session.status
@@ -106,6 +124,7 @@ export const GlanceTerm = async () => {
             // too if a future opencode drops session.idle.
             if (t === "session.idle") {
                 working = false
+                lastIdleAt = Date.now()
                 emit("session.idle")
             } else if (t === "permission.asked") {
                 // Reset working so the NEXT activity event re-emits "working".
@@ -122,7 +141,13 @@ export const GlanceTerm = async () => {
                 // tool.execute.before is a Hooks key, NOT a bus event.type —
                 // it never arrives here (source-confirmed), so it's omitted.
                 // message(.part).updated already covers the working edge.
-                if (!working) { working = true; emit("working") }
+                // Post-idle guard: a message landing right after session.idle is
+                // the finished turn's tail render, not a new turn — don't re-arm
+                // working (see IDLE_GRACE_MS), or the row wedges on "working".
+                if (!working && Date.now() - lastIdleAt > IDLE_GRACE_MS) {
+                    working = true
+                    emit("working")
+                }
             }
         },
     }
@@ -212,6 +237,27 @@ export class OpencodeHookAdapter extends HookAdapter {
             default:
                 return null
         }
+    }
+
+    override signalsBgJobs (): boolean {
+        // opencode permanently runs native helper children under its own pid —
+        // its `.opencode` core subprocess plus the language servers it auto-
+        // spawns (bash-language-server, pyright, …). The generic "child
+        // persisted for ≥2s" heuristic badges those as `N bg` forever, even
+        // though none are user background jobs. opencode's plugin never emits a
+        // bg signal, so the authoritative bg count is simply 0 — mark the hook
+        // authoritative to suppress the misfiring heuristic. (Real `&` bg jobs
+        // are therefore not surfaced for opencode — same trade-off as Codex,
+        // and far better than a permanent phantom badge.)
+        return true
+    }
+
+    override spawnsNativeHelper (): boolean {
+        // See signalsBgJobs() — opencode's core subprocess and its language
+        // servers exist from launch, BEFORE any hook event arrives, so the
+        // heuristic must be suppressed from t=0 (not just after the first hook
+        // event), or they'd be badged `1 bg` during the startup window.
+        return true
     }
 }
 

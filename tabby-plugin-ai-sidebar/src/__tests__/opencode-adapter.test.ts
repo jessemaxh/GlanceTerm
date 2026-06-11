@@ -167,6 +167,16 @@ describe('shipped opencode plugin — runtime behaviour', () => {
         expect(recs.map(r => r.event)).toEqual(['working', 'permission.asked', 'working'])
     })
 
+    it('does not re-arm "working" on a stray message right after session.idle', () => {
+        // Bug regression: opencode emits a tail message.part.updated for the
+        // JUST-FINISHED turn AFTER session.idle. Without the post-idle grace it
+        // flips the row back to "working" with no closing idle and wedges it
+        // there forever (never reaches idle/done). The post-idle stray must be
+        // swallowed — these events drive synchronously, well within IDLE_GRACE_MS.
+        const recs = driveEvents(UUID, ['message.part.updated', 'session.idle', 'message.part.updated'])
+        expect(recs.map(r => r.event)).toEqual(['working', 'session.idle'])
+    })
+
     it('writes nothing when GLANCETERM_TAB_ID is absent (cannot attribute to a tab)', () => {
         const recs = driveEvents(undefined, ['message.part.updated', 'session.idle'])
         expect(recs).toEqual([])
