@@ -299,11 +299,19 @@ const OVERLAY_JS = `
       cssH = m.height;
       resizeAll(cssW, cssH);
       const img = new Image();
+      // Tell main the first frame (frozen shot + dim) is painted. Main holds
+      // win.show() until this arrives — showing earlier reveals the live
+      // desktop through the transparent window for a frame, then snaps to the
+      // dimmed snapshot: the visible whole-screen "jitter". onerror still
+      // signals so a failed decode can't leave the window stuck invisible.
+      const signalReady = () => { try { window.postMessage({ kind: 'ready' }, '*'); } catch (_) {} };
       img.onload = () => {
         bgImage = img;
         drawBackground();
         renderDim();
+        signalReady();
       };
+      img.onerror = () => { signalReady(); };
       img.src = m.dataURL;
     }
   });

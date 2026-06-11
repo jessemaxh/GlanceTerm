@@ -77,6 +77,17 @@ export async function openCaptureWindow (opts: OpenOpts): Promise<CaptureResult>
 
     return new Promise<CaptureResult>((resolve) => {
         let settled = false
+        let shown = false
+        // Reveal the overlay only once its first frame is painted (the 'ready'
+        // handshake below). Showing while the renderer hasn't drawn yet flashes
+        // the live desktop through the transparent window for a frame before the
+        // frozen+dimmed snapshot snaps in — that swap was the whole-screen
+        // "jitter" users saw on capture.
+        const reveal = (): void => {
+            if (shown || settled) return
+            shown = true
+            try { win.show(); win.focus() } catch { /* window torn down */ }
+        }
         const done = (result: CaptureResult): void => {
             if (settled) return
             settled = true
@@ -119,8 +130,10 @@ export async function openCaptureWindow (opts: OpenOpts): Promise<CaptureResult>
                 done({ dataURL: null, rect: null })
                 return
             }
-            win.show()
-            win.focus()
+            // Fallback: if 'ready' never arrives (decode hang / lost message),
+            // reveal anyway so the overlay can't get stuck invisible with no way
+            // to cancel. Normal path reveals far sooner, on the 'ready' message.
+            setTimeout(() => reveal(), 600)
         })
 
         win.webContents.on('console-message', (...args: unknown[]) => {
@@ -139,7 +152,9 @@ export async function openCaptureWindow (opts: OpenOpts): Promise<CaptureResult>
             if (!msg.startsWith('__GLANCETERM_SHOT__')) return
             try {
                 const payload = JSON.parse(msg.slice('__GLANCETERM_SHOT__'.length))
-                if (payload.kind === 'confirm') {
+                if (payload.kind === 'ready') {
+                    reveal()
+                } else if (payload.kind === 'confirm') {
                     done({ dataURL: payload.dataURL ?? null, rect: payload.rect ?? null })
                 } else if (payload.kind === 'cancel') {
                     done({ dataURL: null, rect: null })
