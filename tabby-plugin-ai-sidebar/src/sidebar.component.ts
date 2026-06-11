@@ -110,32 +110,35 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                         <span class="dot" [attr.data-status]="effStatus(s)" aria-hidden="true"></span>
                     </div>
                     <div class="body">
+                        <!-- line1 — folder/title + status, grouped together. -->
                         <div class="line1">
                             <svg *ngIf="isPinned(s)" class="pin-mark" width="11" height="11" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" title="Pinned to top">
                                 <path d="M9.5 1.5 L14.5 6.5 L12 7.2 L11.5 11 L8.2 7.8 L4 12 L4 11 L8 6.8 L4.8 3.5 L8.5 3 Z"
                                       stroke="currentColor" stroke-width="0.6" stroke-linejoin="round"/>
                             </svg>
                             <span class="primary" [attr.title]="s.cwd || s.title">{{ s.cwd ? folderName(s.cwd) : s.title }}</span>
+                            <span class="status" [attr.data-status]="effStatus(s)">{{ statusLabel(s) }}</span>
                             <span *ngIf="effStatus(s) === TabStatus.NeedsPermission" class="attn" aria-hidden="true"></span>
                         </div>
-                        <!-- line2 — agent identity + token usage: "Claude opus-4-8 20k input 20k output".
-                             Only for AI tabs; a plain shell skips it (its "shell" status shows on line2b). -->
+                        <!-- line2 — agent + model fused into one background label ("Claude opus-4-8").
+                             AI tabs only; a plain shell skips it. -->
                         <div class="line2" *ngIf="s.aiTool">
-                            <span class="tag" [attr.data-tool]="s.aiTool">{{ toolTag(s.aiTool) }}</span>
-                            <span *ngIf="s.model" class="model-tag" [attr.title]="s.model">{{ modelLabel(s.aiTool, s.model) }}</span>
-                            <span *ngIf="s.tokensIn !== null" class="usage" [title]="tokensTitle(s)">{{ fmtTokens(s.tokensIn) }} input</span>
-                            <span *ngIf="s.tokensOut !== null" class="usage" [title]="tokensTitle(s)">{{ fmtTokens(s.tokensOut) }} output</span>
+                            <span class="agent-tag" [attr.data-tool]="s.aiTool" [attr.title]="s.model || toolTag(s.aiTool)"><span class="agent-name">{{ toolTag(s.aiTool) }}</span><span *ngIf="s.model" class="agent-model">{{ modelLabel(s.aiTool, s.model) }}</span></span>
                         </div>
-                        <!-- line2b — state + concurrency counts: "working · 2 agents · 3 shell · 9 monitor".
-                             Full-word counts flex-wrap rather than ellipsis-truncating (the old
-                             behaviour cut "1 agent · 3 shell" to "1 … · 3 …"). -->
-                        <div class="line2b">
-                            <span class="status" [attr.data-status]="effStatus(s)">{{ statusLabel(s) }}</span>
+                        <!-- line3 — session token usage; always shown for AI tabs, even at 0. -->
+                        <div class="line-tokens" *ngIf="s.aiTool">
+                            <span class="usage" [title]="tokensTitle(s)">{{ fmtTokens(s.tokensIn) }} input</span>
+                            <span class="usage" [title]="tokensTitle(s)">{{ fmtTokens(s.tokensOut) }} output</span>
+                        </div>
+                        <!-- line4 — concurrency counts: "2 agents · 3 shell · 9 monitor".
+                             Full-word counts flex-wrap rather than ellipsis-truncating. -->
+                        <div class="line-counts" *ngIf="s.subagentCount > 0 || s.backgroundJobCount > 0 || s.monitorCount > 0">
                             <span *ngIf="s.subagentCount > 0" class="micro accent" [title]="subagentTitle(s)">{{ s.subagentCount }} {{ s.subagentCount === 1 ? 'agent' : 'agents' }}</span>
                             <span *ngIf="s.backgroundJobCount > 0" class="micro accent" [title]="bgJobTitle(s)">{{ s.backgroundJobCount }} {{ bgLabel(s) }}</span>
                             <span *ngIf="s.monitorCount > 0" class="micro accent" [title]="monitorTitle(s)">{{ s.monitorCount }} {{ s.monitorCount === 1 ? 'monitor' : 'monitors' }}</span>
                         </div>
-                        <div *ngIf="s.cwd && effStatus(s) !== TabStatus.NeedsPermission" class="line3">
+                        <!-- line5 — full folder path. -->
+                        <div *ngIf="s.cwd" class="line3">
                             <span class="path-sub" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
                         </div>
                     </div>
@@ -751,7 +754,9 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             font-weight: 500;
             color: var(--gt-text);
             line-height: 1.3;
-            flex: 1 1 auto;
+            /* Don't grow — the status sits right after the name so the two read
+               as a pair; the name shrinks + ellipsises when crowded. */
+            flex: 0 1 auto;
             min-width: 0;
             white-space: nowrap;
             overflow: hidden;
@@ -767,25 +772,27 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
         }
         @keyframes ht-attn { 50% { opacity: 0.25; } }
 
+        /* line2 — the fused agent+model label. Single child, so no wrapping. */
         .line2 {
             display: flex;
             align-items: center;
             gap: 8px;
             margin-top: 5px;
             min-width: 0;
-            /* Wrap the concurrency counts to a second line when the row is
-               too narrow to hold them all, instead of letting each .micro
-               shrink + ellipsis-truncate its label (which produced the
-               unreadable "1 … · 3 … · 9 m…"). Tag + status stay on the
-               first line; full-word counts flow underneath only when
-               crowded, so the common 0–1-count case is unchanged. */
+        }
+        /* line-tokens — session token usage on its own row. */
+        .line-tokens {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-top: 4px;
+            min-width: 0;
             flex-wrap: wrap;
             row-gap: 3px;
         }
-        /* line2b — the state/concurrency row directly under the agent-identity
-           row. Same flex layout; tighter top margin so the two read as a
-           grouped pair. */
-        .line2b {
+        /* line-counts — concurrency counts (agents / shell / monitor). Full-word
+           labels flex-wrap rather than ellipsis-truncating when crowded. */
+        .line-counts {
             display: flex;
             align-items: center;
             gap: 8px;
@@ -794,8 +801,8 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             flex-wrap: wrap;
             row-gap: 3px;
         }
-        /* Token usage on line2 ("20k input  20k output") — dim, no bullet, so
-           it reads as quiet metadata beside the model. */
+        /* Token usage ("20k input  20k output") — dim mono, so it reads as
+           quiet metadata under the agent label. */
         .usage {
             font-family: var(--gt-mono);
             font-size: 11px;
@@ -840,6 +847,9 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             color: var(--gt-text-faint);
             opacity: 0.6;
         }
+        /* First count on its own line has nothing to its left, so drop the
+           leading bullet (it now reads "2 agents · 3 shell", not "· 2 agents"). */
+        .line-counts .micro:first-child::before { content: none; }
         .micro.accent {
             color: var(--gt-accent);
             font-weight: 600;
@@ -884,36 +894,43 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             color: var(--gt-text-faint);
         }
 
-        /* ---- tool tag ---- */
-        .tag {
+        /* ---- agent + model fused label ----
+           One background pill holding the agent name (bold) and the active
+           model (dimmer, same hue) so they read as a single labelled unit. */
+        .agent-tag {
+            display: inline-flex;
+            align-items: baseline;
+            gap: 6px;
+            max-width: 100%;
+            min-width: 0;
             font-family: var(--gt-mono);
-            font-size: 12.5px;
-            font-weight: 600;
             padding: 4px 7px;
             border-radius: 5px;
             line-height: 1;
             white-space: nowrap;
             flex: none;
         }
-        /* Palette: claude moved off honey (brand) so the brand colour isn't
-           overloaded onto a status chip. */
-        .tag[data-tool="claude"]      { color: #E879A6; background: rgba(232, 121, 166, 0.16); }
-        .tag[data-tool="codex"]       { color: #5BC8E5; background: rgba(91, 200, 229, 0.16); }
-        .tag[data-tool="gemini"]      { color: #6FA0F2; background: rgba(111, 160, 242, 0.16); }
-        .tag[data-tool="opencode"]    { color: #B794F4; background: rgba(183, 148, 244, 0.16); }
-
-        /* Active-model chip next to the agent tag — deliberately subtle
-           (dimmed, no background) so the agent tag stays the primary label. */
-        .model-tag {
-            font-family: var(--gt-mono);
-            font-size: 11px;
-            font-weight: 500;
-            line-height: 1;
-            opacity: 0.62;
-            white-space: nowrap;
-            align-self: center;
+        .agent-name {
+            font-size: 12.5px;
+            font-weight: 600;
             flex: none;
         }
+        /* Active model — same hue as the agent name but dimmed; truncates
+           inside the pill rather than overflowing it. */
+        .agent-model {
+            font-size: 11px;
+            font-weight: 500;
+            opacity: 0.62;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        /* Palette: claude moved off honey (brand) so the brand colour isn't
+           overloaded onto a status chip. */
+        .agent-tag[data-tool="claude"]      { color: #E879A6; background: rgba(232, 121, 166, 0.16); }
+        .agent-tag[data-tool="codex"]       { color: #5BC8E5; background: rgba(91, 200, 229, 0.16); }
+        .agent-tag[data-tool="gemini"]      { color: #6FA0F2; background: rgba(111, 160, 242, 0.16); }
+        .agent-tag[data-tool="opencode"]    { color: #B794F4; background: rgba(183, 148, 244, 0.16); }
 
         /* ---- footer (aggregate stats) ---- */
         .sb-footer {
