@@ -1,7 +1,7 @@
 import { Injectable, OnDestroy } from '@angular/core'
 import * as fs from 'fs/promises'
 import * as path from 'path'
-import { Subscription } from 'rxjs'
+import { Subscription, firstValueFrom } from 'rxjs'
 
 import { ConfigService, PlatformService } from 'tabby-core'
 
@@ -46,6 +46,10 @@ export class AutoApproveService implements OnDestroy {
      *  Saves writes AND removes the truncation window in which a concurrent
      *  handler could read an empty file. */
     private lastWritten: string | null = null
+    /** Set in ngOnDestroy so the ready$-gated initial reconcile — which can
+     *  resolve a tick after a fast teardown — doesn't write the flag after the
+     *  service is gone. Mirrors PermissionModeService's `destroyed` guard. */
+    private destroyed = false
 
     constructor (
         private config: ConfigService,
@@ -56,12 +60,28 @@ export class AutoApproveService implements OnDestroy {
         // spurious flag re-write, but the write is idempotent and ~1 ms, so
         // a global subscription is simpler than wiring a per-key watcher.
         this.sub = this.config.changed$.subscribe(() => { void this.sync() })
-        // Initial reconcile — covers the boot case where the config was
-        // loaded before this service existed.
-        void this.sync()
+        // Initial reconcile — GATED on config readiness. ConfigService loads
+        // asynchronously: init() awaits platform.loadConfig() before it
+        // populates `store` and only then fires ready$. Calling sync()
+        // synchronously here (the old code) would run while `store.ai` is still
+        // undefined → enabled=false → writeFlag('0'), clobbering a user who has
+        // the feature ON. And changed$ fires on save(), NOT on initial load, so
+        // nothing corrects the stale '0' until the next settings change — the
+        // exact "shield lit in the UI but flag=0 on disk" drift that leaves
+        // auto-approve silently dead after a plain app restart. Sibling
+        // PermissionModeService awaits store.load() for the identical reason;
+        // this mirrors it. .catch swallows the EmptyError edge where ready$
+        // could complete without emitting (it always emits true in practice).
+        void firstValueFrom(this.config.ready$)
+            .then(() => {
+                if (this.destroyed) return
+                return this.sync()
+            })
+            .catch(() => { /* ready$ should always emit true; ignore */ })
     }
 
     ngOnDestroy (): void {
+        this.destroyed = true
         this.sub?.unsubscribe()
     }
 
