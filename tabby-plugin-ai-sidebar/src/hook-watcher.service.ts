@@ -835,6 +835,75 @@ export class HookWatcherService implements OnDestroy {
     }
 
     /**
+     * GC entry point for TabMonitor's poll loop: drop ALL per-tab state for any
+     * tracked UUID that no longer belongs to an open terminal tab.
+     *
+     * Why this exists: the on-disk handler only ever APPENDS to `<tab_id>.log`
+     * — it never unlinks it — so the ENOENT path in {@link tail} that calls
+     * {@link dropTabState} never fires for a closed tab. Without an external
+     * sweep, every tab UUID ever seen leaks one `map` + `tailOffset`
+     * (+ side-channel) entry for the whole process lifetime, and {@link emit}
+     * copies the growing `map` on every flush. TabMonitor owns the tab↔UUID
+     * mapping, so it hands us the live UUIDs each tick and we evict the rest.
+     *
+     * Conservative by construction: TabMonitor contributes BOTH a tab's
+     * `sess.glancetermTabId` and any cached env UUID, so a tab whose log is
+     * keyed by either survives. A transient under-count of live tabs only
+     * costs a re-read of that tab's log on its next append (the log is
+     * internally consistent — spawns balance stops, resets included — so the
+     * reconstructed state is correct). Callers MUST skip this on a zero-tab
+     * scan (app shutdown / transient empty collect) so we never nuke
+     * everything; this method does not second-guess an empty set.
+     */
+    retainOnly (liveTabIds: Set<string>): void {
+        const keys = new Set<string>()
+        for (const k of this.map.keys()) keys.add(k)
+        for (const k of this.tailOffset.keys()) keys.add(k)
+        for (const k of this.liveAgentIds.keys()) keys.add(k)
+        for (const k of this.liveMonitorTaskIds.keys()) keys.add(k)
+        for (const k of this.pendingBgArrivals.keys()) keys.add(k)
+        for (const k of this.subagentTombstones.keys()) keys.add(k)
+        for (const k of keys) {
+            if (!liveTabIds.has(k)) this.dropTabState(k)
+        }
+        // No emit(): dropped entries belong to tabs TabMonitor no longer
+        // renders, and direct reads (getStatus / getSubagentInFlight) hit the
+        // live maps we just pruned. Emitting here would only bounce an extra
+        // tick for state nobody queries.
+    }
+
+    /**
+     * Clear only the session-scoped side-channel counters (live subagents,
+     * live monitors, pending bg arrivals, tombstones) for one tab, leaving its
+     * snapshot + tail offset intact.
+     *
+     * Called by TabMonitor when a tab goes `no_ai` — the agent process died
+     * mid-flight without a SessionEnd. The lazy evictors
+     * ({@link getMonitorInFlight}) only self-evict when queried with a resolved
+     * tabId, but a `no_ai` tab resolves none, so a crash that left a subagent
+     * or monitor "live" would otherwise sit in memory until the tab closes
+     * (then {@link retainOnly} reaps it) or a new SessionStart resets it. This
+     * closes the open-but-dead window. The snapshot is deliberately kept:
+     * process-tree detection already drives the row to `no_ai`, and a revival
+     * re-reads from the retained offset rather than re-scanning the whole log.
+     */
+    clearSideChannel (tabId: string): boolean {
+        // Cheap guard so the per-tick call from every plain (never-AI) shell
+        // tab is a set of has-checks, not four Map.delete misses.
+        if (
+            !this.liveAgentIds.has(tabId)
+            && !this.liveMonitorTaskIds.has(tabId)
+            && !this.pendingBgArrivals.has(tabId)
+            && !this.subagentTombstones.has(tabId)
+        ) return false
+        this.liveAgentIds.delete(tabId)
+        this.liveMonitorTaskIds.delete(tabId)
+        this.pendingBgArrivals.delete(tabId)
+        this.subagentTombstones.delete(tabId)
+        return true
+    }
+
+    /**
      * Process one parsed event line. Returns true if any per-tab state
      * (snapshot or side-tracker) changed. Side-effect mutations are gated on
      * `eventAt >= startupTs` so stale lines from prior process lifetimes
@@ -846,7 +915,19 @@ export class HookWatcherService implements OnDestroy {
         const eventAt = (parsed.ts || 0) * 1000
         let changed = false
 
-        if (eventAt >= this.startupTs) {
+        // The subagent / monitor / bg-arrival side-channel below keys off fields
+        // that ONLY Claude's documented hook payload defines (`agent_id`,
+        // `spawn_agent_id`, `tool_name: Agent/Monitor/TaskStop/Bash`, `bg`).
+        // Codex/Gemini/opencode don't emit them today, but running this block
+        // for them is one field-name collision away from a phantom
+        // "working · N agents" pin with NO decrement path — Codex subscribes to
+        // neither StopFailure nor SessionEnd, so it could never recover. Gate
+        // the whole block on the Claude adapter, the only agent whose contract
+        // includes these fields. (opencode's plugin is structurally safe; this
+        // makes codex/gemini safe by construction, not by payload luck.) When
+        // another agent's subagent contract is verified e2e, promote this to a
+        // per-adapter capability flag rather than a hard-coded id.
+        if (eventAt >= this.startupTs && adapter.id === 'claude') {
             // Id-based live-subagent tracking. Hook events map to set ops,
             // all reduced through the pure `reduceSubagentSet`:
             //   PostToolUse(Agent) w/ tool_response.agentId → spawn (authoritative)
@@ -1047,8 +1128,12 @@ export class HookWatcherService implements OnDestroy {
             cwd: parsed.cwd || null,
             transcriptPath: parsed.transcript_path || null,
             // Sticky: keep the last non-empty model so Claude's one-shot
-            // SessionStart slug survives later model-less events.
-            model: parsed.model || prev?.model || null,
+            // SessionStart slug survives later model-less events — EXCEPT on a
+            // fresh SessionStart, which begins a new session and must NOT
+            // inherit the prior session's slug. A model-less SessionStart drops
+            // the sticky to null rather than carrying a stale model forward
+            // (same tab, reused after the prior agent exited).
+            model: parsed.model || (parsed.event === 'SessionStart' ? null : prev?.model ?? null),
         })
         return true
     }

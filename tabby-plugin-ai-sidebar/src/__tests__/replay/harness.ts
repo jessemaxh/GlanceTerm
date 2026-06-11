@@ -45,6 +45,9 @@ export interface TraceEvent {
     ts: number
     bg?: 0 | 1
     interrupted?: 0 | 1
+    /** Active model slug — Codex stamps every event, Claude only SessionStart.
+     *  Mirrors HookStatusFile.model; drives the sticky-model assertions. */
+    model?: string
     /** Top-level on subagent-context events (its tool calls, its
      *  SubagentStop). Empty / missing on main-agent events. */
     agent_id?: string

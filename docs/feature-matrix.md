@@ -42,13 +42,13 @@ Adding a new agent means editing that file **and** adding a column here.
 | `idle` / "ready" state | ✅ | ✅ (Stop — verified e2e) | 🧪 (`AfterAgent`) | 🧪 (`session.idle`) |
 | `needs_permission` state | ✅ | 🧪 (PermissionRequest — fires only in interactive codex, not `exec`; untested e2e) | ❌ deferred (`Notification`/`ToolPermission` — matcher filtering unverified) | 🧪 (`permission.asked`) |
 | `done` (working → idle → unfocused) | ✅ | ✅ (derives from Stop — verified e2e) | 🧪 (depends on `AfterAgent`) | 🧪 (depends on `session.idle`) |
-| Subagent in-flight `· N agents` badge | ✅ | 🧪 (SubagentStart/Stop subscribed) | ❌ adapter (not subscribed) | ❌ adapter (not surfaced) |
+| Subagent in-flight `· N agents` badge | ✅ | ❌ (side-channel is Claude-only by construction; Codex's hook payload carries no subagent id — see note) | ❌ adapter (not subscribed) | ❌ adapter (not surfaced) |
 | **Auto-approve** |||||
 | Shield button toggle (UI present) | ✅ | 🧪 (now active — auto-approves) | 🧪 (inert — auto-approve not possible) | 🧪 (inert — observe-only) |
 | Actually responds `allow` to permission prompts | ✅ | 🧪 (Codex added it in PR #17563 — same decision JSON as Claude, source-confirmed; untested e2e) | 🚫 (`Notification` is advisory — "cannot grant permissions automatically"; `BeforeTool` can only `deny`) | ❌ (observe-only; `permission.ask` interceptor exists but unused — flaky) |
 | **Background-job indicator (`· N bg`)** |||||
 | Hook-anchored count (zero false positives) | ✅ | ❌ (Codex Bash bg-flag detection not implemented) | ❌ adapter | ❌ adapter |
-| Heuristic ≥2 s persistence fallback | ✅ (also active) | 🧪 | 🧪 | 🧪 |
+| Heuristic ≥2 s persistence fallback | ✅ (also active) | ❌ (suppressed: `spawnsNativeHelper()` true forces `hookAuthoritative` from t=0, and no Bash bg-flag is set → count stays 0) | 🧪 | 🧪 |
 | **Notifications** |||||
 | OS notification on `needs_permission` | ✅ | 🧪 (gated on PermissionRequest firing) | ❌ no needs_permission state yet | 🧪 (gated on `permission.asked`) |
 | OS notification on `working → idle` | ✅ | 🧪 (gated on Stop firing) | 🧪 (gated on `AfterAgent`) | 🧪 (gated on `session.idle`) |
@@ -109,6 +109,20 @@ for `AGENT=codex` too. Caveat: Codex fails CLOSED on the reserved
 confirming a `Bash(...)` prompt is auto-approved (and that the grant lands in
 `~/.glanceterm/auto-approve.log`).
 
+**Subagent / monitor / bg side-channel is Claude-only (2026-06-11).** The
+`liveAgentIds` / `liveMonitorTaskIds` / `pendingBgArrivals` machinery in
+`hook-watcher.service.ts processEvent` keys off fields only Claude's payload
+defines (`agent_id`, `spawn_agent_id`, `tool_name: Agent/Monitor/TaskStop`,
+`bg`) and is now **gated on `adapter.id === 'claude'`**. Codex never populated
+these in practice anyway (its documented schema has no subagent id, and the
+bg-flag is only set for `tool_name === 'Bash'`, which Codex's shell tool isn't),
+so the gate loses no Codex functionality — it removes a latent misfire (a
+field-name collision could have pinned a Codex row to a phantom
+`working · N agents` with no decrement path, since Codex subscribes to neither
+`StopFailure` nor `SessionEnd`). The Codex `SubagentStop` subscription is inert
+dead weight as a result. When Codex's real subagent/bg signal is verified e2e,
+promote the gate to a per-adapter capability flag.
+
 ### Gemini CLI — adapter shipped (`gemini.ts`), UNTESTED
 
 Re-researched 2026-06-10. **Gemini CLI has a first-class shell-command hook
@@ -143,6 +157,16 @@ settings `matcher` filters `Notification` by type — subscribing without a
 working filter would map every notification to needs_permission. Add once
 validated. **Auto-approve is not possible** (the event is advisory; `BeforeTool`
 only supports `deny`).
+
+**Abnormal-turn-end gap (known, 2026-06-11):** `AfterAgent → idle` is Gemini's
+ONLY release from `working`. There is no `StopFailure`/interrupt-equivalent
+event subscribed, and Gemini's stdin payload carries no `transcript_path`, so
+the slow-path transcript interrupt probe (`maybeProbeTranscriptInterrupt`)
+can't recover it either (it early-returns on the null path). Keyboard ESC is
+still covered agent-agnostically (`EscInterruptService → forceIdle`), but a
+NON-keyboard abnormal end (internal error / timeout that skips `AfterAgent`)
+leaves the row stuck `working` until the next `BeforeAgent`/`SessionEnd`. Add a
+Gemini terminal/abnormal-end event once one is identified upstream.
 Docs: https://geminicli.com/docs/hooks/ and
 https://github.com/google-gemini/gemini-cli/blob/main/docs/hooks/reference.md
 

@@ -247,10 +247,15 @@ export interface TabState {
     /**
      * Active model id for this tab's agent, if known (e.g. `claude-opus-4-8`,
      * `gpt-5.5`). Sidebar renders it next to the agent tag. Null when unknown
-     * (no event yet / source unavailable). Live — updates if the user switches
-     * model mid-session. Source is per-agent (hook payload field where the
-     * agent provides one, else the transcript's last assistant `model`); see
-     * makeState.
+     * (no event yet / source unavailable).
+     *
+     * Freshness is per-agent, NOT uniformly live: Codex stamps `.model` on
+     * every hook event (so a mid-session switch is reflected), but Claude only
+     * emits the slug once at `SessionStart` — a mid-session `/model` is NOT
+     * picked up until the next session (the watcher keeps it sticky within a
+     * session and drops it on the next SessionStart). Source is per-agent (the
+     * hook payload field where the agent provides one); see makeState and
+     * HookWatcher.processEvent's sticky-model rule.
      */
     model: string | null
     /**
@@ -366,6 +371,15 @@ export class TabMonitor implements OnDestroy {
      */
     private idleGateTimers = new WeakMap<BaseTabComponent, ReturnType<typeof setTimeout>>()
     /**
+     * Strong references to every pending idle-gate timer handle. The WeakMap
+     * above is keyed by inner tab (so entries vanish with the tab), but its
+     * VALUES — the setTimeout handles — aren't iterable, so ngOnDestroy can't
+     * cancel them through it. This Set lets teardown clear all outstanding
+     * timers; kept in lockstep with the WeakMap by scheduleGateRelease /
+     * clearGateTimer / the fire callback.
+     */
+    private idleGateTimerHandles = new Set<ReturnType<typeof setTimeout>>()
+    /**
      * Per-tab "we entered effective `working` at this wall-clock ms" anchor.
      * Set on the first tick that surfaces status=working after a non-working
      * tick; cleared when status leaves working. Drives `lastActiveMs` for
@@ -455,6 +469,10 @@ export class TabMonitor implements OnDestroy {
 
     ngOnDestroy (): void {
         if (this.timer) clearInterval(this.timer)
+        // Cancel any pending idle-gate re-tick timers so they don't fire into
+        // a torn-down monitor after the poll loop has stopped.
+        for (const t of this.idleGateTimerHandles) clearTimeout(t)
+        this.idleGateTimerHandles.clear()
     }
 
     private async tick (): Promise<void> {
@@ -481,6 +499,23 @@ export class TabMonitor implements OnDestroy {
                 for (const r of results) if (r) out.push(r)
             }
             this.subject.next(out)
+
+            // GC HookWatcher's per-tab state for tabs closed since the last
+            // sweep — the on-disk handler never unlinks a tab's log, so the
+            // watcher's own ENOENT cleanup never fires (it'd otherwise leak one
+            // entry per tab UUID ever seen). We own the tab↔UUID mapping, so we
+            // hand it the live UUID set; it evicts the rest. Skipped on an
+            // empty scan (shutdown / transient) so we never nuke live state.
+            if (tabs.length > 0) {
+                const liveTabIds = new Set<string>()
+                for (const { inner } of tabs) {
+                    const s = (inner as unknown as { session?: { glancetermTabId?: string } }).session
+                    if (s?.glancetermTabId) liveTabIds.add(s.glancetermTabId)
+                    const env = this.envTabIdCache.get(inner)
+                    if (env) liveTabIds.add(env)
+                }
+                this.hooks.retainOnly(liveTabIds)
+            }
         } catch (e) {
             // eslint-disable-next-line no-console
             console.error('[glanceterm] tick failed:', e)
@@ -630,6 +665,15 @@ export class TabMonitor implements OnDestroy {
 
         if (!aiTool) {
             status = TabStatus.NoAi
+            // Agent process died (or never existed): clear any side-channel
+            // counters still keyed by this tab's UUID so a crash mid-subagent /
+            // mid-monitor doesn't leave a phantom "live" entry sitting in
+            // memory until the tab closes (retainOnly) or a new SessionStart
+            // resets it. Cheap no-op for plain (never-AI) shells.
+            const sid: string | undefined = sess.glancetermTabId
+            if (sid) this.hooks.clearSideChannel(sid)
+            const env = this.envTabIdCache.get(t.inner)
+            if (env && env !== sid) this.hooks.clearSideChannel(env)
         } else if (!this.registry.supports(aiTool)) {
             // Tool we recognise via ps but don't have a hook adapter for yet —
             // degraded "we know it's alive, can't tell working vs idle" state.
@@ -959,9 +1003,11 @@ export class TabMonitor implements OnDestroy {
         // threshold rather than equal-to (idleAgeMs >= IDLE_STABILITY_MS).
         const t = setTimeout(() => {
             this.idleGateTimers.delete(inner)
+            this.idleGateTimerHandles.delete(t)
             void this.tick()
         }, delayMs + 25)
         this.idleGateTimers.set(inner, t)
+        this.idleGateTimerHandles.add(t)
     }
 
     /**
@@ -1005,6 +1051,7 @@ export class TabMonitor implements OnDestroy {
         if (existing) {
             clearTimeout(existing)
             this.idleGateTimers.delete(inner)
+            this.idleGateTimerHandles.delete(existing)
         }
     }
 
