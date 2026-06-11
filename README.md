@@ -2,7 +2,7 @@
 
 **See every AI agent at a glance. Never miss the one that needs you.**
 
-If you have 5+ Claude Code / Codex / opencode / aider sessions running in
+If you have 5+ Claude Code / Codex / Gemini / opencode sessions running in
 different tabs, you've probably done this dance: Cmd-Tab through them all,
 squinting at the title bar, trying to figure out which one is done and ready
 for the next task.
@@ -14,7 +14,7 @@ amber when it's asking permission. Click a row → jump straight to that tab.
 ```
 ┌────────────────┬──────────────────────────────────┐
 │  AI TABS       │                                  │
-│                │   you@host ~/work/api $   │
+│                │   you@host ~/work/api $          │
 │ ● ai-backend   │   > what does this function do?  │
 │   working      │                                  │
 │   CLAUDE  3s   │   ⏺ Reading src/handler.ts…      │
@@ -29,9 +29,9 @@ amber when it's asking permission. Click a row → jump straight to that tab.
 
 > **Does it work with my AI tool?** — see the
 > [feature × agent support matrix](docs/feature-matrix.md). Short answer:
-> Claude Code is first-class and tested; Codex has a docs-written adapter
-> (untested); Gemini / opencode / aider / goose currently get
-> process-detection + auto-resume only.
+> Claude Code is first-class and tested; Codex's adapter has status
+> detection verified (auto-approve untested); Gemini and opencode ship
+> adapters that aren't yet validated end-to-end.
 
 ## Status of this repo
 
@@ -62,7 +62,7 @@ ai-terminal/
 
 Every Tabby tab gets a unique `GLANCETERM_TAB_ID` env var injected at PTY
 spawn time. Any process spawned from that shell — including `claude`,
-`codex`, `aider` — inherits it.
+`codex`, `gemini` — inherits it.
 
 For supported agents (currently **Claude Code**), GlanceTerm installs a hook
 in the agent's settings file on first launch. The hook fires on lifecycle
@@ -76,10 +76,10 @@ screen-scraping, zero false positives.
 
 **Per-agent support** is tracked in [docs/feature-matrix.md](docs/feature-matrix.md)
 — full table of which features work with Claude / Codex / Gemini CLI /
-opencode / aider / goose, what's tested vs implemented-but-untested, and
+opencode, what's tested vs implemented-but-untested, and
 what's architecturally blocked. Roadmap in one line: Claude is
-first-class, Codex has a docs-written adapter (untested), Gemini /
-opencode / aider / goose are partial via process detection only.
+first-class, Codex's adapter has status detection verified (auto-approve
+untested), Gemini and opencode ship adapters that are untested end-to-end.
 
 ## ⚠️ Auto-approve permissions (opt-in, dangerous)
 
@@ -169,11 +169,11 @@ for CDP-driven UI testing.
 
 ## Known limitations (v0.2)
 
-- **Only Claude Code is fully hooked and tested.** Codex has an
-  adapter written from docs but not yet validated on a real install.
-  Gemini / opencode / aider / goose are recognised from their process
-  tree and show as `working` while alive, but lack fine-grained
-  states. See [docs/feature-matrix.md](docs/feature-matrix.md) for the
+- **Only Claude Code is fully hooked and tested.** Codex's adapter has
+  status detection verified on a real install; its auto-approve path is
+  source-confirmed but untested. Gemini and opencode ship adapters that
+  are not yet validated end-to-end. See
+  [docs/feature-matrix.md](docs/feature-matrix.md) for the
   precise per-feature breakdown and
   [HACKING-glanceterm.md](HACKING-glanceterm.md#adding-a-new-agent-adapter)
   for how to contribute an adapter.

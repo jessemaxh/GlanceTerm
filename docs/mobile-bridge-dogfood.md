@@ -39,7 +39,7 @@ The plugin needs its `node_modules`. Run this in a terminal **outside**
 the GlanceTerm session you'll keep using:
 
 ```bash
-cd /Users/you/work/glanceterm/glanceterm/tabby-plugin-mobile-bridge
+cd /path/to/glanceterm/glanceterm/tabby-plugin-mobile-bridge
 yarn install --network-timeout 1000000
 ```
 
@@ -55,7 +55,7 @@ Watch the output. Expected: `webpack` compiles, writes `dist/index.js`.
 Fall back to the monorepo install which sets up the symlinks:
 
 ```bash
-cd /Users/you/work/glanceterm/glanceterm
+cd /path/to/glanceterm/glanceterm
 node scripts/install-deps.mjs
 ```
 
@@ -224,11 +224,6 @@ name should be verifiable. Steps:
      ~170-187).
    - `rm ~/.glanceterm/raw-payloads.log`
    - Rebuild + relaunch.
-   - Delete the memory file:
-     ```bash
-     rm /Users/you/.claude/projects/-Users-you-work-glanceterm/memory/monitor_debug_dump_cleanup.md
-     ```
-     and remove its line from `MEMORY.md`.
 
 ---
 
@@ -250,7 +245,7 @@ Branch `feat/mobile-bridge` is independent. To get back to the
 pre-feature state:
 
 ```bash
-cd /Users/you/work/glanceterm/glanceterm
+cd /path/to/glanceterm/glanceterm
 git checkout main          # main is untouched
 # or, if you want to drop everything including dirty work:
 git checkout pre-mobile-bridge

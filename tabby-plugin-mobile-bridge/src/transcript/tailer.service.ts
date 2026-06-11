@@ -221,7 +221,7 @@ export class TranscriptTailerService implements OnDestroy {
      * `cwd` → `~/.claude/projects/` slug. Claude Code's slugger replaces
      * every `/` with `-` and preserves the leading `/` as a `-`. Verified
      * against the live directory layout under `~/.claude/projects/` —
-     * e.g. `/Users/you/work/glanceterm` → `-Users-you-work-glanceterm`.
+     * e.g. `/Users/you/work/myproject` → `-Users-you-work-myproject`.
      *
      * Claude's slugger also has rules around dots and other special chars
      * that we don't model here — the simple replace covers the path shapes

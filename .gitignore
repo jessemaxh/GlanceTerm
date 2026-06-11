@@ -44,6 +44,10 @@ tabby-plugin-ai-sidebar/dist/
 tabby-plugin-ai-sidebar/package-lock.json
 *.log
 .DS_Store
+# Local env / secrets — never commit. Keep a tracked .env.example for templates.
+.env
+.env.local
+.env.*.local
 
 # webpack output that occasionally lands at repo root from running webpack outside app/
 /main.js
