@@ -48,7 +48,19 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
     template: `
         <div class="sb">
             <div class="sb-header">
-                <span class="h-title">AI Tabs</span>
+                <span class="sb-logo" aria-hidden="true">
+                    <svg width="22" height="22" viewBox="0 0 100 100">
+                        <rect x="13" y="22" width="74" height="56" rx="13" fill="none" stroke="var(--gt-accent)" stroke-width="7"/>
+                        <line x1="39" y1="27" x2="39" y2="73" stroke="var(--gt-accent)" stroke-opacity="0.45" stroke-width="5"/>
+                        <circle cx="26" cy="35" r="4" fill="var(--gt-st-working)"/>
+                        <circle cx="26" cy="50" r="4" fill="var(--gt-accent)"/>
+                        <path d="M55 44 L63 50 L55 56" fill="none" stroke="var(--gt-accent)" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+                        <rect x="67" y="54" width="13" height="5" rx="2.5" fill="var(--gt-accent)"/>
+                    </svg>
+                </span>
+                <span class="sb-title">Glance<b>Term</b></span>
+                <span *ngIf="countAttn > 0" class="sb-attn"><span class="pip"></span>{{ countAttn }} need you</span>
+                <span class="sb-grow"></span>
             </div>
 
             <div class="sb-filters" *ngIf="states.length > 0">
@@ -56,6 +68,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                         *ngFor="let f of FILTERS"
                         class="pill"
                         [class.active]="filterMode === f.id"
+                        [class.zero]="countFor(f.id) === 0"
                         [attr.data-id]="f.id"
                         [attr.aria-pressed]="filterMode === f.id"
                         (click)="setFilter(f.id)">
@@ -105,54 +118,68 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                      role="button"
                      (click)="onSelect(s)"
                      (contextmenu)="onContextMenu(s, $event)">
-                    <div class="num" aria-hidden="true">{{ tabIndex(s) }}</div>
                     <div class="rail">
                         <span class="dot" [attr.data-status]="effStatus(s)" aria-hidden="true"></span>
                     </div>
                     <div class="body">
-                        <!-- line1 — folder/title + status, grouped together. -->
+                        <!-- line1 — index · name · pin · status -->
                         <div class="line1">
+                            <span class="num" aria-hidden="true">{{ tabIndex(s) }}</span>
+                            <span *ngIf="isSubordinate(s)" class="subicon" aria-hidden="true" title="split pane">
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7v6a2 2 0 0 0 2 2h6"/></svg>
+                            </span>
+                            <span class="primary" [attr.title]="s.cwd || s.title">{{ s.cwd ? folderName(s.cwd) : s.title }}</span>
                             <svg *ngIf="isPinned(s)" class="pin-mark" width="11" height="11" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" title="Pinned to top">
                                 <path d="M9.5 1.5 L14.5 6.5 L12 7.2 L11.5 11 L8.2 7.8 L4 12 L4 11 L8 6.8 L4.8 3.5 L8.5 3 Z"
                                       stroke="currentColor" stroke-width="0.6" stroke-linejoin="round"/>
                             </svg>
-                            <span class="primary" [attr.title]="s.cwd || s.title">{{ s.cwd ? folderName(s.cwd) : s.title }}</span>
+                            <span class="l1-sp"></span>
                             <span class="status" [attr.data-status]="effStatus(s)">{{ statusLabel(s) }}</span>
-                            <span *ngIf="effStatus(s) === TabStatus.NeedsPermission" class="attn" aria-hidden="true"></span>
                         </div>
-                        <!-- line2 — agent + model fused into one background label ("Claude opus-4-8").
-                             AI tabs only; a plain shell skips it. -->
+
+                        <!-- line2 (AI) — neutral agent·model pill · token usage · age -->
                         <div class="line2" *ngIf="s.aiTool">
-                            <span class="agent-tag" [attr.data-tool]="s.aiTool" [attr.title]="s.model || toolTag(s.aiTool)"><span class="agent-name">{{ toolTag(s.aiTool) }}</span><span *ngIf="s.model" class="agent-model">{{ modelLabel(s.aiTool, s.model) }}</span></span>
+                            <span class="agent-tag" [attr.data-tool]="s.aiTool" [attr.title]="s.model || toolTag(s.aiTool)">
+                                <span class="tg" aria-hidden="true">{{ toolGlyph(s.aiTool) }}</span>
+                                <span class="agent-name">{{ toolTag(s.aiTool) }}</span>
+                                <span *ngIf="s.model" class="agent-model">{{ modelLabel(s.aiTool, s.model) }}</span>
+                            </span>
+                            <span class="usage" *ngIf="s.tokensIn || s.tokensOut" [title]="tokensTitle(s)">{{ fmtTokens(s.tokensIn) }} in</span>
+                            <span class="usage" *ngIf="s.tokensIn || s.tokensOut" [title]="tokensTitle(s)">{{ fmtTokens(s.tokensOut) }} out</span>
+                            <span class="l2-sp"></span>
+                            <span class="age" *ngIf="s.lastActiveMs !== null">{{ ageStr(s.lastActiveMs) }}</span>
                         </div>
-                        <!-- line3 — session token usage; always shown for AI tabs, even at 0. -->
-                        <div class="line-tokens" *ngIf="s.aiTool">
-                            <span class="usage" [title]="tokensTitle(s)">{{ fmtTokens(s.tokensIn) }} input</span>
-                            <span class="usage" [title]="tokensTitle(s)">{{ fmtTokens(s.tokensOut) }} output</span>
+
+                        <!-- line2 (shell) — cwd · age -->
+                        <div class="line2" *ngIf="!s.aiTool && s.cwd">
+                            <span class="usage shell-cwd" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
+                            <span class="l2-sp"></span>
+                            <span class="age" *ngIf="s.lastActiveMs !== null">{{ ageStr(s.lastActiveMs) }}</span>
                         </div>
-                        <!-- line4 — concurrency counts: "2 agents · 3 shell · 9 monitor".
-                             Full-word counts flex-wrap rather than ellipsis-truncating. -->
-                        <div class="line-counts" *ngIf="s.subagentCount > 0 || s.backgroundJobCount > 0 || s.monitorCount > 0">
-                            <span *ngIf="s.subagentCount > 0" class="micro accent" [title]="subagentTitle(s)">{{ s.subagentCount }} {{ s.subagentCount === 1 ? 'agent' : 'agents' }}</span>
-                            <span *ngIf="s.backgroundJobCount > 0" class="micro accent" [title]="bgJobTitle(s)">{{ s.backgroundJobCount }} {{ bgLabel(s) }}</span>
-                            <span *ngIf="s.monitorCount > 0" class="micro accent" [title]="monitorTitle(s)">{{ s.monitorCount }} {{ s.monitorCount === 1 ? 'monitor' : 'monitors' }}</span>
+
+                        <!-- line3 — full path (EVERY AI row that has a cwd, not
+                             just the focused one, so a row's height is identical
+                             focused or not → no reflow/jump when focus moves) +
+                             process-tree counts. We surface the process tree
+                             GlanceTerm can observe, not terminal text. -->
+                        <div class="line3" *ngIf="s.aiTool && (s.cwd || s.subagentCount > 0 || s.backgroundJobCount > 0 || s.monitorCount > 0)">
+                            <span class="path-sub" *ngIf="s.cwd" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
+                            <span class="l3-sp"></span>
+                            <span class="conc" *ngIf="s.subagentCount > 0 || s.backgroundJobCount > 0 || s.monitorCount > 0">
+                                <span *ngIf="s.subagentCount > 0" [title]="subagentTitle(s)"><b>{{ s.subagentCount }}</b> {{ s.subagentCount === 1 ? 'agent' : 'agents' }}</span>
+                                <span *ngIf="s.backgroundJobCount > 0" [title]="bgJobTitle(s)"><b>{{ s.backgroundJobCount }}</b> {{ bgLabel(s) }}</span>
+                                <span *ngIf="s.monitorCount > 0" [title]="monitorTitle(s)"><b>{{ s.monitorCount }}</b> {{ s.monitorCount === 1 ? 'monitor' : 'monitors' }}</span>
+                            </span>
                         </div>
-                        <!-- line5 — full folder path. -->
-                        <div *ngIf="s.cwd" class="line3">
-                            <span class="path-sub" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
-                        </div>
-                    </div>
-                    <div class="meta">
-                        <span class="age" *ngIf="effStatus(s) !== TabStatus.NoAi && s.lastActiveMs !== null">{{ ageStr(s.lastActiveMs) }}</span>
                     </div>
                 </div>
             </div>
 
             <div *ngIf="visibleStates.length > 0" class="sb-footer">
-                <span *ngIf="countDone > 0" class="stat done-stat"><i></i>{{ countDone }}<span class="lbl"> done</span></span>
-                <span class="stat work"><i></i>{{ countWorking }}<span class="lbl"> working</span></span>
-                <span class="stat idle"><i></i>{{ countIdle }}<span class="lbl"> idle</span></span>
-                <span *ngIf="countAttn > 0" class="stat attn-stat"><i></i>{{ countAttn }}<span class="lbl"> need you</span></span>
+                <span *ngIf="countAttn > 0" class="stat attn-stat"><i></i>{{ countAttn }} need you</span>
+                <span *ngIf="countDone > 0" class="stat done-stat"><i></i>{{ countDone }} done</span>
+                <span class="stat work"><i></i>{{ countWorking }} working</span>
+                <span class="stat idle muted"><i></i>{{ countIdle }} idle</span>
             </div>
 
             <!-- "AI toolbar" — always rendered. Per-tab AI actions on the left
@@ -174,9 +201,12 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                             [class.muted]="!activeIsAi"
                             [disabled]="capturing"
                             (click)="onScreenshot()"
-                            [title]="screenshotTitle()"
+                            [ngbTooltip]="screenshotTitle()"
+                            placement="top"
+                            container="body"
                             aria-label="Take a screenshot and paste it into the focused AI agent">
-                        <svg width="17" height="17" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                        <span *ngIf="capturing" class="spin" aria-hidden="true"></span>
+                        <svg *ngIf="!capturing" width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                             <path d="M5.2 3.5 L6.3 2.2 L9.7 2.2 L10.8 3.5 L13.2 3.5
                                      A1.5 1.5 0 0 1 14.7 5 V11.8
                                      A1.5 1.5 0 0 1 13.2 13.3 H2.8
@@ -185,6 +215,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                                   stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>
                             <circle cx="8" cy="8.4" r="2.6" stroke="currentColor" stroke-width="1.2" fill="none"/>
                         </svg>
+                        <span class="btn-label">{{ capturing ? 'Capturing…' : 'Screenshot' }}</span>
                     </button>
                     <button type="button"
                             class="action-btn split-caret"
@@ -192,7 +223,9 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                             [class.muted]="!activeIsAi"
                             [disabled]="capturing"
                             (click)="toggleScreenshotMenu($event)"
-                            title="Screenshot options"
+                            ngbTooltip="Screenshot options"
+                            placement="top"
+                            container="body"
                             aria-label="Open screenshot options menu"
                             [attr.aria-expanded]="screenshotMenuOpen"
                             aria-haspopup="menu">
@@ -219,7 +252,9 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                         class="action-btn"
                         [class.active]="isSplitOpenInActiveTab()"
                         (click)="onSplitShell()"
-                        [title]="splitTitle()"
+                        [ngbTooltip]="splitTitle()"
+                        placement="top"
+                        container="body"
                         [attr.aria-label]="splitAriaLabel()">
                     <svg width="17" height="17" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
                         <rect x="1.5" y="2.5" width="6" height="11" rx="1" fill="none" stroke="currentColor" stroke-width="1.2" opacity="0.7"/>
@@ -238,7 +273,9 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                 <button type="button"
                         class="action-btn settings-btn"
                         (click)="openSettingsModal()"
-                        title="AI sidebar settings"
+                        ngbTooltip="Settings"
+                        placement="top"
+                        container="body"
                         aria-label="Open AI sidebar settings"
                         aria-haspopup="dialog">
                     <svg width="17" height="17" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
@@ -384,13 +421,29 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
 
             --gt-mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
 
+            /* status taxonomy aliases (design token names) */
+            --gt-needsyou: var(--gt-st-perm);
+            --gt-done:     var(--gt-st-done);
+            --gt-working:  var(--gt-st-working);
+            --gt-idle:     var(--gt-st-ready);
+            --gt-shell:    var(--gt-text-faint);
+            --gt-ghost:    #4A4F57;
+            --gt-rail-line: rgba(255, 255, 255, 0.08);
+            /* Inter-row hairline divider — a touch stronger than --gt-border so
+               the separation reads clearly even on idle rows that carry no
+               background of their own. */
+            --gt-divider:   rgba(255, 255, 255, 0.10);
+            --gt-meta-bg:  rgba(255, 255, 255, 0.055);
+            --gt-meta-br:  rgba(255, 255, 255, 0.09);
+            --gt-meta-tx:  #AEB4BC;
+
             display: block;
             width: 100%;
             height: 100%;
             background: var(--gt-surface-1);
             color: var(--gt-text);
             overflow: hidden;
-            font-size: 17px;
+            font-size: 13px;
             -webkit-font-smoothing: antialiased;
         }
 
@@ -407,16 +460,20 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             display: flex;
             align-items: center;
             gap: 10px;
-            padding: 16px 16px 13px;
+            padding: 13px 14px 11px;
+            flex: none;
         }
-        .sb-header .h-title {
-            font-size: 12.5px;
-            font-weight: 600;
-            letter-spacing: 0.13em;
-            text-transform: uppercase;
-            color: var(--gt-text-faint);
-            white-space: nowrap;
+        .sb-header .sb-logo { width: 22px; height: 22px; flex: none; display: inline-flex; }
+        .sb-header .sb-title { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--gt-text); white-space: nowrap; }
+        .sb-header .sb-title b { color: var(--gt-accent); font-weight: 600; }
+        .sb-header .sb-grow { flex: 1; }
+        .sb-header .sb-attn {
+            display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; flex: none;
+            font-family: var(--gt-mono); font-size: 11.5px; font-weight: 600;
+            color: var(--gt-needsyou); background: var(--gt-accent-soft);
+            padding: 2.5px 7px; border-radius: 99px;
         }
+        .sb-header .sb-attn .pip { width: 5px; height: 5px; border-radius: 99px; background: var(--gt-needsyou); }
         /* ---- empty state (C2) ---- */
         .sb-empty {
             flex: 1;
@@ -450,14 +507,15 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
         .sb-filters {
             display: flex;
             flex-wrap: wrap;
-            gap: 7px;
-            padding: 0 14px 12px;
+            gap: 5px;
+            padding: 2px 12px 11px;
+            flex: none;
         }
         .pill {
             display: inline-flex;
             align-items: center;
-            gap: 7px;
-            padding: 6px 12px;
+            gap: 6px;
+            padding: 4px 9px;
             border-radius: 99px;
             border: 1px solid var(--gt-border);
             background: transparent;
@@ -470,40 +528,42 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
         }
         .pill:hover {
-            background: var(--gt-surface-2);
             color: var(--gt-text);
-            border-color: rgba(255,255,255,0.14);
+            border-color: var(--gt-border-2, rgba(255,255,255,0.14));
         }
         .pill.active {
-            background: var(--gt-accent-soft);
-            border-color: rgba(255, 170, 85, 0.55);
-            color: var(--gt-accent);
+            background: var(--gt-surface-3);
+            border-color: rgba(255,255,255,0.14);
+            color: var(--gt-text);
         }
-        .pill[data-id="needs_permission"].active {
-            background: rgba(255, 159, 69, 0.18);
-            border-color: rgba(255, 159, 69, 0.6);
-            color: var(--gt-st-perm);
+        /* the needs-you filter carries a faint accent when it has items */
+        .pill[data-id="needs_permission"]:not(.zero) {
+            color: var(--gt-needsyou);
+            border-color: color-mix(in srgb, var(--gt-needsyou) 35%, transparent);
         }
+        .pill[data-id="needs_permission"]:not(.zero) .c { color: var(--gt-needsyou); }
+        .pill[data-id="needs_permission"].active { background: var(--gt-accent-soft); }
         .pill[data-id="done"].active {
             background: var(--gt-st-done-soft);
-            border-color: rgba(255, 82, 82, 0.6);
-            color: var(--gt-st-done);
+            border-color: rgba(255, 82, 82, 0.5);
+            color: var(--gt-done);
         }
+        .pill.zero { opacity: 0.5; }
         .pill .c {
             font-family: var(--gt-mono);
-            font-size: 11.5px;
+            font-size: 11px;
             font-weight: 600;
-            opacity: 0.85;
+            color: var(--gt-text-faint);
             font-variant-numeric: tabular-nums;
         }
-        .pill.active .c { opacity: 1; }
+        .pill.active .c { color: var(--gt-text-dim); }
 
         /* ---- list / row ---- */
         .sb-list {
             flex: 1;
             overflow-y: auto;
             overflow-x: hidden;
-            padding: 4px 10px 12px;
+            padding: 2px 8px 8px;
             min-height: 0;
         }
         .sb-list::-webkit-scrollbar { width: 10px; }
@@ -521,447 +581,360 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
         .row {
             position: relative;
             display: grid;
-            grid-template-columns: 26px 18px minmax(0, 1fr) auto;
-            align-items: center;
-            gap: 13px;
-            padding: 13px 14px 13px 12px;
+            grid-template-columns: 18px minmax(0, 1fr);
+            gap: 9px;
+            padding: 9px 10px 9px 6px;
             border-radius: 10px;
             cursor: pointer;
             transition: background-color 0.13s ease;
-            margin-bottom: 3px;
+            /* Our class="row" collides with Bootstrap's grid .row, which
+               otherwise injects negative horizontal margins (pulling the row
+               off the list's left edge so the active left:0 status bar lands
+               off-screen) AND ".row > *" gutter padding (12px) on .rail —
+               left-shifting the dot off the rail line's centre. Zero the
+               gutter var (kills the child padding) and the margins (kills the
+               overhang) so the row owns its own geometry. */
+            --bs-gutter-x: 0;
+            margin: 0;
         }
+        .row:hover { background: var(--gt-surface-2); }
 
-        /* ---- tab index (matches the numeric prefix on Tabby's top tab bar) ---- */
+        /* ---- inter-row hairline divider ----
+           A 1px line at each row's bottom edge, inset left/right so it never
+           runs under the rounded corners of a hover/active wash. Drawn with
+           ::before (::after is taken by the active/status left bars). It's
+           suppressed on a hovered/active row AND on the row directly above one
+           (:has(+ …)), so the highlighted card reads as a clean rounded block
+           rather than a card with a seam line cutting across it. */
+        .row::before {
+            content: "";
+            position: absolute;
+            left: 10px;
+            right: 10px;
+            bottom: 0;
+            height: 1px;
+            background: var(--gt-divider);
+            pointer-events: none;
+        }
+        .row:last-child::before { display: none; }
+        .row:hover::before,
+        .row.active::before,
+        .row:has(+ .row:hover)::before,
+        .row:has(+ .row.active)::before { opacity: 0; }
+
+        /* ---- index (now inline on line1) ---- */
         .num {
             font-family: var(--gt-mono);
-            font-size: 15px;
-            font-weight: 500;
+            font-size: 12.5px;
             color: var(--gt-text-faint);
+            flex: none;
+            width: 15px;
             text-align: right;
             font-variant-numeric: tabular-nums;
             line-height: 1;
         }
-        .row.active .num { color: var(--gt-st-active); font-weight: 600; }
-        .row:hover { background: var(--gt-surface-2); }
+        .row.active .num { color: var(--gt-text-dim); }
+        .subicon { color: var(--gt-ghost); flex: none; display: inline-flex; }
 
-        .row[data-status="no_ai"] { opacity: 0.52; }
-        .row[data-status="no_ai"]:hover { opacity: 0.75; }
+        /* shell rows recede — nearly invisible until hovered */
+        .row[data-status="no_ai"] { opacity: 0.5; }
+        .row[data-status="no_ai"]:hover { opacity: 0.78; }
 
-        /* needs_permission rail — inset shadow only; no background tint.
-           Per the row-background policy, only normal / pinned / active
-           change the row background. The orange ring is enough to draw
-           the eye, doesn't need a wash fighting the pinned/active surfaces. */
+        /* ---- status emphasis: needs-you / done out-rank the rest with a
+               left edge rail + a faint row tint (colour + shape + word, never
+               colour alone). ---- */
         .row[data-status="needs_permission"] {
-            box-shadow: inset 0 0 0 1px rgba(255, 159, 69, 0.35);
+            background: color-mix(in srgb, var(--gt-needsyou) 9%, transparent);
         }
-
-        /* Done row — agent finished, user hasn't engaged with it yet.
-           Same policy as needs_permission: inset ring carries the signal,
-           no background tint. The dot color + status label "done" are the
-           primary cues; the ring is the secondary one. Active+done rows
-           still get the blue "you are here" wash from .row.active below,
-           which is the intended winner when focus and done coincide
-           (markReady fires regardless of focus, see AttentionNotifierService). */
+        .row[data-status="needs_permission"]::after {
+            content: ""; position: absolute; left: 0; top: 5px; bottom: 5px;
+            width: 3px; border-radius: 0 3px 3px 0; background: var(--gt-needsyou);
+        }
         .row[data-status="done"] {
-            box-shadow: inset 0 0 0 1px rgba(255, 82, 82, 0.3);
+            background: color-mix(in srgb, var(--gt-done) 6%, transparent);
+        }
+        .row[data-status="done"]::after {
+            content: ""; position: absolute; left: 0; top: 7px; bottom: 7px;
+            width: 2.5px; border-radius: 0 3px 3px 0; background: var(--gt-done); opacity: 0.8;
         }
 
+        /* ---- active row — "you are here". The only blue in the list. ---- */
         .row.active { background: var(--gt-st-active-bg); }
-        /* Left rail bar: secondary "you are here" cue alongside the bumped
-           background wash. Widened from 2.5px → 4px so it reads at a glance
-           even when the row is scrolled toward an edge or partially obscured
-           by a hover state — defense in depth for the focus indicator after
-           the WeChat-style background bump. */
-        .row.active::before {
-            content: "";
-            position: absolute;
-            left: 0;
-            top: 6px;
-            bottom: 6px;
-            width: 4px;
-            border-radius: 0 3px 3px 0;
-            background: var(--gt-st-active);
+        /* Focused row carries a bold leading-edge bar in the SAME colour as its
+           status dot. It must clear the active wash — a thin blue bar on the
+           blue wash washes out entirely (blue-on-blue), so it's full-height,
+           4px wide, and per-status coloured rather than always the active blue. */
+        .row.active::after {
+            content: ""; position: absolute; left: 0; top: 4px; bottom: 4px;
+            width: 4px; border-radius: 0 3px 3px 0; background: var(--gt-st-active);
         }
-        .row.active .primary { color: var(--gt-text); font-weight: 600; }
+        .row.active[data-status="working"]::after          { background: var(--gt-working); }
+        .row.active[data-status="idle"]::after             { background: var(--gt-idle); }
+        .row.active[data-status="needs_permission"]::after { background: var(--gt-needsyou); }
+        .row.active[data-status="done"]::after             { background: var(--gt-done); }
+        .row.active[data-status="no_ai"]::after            { background: var(--gt-ghost); }
+        .row.active .primary { color: var(--gt-text); font-weight: 650; }
 
         /* ---- user-pinned row (right-click → Pin to top) ----
-           Faint gold wash + gold pin glyph next to the title. Background
-           is intentionally low-alpha so it doesn't fight the .active blue
-           wash when a pinned row is also the currently-focused tab — the
-           two layer rather than clash. Gold is the only colour in the
-           sidebar that isn't already claimed by a status, so "pinned"
+           Faint gold wash + gold pin glyph next to the title. Gold is the
+           only colour in the sidebar not claimed by a status, so "pinned"
            reads independently of status state. */
-        .row.pinned {
-            background: var(--gt-pin-soft);
-        }
-        .row.pinned.active {
-            /* When both, lean active (blue wash + pin glyph still gold). */
-            background: var(--gt-st-active-bg);
-        }
+        .row.pinned { background: var(--gt-pin-soft); }
+        .row.pinned.active { background: var(--gt-st-active-bg); }
         .pin-mark {
             display: inline-flex;
             align-items: center;
             color: var(--gt-pin);
-            margin-right: 5px;
             flex: none;
             line-height: 1;
             /* Explicit CSS sizing reinforces the inline SVG width/height
-               attributes. Without these, a stylesheet that lands later in
-               the cascade (Bootstrap's reset, an OS-event-triggered re-
-               layout after returning from System Settings, …) can make the
-               SVG inflate to the parent's content box. Observed on macOS
-               returning from System Settings → Privacy & Security: the
-               pin icon grew to ~200px square. Attribute-only sizing on
-               <svg> is not enough; CSS dimensions are. */
+               attributes (a late stylesheet — Bootstrap reset, an OS-event
+               relayout — could otherwise inflate the SVG to its content box;
+               observed ~200px after returning from System Settings). */
             width: 11px;
             height: 11px;
         }
-        .pin-mark > svg, svg.pin-mark {
-            width: 11px;
-            height: 11px;
-            flex: none;
+        .pin-mark > svg, svg.pin-mark { width: 11px; height: 11px; flex: none; }
+
+        /* ---- rail line — the continuous vertical thread the status dots ride
+               on, like a timeline / subway map. Drawn full-height per row so
+               consecutive rows join into one unbroken line; each dot's
+               surface-coloured ring (see .dot box-shadow) punches a small gap
+               where the line passes behind it. ---- */
+        .rail {
+            position: relative;
+            display: grid;
+            justify-items: center;   /* dot centred in the rail column */
+            align-items: center;     /* dot rides the row's vertical centre, so the
+                                        rail line shows as two equal segments above
+                                        and below it (timeline "station" look) */
+            align-self: stretch;     /* span the full row height for the line */
+        }
+        .rail::before {
+            content: "";
+            position: absolute;
+            top: -9px;               /* reach up into the row's top padding … */
+            bottom: -9px;            /* … and down, so adjacent rows' lines meet */
+            left: 50%;
+            width: 1.5px;
+            transform: translateX(-50%);
+            background: var(--gt-rail-line);
+            z-index: 0;              /* behind the dot (z-index: 1) */
         }
 
         /* ---- subordinate row (extra leaf inside a SplitTabComponent) ----
-           A subordinate leaf — a non-primary pane in a split tab, whether a
-           plain shell or another AI — renders with a COMPACT variant of the
-           primary row's content so it visibly reads as an attached child:
-           the index number is suppressed (it would just repeat the
-           primary's), padding is tighter, and the dot + text are smaller.
-           The whole row is also indented so the dashed bracket has its own
-           gutter on the left instead of overlapping the num/dot columns.
-           visibleStates always emits subordinates directly below their
-           primary, so the bracket points at a real parent. */
-        .row.subordinate {
-            padding: 7px 14px 7px 26px;
+           Indented, with a dashed rail line + a corner glyph so it reads as an
+           attached child of the primary one row up. The index is suppressed —
+           a split's panes share the parent tab's number, so repeating it is
+           noise. visibleStates emits subordinates directly below their parent. */
+        .row.subordinate { padding-left: 18px; }
+        .row.subordinate .rail::before {
+            background: repeating-linear-gradient(var(--gt-rail-line) 0 2px, transparent 2px 5px);
         }
-        /* The outer tab's index is already shown on the primary one row up;
-           repeating it on the subordinate is noise. visibility:hidden keeps
-           the grid column reserved so the dot + body stay indented further
-           right than the primary's. */
         .row.subordinate .num { visibility: hidden; }
-        .row.subordinate .dot { width: 10px; height: 10px; }
-        .row.subordinate .primary { font-size: 14px; }
-        .row.subordinate .line2 { margin-top: 3px; }
-        .row.subordinate .status { font-size: 12.5px; }
-        .row.subordinate .line3 { margin-top: 2px; }
-        .row.subordinate .path-sub { font-size: 12px; }
-        .row.subordinate .age { font-size: 12px; }
-        .row.subordinate::after {
-            content: "";
-            position: absolute;
-            /* Vertical leg starts well into the row above (which has its own
-               13px top padding + ~32px content height); ending around the
-               compact subordinate's mid-height makes the bracket read as
-               "dropped from the primary". Alpha 0.38 survives the
-               .row[data-status="no_ai"] opacity 0.52 compounding
-               (→ effective ~0.20), still visible for the most common case
-               (shell pane under AI primary). */
-            left: 8px;
-            top: -24px;
-            width: 14px;
-            height: 44px;
-            border-left: 1px dashed rgba(255, 255, 255, 0.38);
-            border-bottom: 1px dashed rgba(255, 255, 255, 0.38);
-            border-bottom-left-radius: 4px;
-            pointer-events: none;
-        }
+        .row.subordinate .primary { font-weight: 500; color: var(--gt-text-dim); }
 
-        /* ---- status rail dot ---- */
-        .rail {
-            display: grid;
-            place-items: center;
-            align-self: stretch;
-        }
+        /* ---- status dot — threaded on the rail line, shaped per status so
+               it never relies on colour alone (colour + shape + word). ---- */
         .dot {
-            width: 14px;
-            height: 14px;
-            border-radius: 99px;
             position: relative;
+            z-index: 1;
+            width: 10px;
+            height: 10px;
+            border-radius: 99px;
             display: block;
             transform-origin: center;
-            /* Soften the done → idle (red → grey) and idle → done (grey → red)
-               transitions so that, paired with the click-sort-pin, the row
-               *fades* between buckets instead of teleporting. Working's
-               pulse animation overrides background-color and isn't affected. */
+            background: var(--gt-shell);
+            /* surface-coloured ring gives the dot a small gap from the rail line */
+            box-shadow: 0 0 0 3px var(--gt-surface-1);
             transition: background-color 0.25s ease, box-shadow 0.25s ease;
         }
-        /* Working — "breathing" dot. Three layers:
-             1. The dot itself scales 1 → 1.22 → 1 each cycle.
-             2. An outer ripple (the 0 0 0 Npx ring) grows from 0 to ~13 px
-                while fading to alpha 0 — radiates outward.
-             3. A static glow halo (the 0 0 Npx blur) that intensifies at the
-                peak of the breath — gives the dot a soft "alive" feel even
-                between ripple peaks.
-           Slightly slower cadence (1.9 s) + ease-in-out feels more like
-           breathing than a tick. */
         .dot[data-status="working"] {
-            background: var(--gt-st-working);
-            box-shadow:
-                0 0 0 0 rgba(76, 175, 80, 0.55),
-                0 0 6px rgba(76, 175, 80, 0.45);
-            animation: ht-pulse 1.9s ease-in-out infinite;
+            background: var(--gt-working);
+            animation: ht-pulse 1.8s ease-out infinite;
         }
-        .dot[data-status="idle"]             { background: var(--gt-st-idle); }
+        .dot[data-status="needs_permission"] {
+            background: var(--gt-needsyou);
+            animation: ht-breathe 1.5s ease-in-out infinite;
+        }
+        .dot[data-status="done"] {
+            background: var(--gt-done);
+            box-shadow: 0 0 0 3px var(--gt-surface-1), 0 0 0 4.5px color-mix(in srgb, var(--gt-done) 45%, transparent);
+        }
+        .dot[data-status="idle"] { background: var(--gt-idle); width: 8px; height: 8px; }
         .dot[data-status="no_ai"] {
             background: transparent;
-            box-shadow: inset 0 0 0 1.5px var(--gt-text-faint);
+            box-shadow: inset 0 0 0 1.5px var(--gt-ghost), 0 0 0 3px var(--gt-surface-1);
+            width: 8px; height: 8px;
         }
-        .dot[data-status="needs_permission"] { background: var(--gt-st-perm); }
-        /* Done — solid red, steady halo. No pulse: it shares the column with
-           working's pulsing green dot, and a second animation in the same
-           viewport reads as chaos. The halo + tinted row background carry
-           enough weight on their own. */
-        .dot[data-status="done"] {
-            background: var(--gt-st-done);
-            box-shadow: 0 0 0 3px var(--gt-st-done-ring);
-        }
-
+        /* Working — soft outward ripple. Done/needs-you carry their own cues
+           (ring / breathe); only working + needs-you animate so the list reads
+           calm, not busy. */
         @keyframes ht-pulse {
-            0% {
-                box-shadow:
-                    0 0 0 0 rgba(76, 175, 80, 0.6),
-                    0 0 4px rgba(76, 175, 80, 0.35);
-                transform: scale(1);
-            }
-            50% {
-                box-shadow:
-                    0 0 0 13px rgba(76, 175, 80, 0),
-                    0 0 16px rgba(76, 175, 80, 0.75);
-                transform: scale(1.22);
-            }
-            100% {
-                box-shadow:
-                    0 0 0 0 rgba(76, 175, 80, 0),
-                    0 0 4px rgba(76, 175, 80, 0.35);
-                transform: scale(1);
-            }
+            0%   { box-shadow: 0 0 0 3px var(--gt-surface-1), 0 0 0 3px color-mix(in srgb, var(--gt-working) 55%, transparent); }
+            70%  { box-shadow: 0 0 0 3px var(--gt-surface-1), 0 0 0 8px rgba(76, 175, 80, 0); }
+            100% { box-shadow: 0 0 0 3px var(--gt-surface-1), 0 0 0 8px rgba(76, 175, 80, 0); }
+        }
+        @keyframes ht-breathe {
+            0%, 100% { box-shadow: 0 0 0 3px var(--gt-surface-1), 0 0 0 2px color-mix(in srgb, var(--gt-needsyou) 60%, transparent); }
+            50%      { box-shadow: 0 0 0 3px var(--gt-surface-1), 0 0 0 5px color-mix(in srgb, var(--gt-needsyou) 22%, transparent); }
         }
 
         /* ---- body ---- */
         .body { min-width: 0; }
+
+        /* line1 — index · name · pin · (spacer) · status word */
         .line1 {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 6px;
             min-width: 0;
         }
-        /* Primary identifier on line1 — folder basename (the project the user
-           is in). Falls back to the tab title when cwd isn't reported. Single
-           line with end-ellipsis; the full path lives on line3 (.path-sub). */
+        .l1-sp { flex: 1; }
+        /* Primary identifier — folder basename (the project the user is in).
+           Falls back to the tab title when cwd isn't reported. Single line with
+           end-ellipsis; the full path lives on line3 (on every AI row). */
         .primary {
-            font-size: 17px;
-            font-weight: 500;
+            font-size: 16px;
+            font-weight: 550;
             color: var(--gt-text);
-            line-height: 1.3;
-            /* Don't grow — the status sits right after the name so the two read
-               as a pair; the name shrinks + ellipsises when crowded. */
+            letter-spacing: -0.005em;
             flex: 0 1 auto;
             min-width: 0;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
-        .attn {
-            width: 8px;
-            height: 8px;
-            border-radius: 99px;
-            background: var(--gt-st-perm);
+        .status {
             flex: none;
-            animation: ht-attn 1.2s ease-in-out infinite;
+            font-size: 13.5px;
+            font-weight: 600;
+            white-space: nowrap;
+            letter-spacing: -0.005em;
         }
-        @keyframes ht-attn { 50% { opacity: 0.25; } }
+        .status[data-status="working"]          { color: var(--gt-working); }
+        .status[data-status="idle"]             { color: var(--gt-idle); }
+        .status[data-status="no_ai"]            { color: var(--gt-text-faint); font-weight: 500; }
+        .status[data-status="needs_permission"] { color: var(--gt-needsyou); }
+        .status[data-status="done"]             { color: var(--gt-done); }
 
-        /* line2 — the fused agent+model label. Single child, so no wrapping. */
+        /* line2 — neutral agent·model pill · token usage · (spacer) · age */
         .line2 {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            margin-top: 5px;
+            min-width: 0;
+        }
+        .l2-sp { flex: 1; }
+        .age { flex: none; font-family: var(--gt-mono); font-size: 12.5px; color: var(--gt-text-faint); }
+
+        /* Token usage ("27k in · 284k out") — dim mono metadata. */
+        .usage {
+            font-family: var(--gt-mono);
+            font-size: 12.5px;
+            line-height: 1;
+            color: color-mix(in srgb, var(--gt-text-faint), var(--gt-text-dim));
+            white-space: nowrap;
+            flex: none;
+        }
+        .usage.shell-cwd {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            min-width: 0;
+            flex: 0 1 auto;
+            opacity: 0.85;
+        }
+
+        /* line3 — full path (every AI row with a cwd) + process-tree counts. */
+        .line3 {
             display: flex;
             align-items: center;
             gap: 8px;
             margin-top: 5px;
             min-width: 0;
-        }
-        /* line-tokens — session token usage on its own row. */
-        .line-tokens {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-top: 4px;
-            min-width: 0;
-            flex-wrap: wrap;
-            row-gap: 3px;
-        }
-        /* line-counts — concurrency counts (agents / shell / monitor). Full-word
-           labels flex-wrap rather than ellipsis-truncating when crowded. */
-        .line-counts {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-top: 3px;
-            min-width: 0;
-            flex-wrap: wrap;
-            row-gap: 3px;
-        }
-        /* Token usage ("20k input  20k output") — dim mono, so it reads as
-           quiet metadata under the agent label. */
-        .usage {
-            font-family: var(--gt-mono);
-            font-size: 11px;
-            font-weight: 500;
-            line-height: 1;
-            color: var(--gt-text-faint);
-            opacity: 0.85;
-            white-space: nowrap;
-            align-self: center;
-            flex: none;
-        }
-        .status {
-            font-size: 15px;
-            font-weight: 500;
-            white-space: nowrap;
-            flex: none;
-        }
-        .status[data-status="working"]          { color: var(--gt-st-working); }
-        .status[data-status="idle"]             { color: var(--gt-st-ready); }
-        .status[data-status="no_ai"]            { color: var(--gt-text-faint); }
-        .status[data-status="needs_permission"] { color: var(--gt-st-perm); font-weight: 600; }
-        .status[data-status="done"]             { color: var(--gt-st-done); font-weight: 600; }
-
-        /* Inline subagent-count pill on line2 ("· 2 agents"). Leading bullet
-           via ::before so the template doesn't carry literal separators. The
-           .accent variant uses brand honey so the backgrounded-work indicator
-           pops. Shrinks/clips rather than pushing status off-row on narrow
-           sidebars. */
-        .micro {
             font-family: var(--gt-mono);
             font-size: 12.5px;
-            font-weight: 500;
-            color: var(--gt-text-faint);
-            white-space: nowrap;
-            /* Don't shrink/clip — the count label must stay whole. When the
-               row can't hold them, .line2's flex-wrap drops them to the next
-               line rather than truncating mid-word. */
-            flex: none;
+            color: color-mix(in srgb, var(--gt-text-faint), var(--gt-text-dim));
         }
-        .micro::before {
-            content: "· ";
-            color: var(--gt-text-faint);
-            opacity: 0.6;
-        }
-        /* First count on its own line has nothing to its left, so drop the
-           leading bullet (it now reads "2 agents · 3 shell", not "· 2 agents"). */
-        .line-counts .micro:first-child::before { content: none; }
-        .micro.accent {
-            color: var(--gt-accent);
-            font-weight: 600;
-        }
-
-        .line3 {
-            display: flex;
-            align-items: flex-start;
-            margin-top: 4px;
-            min-width: 0;
-        }
-        /* Full path under the folder name — mono, dim, up to 2 lines. Long
-           paths are pre-truncated with a middle '…' by displayCwd, so the
-           END (most specific directory) is always visible. */
+        .l3-sp { flex: 1; }
+        /* Full path under the folder name — mono, dim, single line. Long paths
+           are pre-truncated with a middle '…' by displayCwd, so the END (most
+           specific directory) stays visible. */
         .path-sub {
-            font-family: var(--gt-mono);
-            font-size: 13.5px;
-            line-height: 1.35;
-            color: var(--gt-text-faint);
-            display: -webkit-box;
-            -webkit-box-orient: vertical;
-            -webkit-line-clamp: 2;
             overflow: hidden;
-            overflow-wrap: anywhere;
-            word-break: break-all;
+            text-overflow: ellipsis;
+            white-space: nowrap;
             min-width: 0;
-            flex: 1 1 auto;
         }
+        .conc { flex: none; display: inline-flex; gap: 8px; }
+        .conc span { white-space: nowrap; }
+        .conc b { color: var(--gt-text-dim); font-weight: 600; }
 
-        /* ---- meta column ---- */
-        .meta {
-            display: flex;
-            flex-direction: column;
-            align-items: flex-end;
-            gap: 6px;
-            align-self: flex-start;
-            padding-top: 2px;
-        }
-        .age {
-            font-family: var(--gt-mono);
-            font-size: 13.5px;
-            color: var(--gt-text-faint);
-        }
-
-        /* ---- agent + model fused label ----
-           One background pill holding the agent name (bold) and the active
-           model (dimmer, same hue) so they read as a single labelled unit. */
+        /* ---- agent + model pill (METADATA — neutral) ----
+           One quiet pill holding a tool glyph, the tool name, and the active
+           model. Deliberately NEUTRAL grey: this is metadata, not a status, so
+           it must never read as a saturated status colour (green working / blue
+           ready / red done / orange needs-you). (claude was once pink #E879A6,
+           which read as a red "done" chip — exactly what to avoid.) */
         .agent-tag {
             display: inline-flex;
-            align-items: baseline;
-            gap: 6px;
+            align-items: center;
+            gap: 5px;
             max-width: 100%;
             min-width: 0;
             font-family: var(--gt-mono);
-            padding: 4px 7px;
-            border-radius: 5px;
+            font-size: 12.5px;
             line-height: 1;
+            padding: 3px 7px 3px 5px;
+            border-radius: 5px;
+            background: var(--gt-meta-bg);
+            border: 1px solid var(--gt-meta-br);
+            color: var(--gt-meta-tx);
             white-space: nowrap;
             flex: none;
         }
-        .agent-name {
-            font-size: 12.5px;
-            font-weight: 600;
-            flex: none;
-        }
-        /* Active model — same hue as the agent name but dimmed; truncates
-           inside the pill rather than overflowing it. */
+        .agent-tag .tg { font-size: 12px; opacity: 0.75; flex: none; }
+        .agent-name { font-weight: 600; color: var(--gt-meta-tx); flex: none; }
         .agent-model {
-            font-size: 11px;
-            font-weight: 500;
-            opacity: 0.62;
+            color: var(--gt-text-faint);
             min-width: 0;
             overflow: hidden;
             text-overflow: ellipsis;
         }
-        /* Palette: claude moved off honey (brand) so the brand colour isn't
-           overloaded onto a status chip. */
-        .agent-tag[data-tool="claude"]      { color: #E879A6; background: rgba(232, 121, 166, 0.16); }
-        .agent-tag[data-tool="codex"]       { color: #5BC8E5; background: rgba(91, 200, 229, 0.16); }
-        .agent-tag[data-tool="gemini"]      { color: #6FA0F2; background: rgba(111, 160, 242, 0.16); }
-        .agent-tag[data-tool="opencode"]    { color: #B794F4; background: rgba(183, 148, 244, 0.16); }
 
         /* ---- footer (aggregate stats) ---- */
         .sb-footer {
             display: flex;
             align-items: center;
-            gap: 12px;
-            padding: 11px 16px;
+            gap: 11px;
+            flex-wrap: wrap;
+            padding: 9px 14px;
             border-top: 1px solid var(--gt-border);
             font-family: var(--gt-mono);
-            font-size: 12px;
+            font-size: 12.5px;
             color: var(--gt-text-dim);
+            flex: none;
         }
         .sb-footer .stat {
             display: inline-flex;
             align-items: center;
-            gap: 6px;
+            gap: 5px;
         }
         .sb-footer .stat i {
-            width: 8px;
-            height: 8px;
+            width: 7px;
+            height: 7px;
             border-radius: 99px;
             display: block;
         }
-        .sb-footer .stat.work          { color: var(--gt-st-working); }
-        .sb-footer .stat.work i        { background: var(--gt-st-working); }
-        .sb-footer .stat.idle          { color: var(--gt-text-dim); }
-        .sb-footer .stat.idle i        { background: var(--gt-st-idle); }
-        .sb-footer .stat.attn-stat     { color: var(--gt-st-perm); }
-        .sb-footer .stat.attn-stat i   { background: var(--gt-st-perm); }
-        .sb-footer .stat.done-stat     { color: var(--gt-st-done); font-weight: 600; }
-        .sb-footer .stat.done-stat i   { background: var(--gt-st-done); }
+        .sb-footer .stat.muted         { color: var(--gt-text-faint); }
+        .sb-footer .stat.work          { color: var(--gt-working); }
+        .sb-footer .stat.work i        { background: var(--gt-working); }
+        .sb-footer .stat.idle i        { background: var(--gt-idle); }
+        .sb-footer .stat.attn-stat     { color: var(--gt-needsyou); }
+        .sb-footer .stat.attn-stat i   { background: var(--gt-needsyou); }
+        .sb-footer .stat.done-stat     { color: var(--gt-done); }
+        .sb-footer .stat.done-stat i   { background: var(--gt-done); }
 
         /* ---- bottom action row (screenshot etc.) ----
            Sits below the aggregate-stats footer. Always visible — the button
@@ -970,11 +943,35 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
            start). */
         .sb-actions {
             display: flex;
-            align-items: center;
-            gap: 9px;
-            padding: 10px 14px 14px;
+            align-items: stretch;
+            gap: 7px;
+            padding: 10px 12px 12px;
             border-top: 1px solid var(--gt-border);
+            flex: none;
         }
+        /* Screenshot is the primary action — a wide labelled button (design);
+           split-shell + settings are square icon buttons beside it. */
+        .split-action { flex: 1; }
+        .split-action .action-btn.split-main {
+            flex: 1;
+            width: auto;
+            gap: 8px;
+            padding: 0 12px;
+            font-size: 12.5px;
+            font-weight: 550;
+            color: var(--gt-text);
+        }
+        .split-action .action-btn.split-main .btn-label { white-space: nowrap; }
+        .split-action .action-btn.split-main.muted:not(:disabled) { opacity: 0.55; }
+        .split-action .action-btn.split-caret { width: 28px; }
+        .split-main .spin {
+            width: 12px; height: 12px; flex: none;
+            border: 2px solid var(--gt-border);
+            border-top-color: var(--gt-accent);
+            border-radius: 99px;
+            animation: gt-spin 0.7s linear infinite;
+        }
+        @keyframes gt-spin { to { transform: rotate(360deg); } }
         .action-btn {
             /* Icon-only feature buttons. Fixed compact square so the row
                packs left-to-right as more buttons get added later — not a
@@ -992,16 +989,16 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            width: 36px;
-            height: 32px;
-            min-height: 32px;
-            max-height: 32px;
+            width: 34px;
+            height: 34px;
+            min-height: 34px;
+            max-height: 34px;
             padding: 0;
             margin: 0;
             line-height: 1;
             vertical-align: middle;
-            border-radius: 8px;
-            background: var(--gt-surface-2);
+            border-radius: 7px;
+            background: var(--gt-surface-3);
             border: 1px solid var(--gt-border);
             color: var(--gt-text-dim);
             cursor: pointer;
@@ -1049,10 +1046,10 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
         .split-action {
             position: relative;
             display: flex;
-            align-items: center;
-            height: 32px;
+            align-items: stretch;
+            height: 34px;
             box-sizing: border-box;
-            flex: 0 0 auto;
+            flex: 1;
             line-height: 1;
             vertical-align: middle;
         }
@@ -1130,7 +1127,8 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
         /* Gear button sits at the right end of the action row. No popover
            wrapping anymore — the button is a single tap target that opens
            a modal — so margin-left:auto goes directly on the button. */
-        .action-btn.settings-btn { margin-left: auto; }
+        /* Screenshot group now fills the row (flex:1), so split-shell + settings
+           sit flush at the right with the toolbar gap — no auto-margin needed. */
 
         /* ============================================================
            Settings modal — rendered by NgbModal as an EmbeddedView from
@@ -1609,17 +1607,30 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         }
     }
 
+    /**
+     * Display string for a hotkey id's first binding, read live from config so
+     * a rebind in Settings → Hotkeys is reflected immediately. Tabby stores
+     * bindings as `⌘-Shift-G` (macOS) / `Ctrl-Shift-G` (Win/Linux); we swap the
+     * `-` joiner for `+` for a conventional shortcut look. Empty string when the
+     * id is unbound, so callers can omit the hint entirely.
+     */
+    hotkeyHint (id: string): string {
+        const binding = (this.config.store?.hotkeys?.[id] ?? [])[0]
+        if (typeof binding !== 'string' || !binding) return ''
+        return binding.split('-').join('+')
+    }
+
     screenshotTitle (): string {
-        if (this.capturing) return 'Capture in progress…'
-        if (!this.activeIsAi) return 'Focus an AI agent tab to enable screenshot paste'
-        return 'Take a screenshot (GlanceTerm stays visible) — drag to select, '
-            + 'annotate, then double-click / Enter to paste the path into the focused AI agent. '
-            + 'Use the ▾ menu to hide GlanceTerm first.'
+        const hk = this.hotkeyHint('ai-screenshot')
+        const key = hk ? ` (${hk})` : ''
+        return `Screenshot${key}`
     }
 
     splitTitle (): string {
-        if (this.isSplitOpenInActiveTab()) return 'Close shell split'
-        return 'Open shell in current tab CWD'
+        const hk = this.hotkeyHint('ai-split-shell')
+        const key = hk ? ` (${hk})` : ''
+        if (this.isSplitOpenInActiveTab()) return `Close split${key}`
+        return `Split shell${key}`
     }
 
     splitAriaLabel (): string {
@@ -2083,6 +2094,20 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
             opencode: 'OpenCode',
         }
         return tags[tool] || tool.charAt(0).toUpperCase() + tool.slice(1)
+    }
+
+    /** Single-glyph mark shown before the tool name in the neutral agent pill
+     *  (design spec). Purely decorative — inherits the pill's neutral colour,
+     *  never a status hue. Unknown tools fall back to a generic terminal mark. */
+    toolGlyph (tool: string | null): string {
+        if (!tool) return ''
+        const glyphs: Record<string, string> = {
+            claude:   '✳',
+            codex:    '⬡',
+            gemini:   '✦',
+            opencode: '◇',
+        }
+        return glyphs[tool] || '›'
     }
 
     /** Short, de-noised model label for the chip next to the agent tag. Drops

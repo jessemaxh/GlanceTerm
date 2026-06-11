@@ -152,11 +152,19 @@ export class ScreenshotService {
                     return null
                 }
 
+                // globalShortcut (main-process module) lets Esc cancel the
+                // overlay even when the frameless window can't take key focus
+                // on macOS. Best-effort: a getBuiltin failure must not abort the
+                // capture — the overlay still works via its toolbar buttons.
+                let globalShortcut: any = null
+                try { globalShortcut = remote.getBuiltin('globalShortcut') } catch { /* */ }
+
                 const result: CaptureResult = await openCaptureWindow({
                     displayBounds: target.bounds,
                     scaleFactor: target.scaleFactor,
                     screenDataURL,
                     BrowserWindow: remote.BrowserWindow,
+                    globalShortcut,
                 })
 
                 if (!result.dataURL) return null

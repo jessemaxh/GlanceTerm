@@ -22,6 +22,16 @@ interface OpenOpts {
     screenDataURL: string
     /** Constructor for BrowserWindow, fished out of @electron/remote in the caller. */
     BrowserWindow: typeof BrowserWindow
+    /** Electron `globalShortcut` (via @electron/remote). Lets Esc cancel the
+     *  session even when the frameless/transparent/screen-saver-level overlay
+     *  can't become the macOS *key window* (a borderless NSWindow reports
+     *  canBecomeKeyWindow=NO, so the page's own keydown never sees the key).
+     *  Optional — capture still works without it; the page-level Esc handler
+     *  covers platforms where the overlay is focusable. */
+    globalShortcut?: {
+        register (accelerator: string, callback: () => void): boolean
+        unregister (accelerator: string): void
+    }
 }
 
 /**
@@ -45,6 +55,16 @@ export async function openCaptureWindow (opts: OpenOpts): Promise<CaptureResult>
         frame: false,
         transparent: true,
         fullscreen: false,
+        // macOS clamps a normal (non-fullscreen) window's frame to the display's
+        // WORK AREA — i.e. below the menu bar. Without this, the overlay opens at
+        // y≈menuBarHeight even though we asked for y=0, so the full-display
+        // snapshot it paints is pushed down by one menu-bar height: the real menu
+        // bar stays visible above the overlay (band 1) and the snapshot's own menu
+        // bar lands just below it (band 2) — the "two toolbars" + whole-screen
+        // downward "jitter". `enableLargerThanScreen` lifts the work-area clamp so
+        // the window can actually occupy y=0..height and cover the menu bar, making
+        // the snapshot line up 1:1 with the real screen behind it.
+        enableLargerThanScreen: true,
         // NO kiosk on macOS. Kiosk applies NSApplicationPresentationHideDock
         // (and HideMenuBar) — Electron has a long-standing bug where closing
         // a kiosk window doesn't restore those flags, leaving the user with
@@ -68,6 +88,17 @@ export async function openCaptureWindow (opts: OpenOpts): Promise<CaptureResult>
     })
 
     win.setAlwaysOnTop(true, 'screen-saver')
+    // Re-assert the full-display frame AFTER construction. macOS may still have
+    // clamped the initial frame to the work area during `new BrowserWindow`
+    // (the constructor applies position before our options fully settle); with
+    // `enableLargerThanScreen` now in effect this setBounds sticks at y=0 and
+    // covers the menu-bar strip, so the snapshot aligns pixel-for-pixel.
+    win.setBounds({
+        x: displayBounds.x,
+        y: displayBounds.y,
+        width: displayBounds.width,
+        height: displayBounds.height,
+    })
     // On macOS the overlay should show across all spaces so a user with the
     // Mission Control workspace picker open can still snip them.
     try { (win as any).setVisibleOnAllWorkspaces?.(true, { visibleOnFullScreen: true }) } catch { /* */ }
@@ -78,6 +109,17 @@ export async function openCaptureWindow (opts: OpenOpts): Promise<CaptureResult>
     return new Promise<CaptureResult>((resolve) => {
         let settled = false
         let shown = false
+        // Session-scoped Esc → cancel. The page registers its own keydown Esc,
+        // but a frameless transparent screen-saver-level overlay often can't
+        // become the macOS key window, so that handler never fires. A global
+        // shortcut sidesteps focus entirely; it's torn down the instant the
+        // session settles (in `done`) so Esc isn't swallowed app-wide after.
+        let escRegistered = false
+        const unregisterEsc = (): void => {
+            if (!escRegistered) return
+            escRegistered = false
+            try { opts.globalShortcut?.unregister('Escape') } catch { /* */ }
+        }
         // Reveal the overlay only once its first frame is painted (the 'ready'
         // handshake below). Showing while the renderer hasn't drawn yet flashes
         // the live desktop through the transparent window for a frame before the
@@ -91,6 +133,7 @@ export async function openCaptureWindow (opts: OpenOpts): Promise<CaptureResult>
         const done = (result: CaptureResult): void => {
             if (settled) return
             settled = true
+            unregisterEsc()
             try {
                 // Belt-and-braces: if a future change ever reintroduces kiosk
                 // (or a future Electron defaults a different presentation flag
@@ -104,6 +147,16 @@ export async function openCaptureWindow (opts: OpenOpts): Promise<CaptureResult>
             try { win.close() } catch { /* */ }
             resolve(result)
         }
+
+        // Register Esc → cancel now (before the overlay even paints) so an early
+        // Esc — while the snapshot is still decoding — also aborts cleanly.
+        // register() returns false if some other app already holds Esc; we fall
+        // back to the page-level handler in that case. globalShortcut intercepts
+        // the key ahead of any window, so the page handler simply doesn't
+        // double-fire while this is active (and `done` is idempotent anyway).
+        try {
+            escRegistered = opts.globalShortcut?.register('Escape', () => done({ dataURL: null, rect: null })) ?? false
+        } catch { /* best-effort; page-level Esc still covers focusable platforms */ }
 
         win.webContents.once('did-finish-load', async () => {
             // Inject a postMessage listener that forwards results back to main
