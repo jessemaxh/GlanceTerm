@@ -80,7 +80,12 @@ class AiSidebarContribProvider extends SidebarProvider {
             component: AiSidebarComponent,
             side: 'left',
             defaultWidth: 440,
-            minWidth: 300,
+            // Floor chosen so the row's basic info stays readable at the
+            // narrowest drag: body width ≈ slotWidth − 169px (num/rail/meta/
+            // gaps/padding/scrollbar), so 360px leaves ~190px of body — enough
+            // to keep the agent+model label and the "Nk input Nk output" token
+            // line each on a single line instead of wrapping/ellipsising.
+            minWidth: 360,
             maxWidth: 720,
             defaultVisible: true,
         }]
