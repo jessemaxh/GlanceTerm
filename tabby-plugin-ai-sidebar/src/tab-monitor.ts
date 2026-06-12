@@ -877,7 +877,12 @@ export class TabMonitor implements OnDestroy {
         aiTool: AiTool | null,
     ): Promise<number> {
         const now = Date.now()
-        const live = new Set(await childrenOf(aiPid))
+        const liveArr = await childrenOf(aiPid)
+        // null = the pgrep probe FAILED (timeout/error under heavy load), which
+        // is NOT the same as "no children". Skip eviction on a failed probe so
+        // a transient timeout can't drop a still-live bg shell.
+        const probeOk = liveArr !== null
+        const live = new Set(liveArr ?? [])
 
         // Ensure both trackers exist.
         let firstSeen = this.bgChildrenFirstSeen.get(inner)
@@ -891,13 +896,19 @@ export class TabMonitor implements OnDestroy {
             this.bgConfirmedPids.set(inner, confirmed)
         }
 
-        // Evict pids no longer alive from BOTH trackers — `kill` /
-        // graceful exit / Claude calling KillShell all converge here.
-        for (const pid of Array.from(firstSeen.keys())) {
-            if (!live.has(pid)) firstSeen.delete(pid)
-        }
-        for (const pid of Array.from(confirmed)) {
-            if (!live.has(pid)) confirmed.delete(pid)
+        // Evict pids no longer alive from BOTH trackers — `kill` / graceful
+        // exit / Claude calling KillShell all converge here. ONLY when the
+        // probe succeeded: a failed/timed-out pgrep returns null (live is empty
+        // only as a fallback), and evicting against it would drop a live bg
+        // shell whose bg-arrival hook was already consumed → count stuck at 0.
+        // On probe failure we keep prior state; it reconciles next good tick.
+        if (probeOk) {
+            for (const pid of Array.from(firstSeen.keys())) {
+                if (!live.has(pid)) firstSeen.delete(pid)
+            }
+            for (const pid of Array.from(confirmed)) {
+                if (!live.has(pid)) confirmed.delete(pid)
+            }
         }
 
         // Age newly-observed pids into firstSeen (they enter the heuristic
@@ -1376,7 +1387,7 @@ function ancestorsOf (pid: number, snapshot: ProcessTreeSnapshot, maxDepth: numb
  *   still present in 10/11; if missing, catch returns empty and the
  *   bg-count badge just stays at 0).
  */
-async function childrenOf (pid: number): Promise<number[]> {
+async function childrenOf (pid: number): Promise<number[] | null> {
     if (process.platform === 'win32') {
         const out = await runProbe(
             'wmic',
@@ -1390,10 +1401,27 @@ async function childrenOf (pid: number): Promise<number[]> {
         }
         return pids
     }
-    const out = await runProbe('pgrep', ['-P', String(pid)], 300)
-    return out.trim().split(/\s+/)
-        .map(s => parseInt(s, 10))
-        .filter(n => Number.isFinite(n) && n > 0)
+    // CRITICAL: tell "genuinely no children" ([]) apart from "probe failed"
+    // (null). pgrep exits 0 with the child pids, exits 1 with NO output when
+    // nothing matches, and TIMES OUT / errors when a build pins every core.
+    // The caller evicts confirmed bg pids against this set — evicting on a
+    // *failed* probe drops a live bg shell whose bg-arrival hook was already
+    // consumed (and won't re-fire), sticking the shell count at 0 for the rest
+    // of the session (the observed "0 shells while a build runs" bug). Return
+    // null on failure so the caller can skip eviction. 1.5s timeout (was 300ms
+    // — far too tight under heavy load) makes the timeout path rare.
+    try {
+        const { stdout } = await execFileAsync('pgrep', ['-P', String(pid)], {
+            encoding: 'utf8', timeout: 1_500, windowsHide: true,
+        })
+        return stdout.trim().split(/\s+/)
+            .map(s => parseInt(s, 10))
+            .filter(n => Number.isFinite(n) && n > 0)
+    } catch (err: any) {
+        // pgrep exits 1 with no signal when nothing matches — a real empty set.
+        if (err && err.code === 1 && !err.signal) return []
+        return null   // timeout / SIGTERM / spawn failure — unknown, do NOT evict
+    }
 }
 
 /**
