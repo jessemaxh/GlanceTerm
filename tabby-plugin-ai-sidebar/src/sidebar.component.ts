@@ -886,13 +886,18 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
         }
         .conc b { color: var(--gt-proc); font-weight: 700; margin-right: 3px; }
 
-        /* ---- agent + model pill (METADATA — neutral) ----
-           One quiet pill holding a tool glyph, the tool name, and the active
-           model. Deliberately NEUTRAL grey: this is metadata, not a status, so
-           it must never read as a saturated status colour (green working / blue
-           ready / red done / orange needs-you). (claude was once pink #E879A6,
-           which read as a red "done" chip — exactly what to avoid.) */
+        /* ---- agent + model pill (BRAND-THEMED, default) ----
+           One pill holding a tool glyph, the tool name, and the active model.
+           Brand mode: the glyph + name take the agent's brand colour and the
+           chip gets a faint matching tint, so each agent reads in its own
+           colour (Claude coral / Codex green / Gemini blue / opencode purple).
+           The MODEL name stays neutral grey (it's metadata), and the chip tint
+           is kept low (12% brand over the neutral --gt-meta chip) so it never
+           reads as a saturated STATUS colour (green working / red done / orange
+           needs-you). The --brand var is set per agent via [data-tool] below;
+           the default is the old neutral grey for any unbranded tool. */
         .agent-tag {
+            --brand: var(--gt-meta-tx);
             display: inline-flex;
             align-items: center;
             gap: 5px;
@@ -903,14 +908,19 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             line-height: 1;
             padding: 3px 7px 3px 5px;
             border-radius: 5px;
-            background: var(--gt-meta-bg);
-            border: 1px solid var(--gt-meta-br);
+            background: color-mix(in srgb, var(--brand) 12%, var(--gt-meta-bg));
+            border: 1px solid color-mix(in srgb, var(--brand) 28%, transparent);
             color: var(--gt-meta-tx);
             white-space: nowrap;
             flex: none;
         }
-        .agent-tag .tg { font-size: 12px; opacity: 0.75; flex: none; }
-        .agent-name { font-weight: 600; color: var(--gt-meta-tx); flex: none; }
+        /* Per-agent brand colours (drives glyph + name + chip tint). */
+        .agent-tag[data-tool="claude"]   { --brand: #D97757; }
+        .agent-tag[data-tool="codex"]    { --brand: #10A37F; }
+        .agent-tag[data-tool="gemini"]   { --brand: #4285F4; }
+        .agent-tag[data-tool="opencode"] { --brand: #A855F7; }
+        .agent-tag .tg { font-size: 12px; color: var(--brand); opacity: 0.9; flex: none; }
+        .agent-name { font-weight: 600; color: var(--brand); flex: none; }
         .agent-model {
             color: var(--gt-text-faint);
             min-width: 0;
