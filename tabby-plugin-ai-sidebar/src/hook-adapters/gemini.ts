@@ -159,14 +159,26 @@ export class GeminiHookAdapter extends HookAdapter {
                 const list = hooks[ev.event] ?? []
                 const ours = this.findAllOurEntries(list)
                 if (ours.length > 0) {
-                    // Reconcile the command on re-install: if the format drifts
-                    // (e.g. the appended arg changes), bring existing entries to
-                    // the current spec instead of leaving them stale forever.
-                    for (const existing of ours) {
-                        if (existing.command !== command) {
-                            existing.command = command
-                            changed = true
-                        }
+                    // Reconcile the command on re-install (format drift, e.g. the
+                    // appended arg changes) AND collapse any duplicate GlanceTerm
+                    // entries to one (residue from copy-paste / an earlier bug).
+                    // The user's own hooks are untouched. Idempotent: a single
+                    // already-correct entry is left as-is (no settings write).
+                    let kept = false
+                    let droppedDup = false
+                    for (const m of list) {
+                        if (!Array.isArray(m.hooks)) continue   // foreign/malformed matcher — leave untouched
+                        m.hooks = m.hooks.filter(h => {
+                            if (!this.isOurEntry(h)) return true
+                            if (kept) { changed = true; droppedDup = true; return false }   // drop duplicate
+                            kept = true
+                            if (h.command !== command) { h.command = command; changed = true }
+                            return true
+                        })
+                    }
+                    if (droppedDup) {
+                        const compacted = list.filter(m => !Array.isArray(m.hooks) || m.hooks.length > 0)
+                        if (compacted.length !== list.length) { hooks[ev.event] = compacted; changed = true }
                     }
                     continue
                 }
@@ -192,11 +204,11 @@ export class GeminiHookAdapter extends HookAdapter {
         })
     }
 
-    async uninstallHooks (): Promise<void> {
+    async uninstallHooks (): Promise<boolean> {
         const settingsPath = this.configFilePath()
-        await withFileLock(`${settingsPath}.lock`, async () => {
+        return withFileLock(`${settingsPath}.lock`, async () => {
             const r = await this.readSettings()
-            if (r.kind !== 'ok' || !r.settings.hooks) return
+            if (r.kind !== 'ok' || !r.settings.hooks) return false
 
             let changed = false
             for (const [event, matchers] of Object.entries(r.settings.hooks)) {
@@ -215,6 +227,7 @@ export class GeminiHookAdapter extends HookAdapter {
             }
 
             if (changed) await this.writeSettings(r.settings)
+            return changed
         })
     }
 

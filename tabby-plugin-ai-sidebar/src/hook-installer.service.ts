@@ -90,6 +90,31 @@ export class HookInstallerService {
         }
     }
 
+    /**
+     * Remove GlanceTerm's hook entries from EVERY agent's config — backs the
+     * "Remove GlanceTerm hooks" settings button and the clean-uninstall path.
+     * Attempts ALL adapters (not just detected ones) so residue from an agent
+     * that's since been removed is cleaned too. Each adapter's uninstallHooks()
+     * strips ONLY our own entries (matched by the `glanceterm-hook` marker),
+     * leaving the user's other hooks intact. Returns the display names of the
+     * agents that actually had our hooks removed, for the confirmation toast.
+     */
+    async uninstallAll (): Promise<string[]> {
+        const removed: string[] = []
+        for (const adapter of this.registry.all()) {
+            try {
+                // Don't gate on isInstalled() (which requires EVERY event to be
+                // present) — a partially-installed agent still has real residue
+                // to strip. uninstallHooks() reports whether it removed anything.
+                if (await adapter.uninstallHooks()) removed.push(adapter.displayName)
+            } catch (e: any) {
+                // eslint-disable-next-line no-console
+                console.error(`[glanceterm] could not remove ${adapter.displayName} hooks:`, e?.message ?? e)
+            }
+        }
+        return removed
+    }
+
     private async tryInstall (adapter: HookAdapter): Promise<InstallReport | null> {
         if (!this.gatePasses(adapter)) {
             // Quiet log — common case: user has GlanceTerm but not this agent.

@@ -191,31 +191,39 @@ export class ClaudeHookAdapter extends HookAdapter {
                 const list = hooks[ev.event] ?? []
                 const ours = this.findAllOurEntries(list)
                 if (ours.length > 0) {
-                    // Upgrade path: bring EVERY existing GlanceTerm entry's
-                    // `async` flag in sync with what EVENTS now declares.
-                    // Added when P0 auto-approve flipped PermissionRequest
-                    // from async:true → async:false — a user who upgraded
-                    // GlanceTerm with the old entry still in
-                    // ~/.claude/settings.json would have a `async:true` entry
-                    // whose stdout Claude ignores, so the auto-approve
-                    // toggle would silently no-op until manual cleanup.
-                    //
-                    // We iterate ALL matches (not just the first) for the
-                    // edge case of a user with duplicated entries — copy-
-                    // pasted between machines, or remnants of an earlier
-                    // bug. Leaving one un-upgraded would still defeat
-                    // auto-approve depending on which entry Claude picks
-                    // first when reading stdout.
+                    // Reconcile existing GlanceTerm entries to the CURRENT
+                    // handler command + async flag, and collapse any accidental
+                    // DUPLICATES down to one. Residue this cleans on (re)install:
+                    //   - a stale `command` from an upgraded handler path/args
+                    //     (the old in-place upgrade synced only `async`, leaving
+                    //     the command pointing at the previous invocation);
+                    //   - duplicate GlanceTerm entries copy-pasted between
+                    //     machines, or left by an earlier bug.
+                    // The async sync still matters: P0 auto-approve flipped
+                    // PermissionRequest async:true → false, and a stale
+                    // async:true entry's stdout Claude ignores — silently
+                    // no-op'ing the auto-approve toggle until cleanup.
+                    // Idempotent: when the single entry already matches, nothing
+                    // is touched and `changed` stays false (no settings write).
                     const shouldBeAsync = !!ev.async
-                    for (const existing of ours) {
-                        const isAsync = existing.async === true
-                        if (shouldBeAsync && !isAsync) {
-                            existing.async = true
-                            changed = true
-                        } else if (!shouldBeAsync && isAsync) {
-                            delete existing.async
-                            changed = true
-                        }
+                    let kept = false
+                    let droppedDup = false
+                    for (const m of list) {
+                        if (!Array.isArray(m.hooks)) continue   // foreign/malformed matcher — leave untouched
+                        m.hooks = m.hooks.filter(h => {
+                            if (!this.isOurEntry(h)) return true
+                            if (kept) { changed = true; droppedDup = true; return false }   // drop duplicate
+                            kept = true
+                            if (h.command !== handlerCommand) { h.command = handlerCommand; changed = true }
+                            if (shouldBeAsync && h.async !== true) { h.async = true; changed = true } else if (!shouldBeAsync && h.async === true) { delete h.async; changed = true }
+                            return true
+                        })
+                    }
+                    // Drop ONLY matchers we emptied by removing a duplicate — leave
+                    // pre-existing empty/foreign matchers alone (no spurious write).
+                    if (droppedDup) {
+                        const compacted = list.filter(m => !Array.isArray(m.hooks) || m.hooks.length > 0)
+                        if (compacted.length !== list.length) { hooks[ev.event] = compacted; changed = true }
                     }
                     continue
                 }
@@ -244,13 +252,13 @@ export class ClaudeHookAdapter extends HookAdapter {
         })
     }
 
-    async uninstallHooks (): Promise<void> {
+    async uninstallHooks (): Promise<boolean> {
         const settingsPath = this.configFilePath()
-        await withFileLock(`${settingsPath}.lock`, async () => {
+        return withFileLock(`${settingsPath}.lock`, async () => {
             const r = await this.readSettings()
             // Same parse-error policy as install: don't touch a file we
             // can't parse — we'd nuke the user's data.
-            if (r.kind !== 'ok' || !r.settings.hooks) return
+            if (r.kind !== 'ok' || !r.settings.hooks) return false
 
             let changed = false
             for (const [event, matchers] of Object.entries(r.settings.hooks)) {
@@ -271,6 +279,7 @@ export class ClaudeHookAdapter extends HookAdapter {
             if (changed) {
                 await this.writeSettings(r.settings)
             }
+            return changed
         })
     }
 

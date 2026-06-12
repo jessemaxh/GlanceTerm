@@ -240,14 +240,16 @@ export class OpencodeHookAdapter extends HookAdapter {
         }
     }
 
-    async uninstallHooks (): Promise<void> {
+    async uninstallHooks (): Promise<boolean> {
         const pluginPath = this.configFilePath()
         try {
             const raw = await fs.readFile(pluginPath, 'utf8')
             if (raw.includes('glanceterm-opencode bridge')) {
                 await fs.unlink(pluginPath)
+                return true
             }
         } catch { /* not present — nothing to do */ }
+        return false
     }
 
     mapEventToStatus (event: string, _matcher?: string): TabStatus | null {

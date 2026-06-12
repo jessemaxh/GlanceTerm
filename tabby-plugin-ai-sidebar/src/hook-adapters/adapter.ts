@@ -72,10 +72,11 @@ export abstract class HookAdapter {
     abstract installHooks (handlerCommand: string): Promise<InstallReport>
 
     /**
-     * Remove our entries. Same preserve-other-keys discipline. Reserved for
-     * a future "Uninstall GlanceTerm hooks" command — currently unused.
+     * Remove our entries (same preserve-other-keys discipline). Returns true
+     * iff something of ours was actually removed — drives the "Remove
+     * GlanceTerm hooks" settings button's per-agent result toast.
      */
-    abstract uninstallHooks (): Promise<void>
+    abstract uninstallHooks (): Promise<boolean>
 
     /** Cheap check without writing. */
     abstract isInstalled (): Promise<boolean>
