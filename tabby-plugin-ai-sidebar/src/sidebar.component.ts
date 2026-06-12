@@ -144,8 +144,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                                 <span class="agent-name">{{ toolTag(s.aiTool) }}</span>
                                 <span *ngIf="s.model" class="agent-model">{{ modelLabel(s.aiTool, s.model) }}</span>
                             </span>
-                            <span class="usage" *ngIf="s.tokensIn || s.tokensOut" [title]="tokensTitle(s)">{{ fmtTokens(s.tokensIn) }} in</span>
-                            <span class="usage" *ngIf="s.tokensIn || s.tokensOut" [title]="tokensTitle(s)">{{ fmtTokens(s.tokensOut) }} out</span>
+                            <span class="usage" *ngIf="s.tokensIn || s.tokensOut" [title]="tokensTitle(s)">in: {{ fmtTokens(s.tokensIn) }}, out: {{ fmtTokens(s.tokensOut) }}</span>
                             <span class="l2-sp"></span>
                             <span class="age" *ngIf="s.lastActiveMs !== null">{{ ageStr(s.lastActiveMs) }}</span>
                         </div>
@@ -202,6 +201,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                             [disabled]="capturing"
                             (click)="onScreenshot()"
                             [ngbTooltip]="screenshotTitle()"
+                            [openDelay]="0"
                             placement="top"
                             container="body"
                             aria-label="Take a screenshot and paste it into the focused AI agent">
@@ -224,6 +224,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                             [disabled]="capturing"
                             (click)="toggleScreenshotMenu($event)"
                             ngbTooltip="Screenshot options"
+                            [openDelay]="0"
                             placement="top"
                             container="body"
                             aria-label="Open screenshot options menu"
@@ -253,6 +254,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                         [class.active]="isSplitOpenInActiveTab()"
                         (click)="onSplitShell()"
                         [ngbTooltip]="splitTitle()"
+                        [openDelay]="0"
                         placement="top"
                         container="body"
                         [attr.aria-label]="splitAriaLabel()">
@@ -274,6 +276,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                         class="action-btn settings-btn"
                         (click)="openSettingsModal()"
                         ngbTooltip="Settings"
+                        [openDelay]="0"
                         placement="top"
                         container="body"
                         aria-label="Open AI sidebar settings"
@@ -429,10 +432,6 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             --gt-shell:    var(--gt-text-faint);
             --gt-ghost:    #4A4F57;
             --gt-rail-line: rgba(255, 255, 255, 0.08);
-            /* Inter-row hairline divider — a touch stronger than --gt-border so
-               the separation reads clearly even on idle rows that carry no
-               background of their own. */
-            --gt-divider:   rgba(255, 255, 255, 0.10);
             --gt-meta-bg:  rgba(255, 255, 255, 0.055);
             --gt-meta-br:  rgba(255, 255, 255, 0.09);
             --gt-meta-tx:  #AEB4BC;
@@ -561,6 +560,9 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
         /* ---- list / row ---- */
         .sb-list {
             flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
             overflow-y: auto;
             overflow-x: hidden;
             padding: 2px 8px 8px;
@@ -598,29 +600,6 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             margin: 0;
         }
         .row:hover { background: var(--gt-surface-2); }
-
-        /* ---- inter-row hairline divider ----
-           A 1px line at each row's bottom edge, inset left/right so it never
-           runs under the rounded corners of a hover/active wash. Drawn with
-           ::before (::after is taken by the active/status left bars). It's
-           suppressed on a hovered/active row AND on the row directly above one
-           (:has(+ …)), so the highlighted card reads as a clean rounded block
-           rather than a card with a seam line cutting across it. */
-        .row::before {
-            content: "";
-            position: absolute;
-            left: 10px;
-            right: 10px;
-            bottom: 0;
-            height: 1px;
-            background: var(--gt-divider);
-            pointer-events: none;
-        }
-        .row:last-child::before { display: none; }
-        .row:hover::before,
-        .row.active::before,
-        .row:has(+ .row:hover)::before,
-        .row:has(+ .row.active)::before { opacity: 0; }
 
         /* ---- index (now inline on line1) ---- */
         .num {
@@ -829,7 +808,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
         .l2-sp { flex: 1; }
         .age { flex: none; font-family: var(--gt-mono); font-size: 12.5px; color: var(--gt-text-faint); }
 
-        /* Token usage ("27k in · 284k out") — dim mono metadata. */
+        /* Token usage ("in: 27k, out: 284k") — dim mono metadata. */
         .usage {
             font-family: var(--gt-mono);
             font-size: 12.5px;
@@ -2128,17 +2107,19 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         return m
     }
 
-    /** Compact token count: <1k raw, then `k`, then `M` (1 decimal). null→0. */
+    /** Compact token count: <1k raw, then `k`, then `m` (1 decimal). null→0.
+     *  Thresholds sit just below the round boundary so rounding never spills
+     *  into a wrong magnitude (e.g. 999_999 → `1.0m`, not `1000k`). */
     fmtTokens (n: number | null): string {
         const v = n ?? 0
         if (v < 1000) return String(v)
-        if (v < 1_000_000) return `${(v / 1000).toFixed(v < 10_000 ? 1 : 0)}k`
-        return `${(v / 1_000_000).toFixed(1)}M`
+        if (v < 999_500) return `${(v / 1000).toFixed(v < 9_950 ? 1 : 0)}k`
+        return `${(v / 1_000_000).toFixed(1)}m`
     }
 
     /** Hover text for the token chip — exact counts. */
     tokensTitle (s: TabState): string {
-        return `session tokens — input ${s.tokensIn ?? 0}, output ${s.tokensOut ?? 0} (cache excluded)`
+        return `session tokens — input ${s.tokensIn ?? 0}, output ${s.tokensOut ?? 0} (input includes cache read/creation)`
     }
 
     ageStr (ms: number | null): string {

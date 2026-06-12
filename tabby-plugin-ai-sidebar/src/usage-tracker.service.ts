@@ -10,11 +10,15 @@ import type { AiTool } from './tab-monitor'
  * agent's source), so usage is read from the agent's TRANSCRIPT:
  *
  *   - Claude (implemented): each `type:"assistant"` JSONL record carries
- *     `message.usage.{input_tokens, output_tokens}` for THAT turn. We sum
- *     across the session. The transcript path arrives in every hook payload
- *     (HookSnapshot.transcriptPath). Cache read/creation tokens are excluded
- *     deliberately — they dwarf real usage (a session can show hundreds of
- *     millions of cache-read tokens) and would mislead.
+ *     `message.usage.{input_tokens, cache_creation_input_tokens,
+ *     cache_read_input_tokens, output_tokens}` for THAT turn. We sum across
+ *     the session. The transcript path arrives in every hook payload
+ *     (HookSnapshot.transcriptPath). Cache read/creation tokens ARE counted
+ *     as input: for a Claude agent they are the bulk of the input (the whole
+ *     context is re-read from cache each turn), so excluding them made "in" a
+ *     tiny residue and showed an abnormal in < out. Cumulative cache-read can
+ *     reach the hundreds of millions — that is the real input volume, and the
+ *     k/m-suffixed display keeps it legible.
  *
  *   - Codex / Gemini / opencode (deferred): sources are known (Codex rollout
  *     `~/.codex/sessions/.../rollout-*-<id>.jsonl` last `token_count` line's
@@ -136,10 +140,11 @@ export class UsageTrackerService {
 }
 
 /**
- * Sum `message.usage.input_tokens` + `output_tokens` across the `type:"assistant"`
+ * Sum the input side (`input_tokens` + `cache_creation_input_tokens` +
+ * `cache_read_input_tokens`) and `output_tokens` across the `type:"assistant"`
  * records in a chunk of Claude transcript NDJSON. Pure; exported for tests.
  * Non-assistant lines, malformed lines, and missing usage are skipped. Cache
- * tokens are intentionally NOT summed (see UsageTrackerService doc).
+ * tokens ARE summed into the input total (see UsageTrackerService doc).
  */
 export function sumClaudeAssistantUsage (text: string): { inTok: number; outTok: number } {
     let inTok = 0
@@ -153,7 +158,15 @@ export function sumClaudeAssistantUsage (text: string): { inTok: number; outTok:
         if (rec?.type !== 'assistant') continue
         const u = rec?.message?.usage
         if (!u) continue
+        // Input = ALL tokens fed to the model that turn: the new uncached
+        // input PLUS cache creation/read. For a Claude agent the cache-read
+        // portion is the bulk of the input (the whole growing context is
+        // re-read from cache every turn); excluding it made "in" a tiny
+        // residue and produced the abnormal in < out display. This matches
+        // the input-token total Anthropic's console / `/cost` report.
         if (typeof u.input_tokens === 'number') inTok += u.input_tokens
+        if (typeof u.cache_creation_input_tokens === 'number') inTok += u.cache_creation_input_tokens
+        if (typeof u.cache_read_input_tokens === 'number') inTok += u.cache_read_input_tokens
         if (typeof u.output_tokens === 'number') outTok += u.output_tokens
     }
     return { inTok, outTok }

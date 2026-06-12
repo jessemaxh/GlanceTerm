@@ -5,9 +5,9 @@ import * as path from 'path'
 
 import { UsageTrackerService, sumClaudeAssistantUsage } from '../usage-tracker.service'
 
-const asst = (inT: number, outT: number, cacheRead = 0) => JSON.stringify({
+const asst = (inT: number, outT: number, cacheRead = 0, cacheCreate = 0) => JSON.stringify({
     type: 'assistant',
-    message: { model: 'claude-opus-4-8', usage: { input_tokens: inT, output_tokens: outT, cache_read_input_tokens: cacheRead } },
+    message: { model: 'claude-opus-4-8', usage: { input_tokens: inT, output_tokens: outT, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheCreate } },
 })
 const userLine = JSON.stringify({ type: 'user', message: { role: 'user', content: 'hi' } })
 
@@ -21,9 +21,11 @@ describe('sumClaudeAssistantUsage', () => {
         expect(sumClaudeAssistantUsage([userLine, userLine].join('\n'))).toEqual({ inTok: 0, outTok: 0 })
     })
 
-    it('EXCLUDES cache tokens (they would dwarf real usage)', () => {
-        // 9_000_000 cache-read must not leak into the totals.
-        expect(sumClaudeAssistantUsage(asst(100, 50, 9_000_000))).toEqual({ inTok: 100, outTok: 50 })
+    it('INCLUDES cache read/creation in the input total', () => {
+        // cache-read + cache-creation are the bulk of a Claude turn's input
+        // (the whole context is re-read from cache each turn), so they MUST be
+        // counted: 100 input + 9_000_000 cache-read + 500 cache-creation.
+        expect(sumClaudeAssistantUsage(asst(100, 50, 9_000_000, 500))).toEqual({ inTok: 9_000_600, outTok: 50 })
     })
 
     it('skips malformed lines and lines without usage', () => {

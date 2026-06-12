@@ -1,4 +1,5 @@
 import { Injectable } from '@angular/core'
+import { NotificationsService } from 'tabby-core'
 
 import { HookAdapterRegistry } from './hook-adapters/registry'
 import { HookRuntimeService } from './hook-runtime.service'
@@ -6,7 +7,7 @@ import { claudeConfigDirExistsSync } from './hook-adapters/claude'
 import { codexConfigDirExistsSync } from './hook-adapters/codex'
 import { geminiConfigDirExistsSync } from './hook-adapters/gemini'
 import { opencodeConfigDirExistsSync } from './hook-adapters/opencode'
-import type { HookAdapter } from './hook-adapters/adapter'
+import type { HookAdapter, InstallReport } from './hook-adapters/adapter'
 import type { AiTool } from './tab-monitor'
 
 /**
@@ -39,6 +40,7 @@ export class HookInstallerService {
     constructor (
         private registry: HookAdapterRegistry,
         private runtime: HookRuntimeService,
+        private notifications: NotificationsService,
     ) {
         void this.installAll()
     }
@@ -67,15 +69,33 @@ export class HookInstallerService {
     async installFor (tool: AiTool): Promise<void> {
         const adapter = this.registry.forTool(tool)
         if (!adapter) return
-        await this.tryInstall(adapter)
+        const report = await this.tryInstall(adapter)
+
+        // Runtime path only: tab-monitor calls installFor() because it just
+        // saw this agent's PROCESS running. If we wrote FRESH hook entries
+        // just now (installed === true), that in-flight session started before
+        // the hooks existed and won't emit events until it restarts — the
+        // agent reads its settings file once at session start. Surface a
+        // one-shot notice so the first "no status" session isn't a mystery.
+        //
+        // This never fires at boot: installAll() ignores tryInstall()'s return,
+        // and once hooks are present a re-fire reports installed === false. So
+        // it shows exactly in the "installed agent AFTER GlanceTerm, then ran
+        // it without relaunching" case — the one rough edge of that ordering.
+        if (report?.installed) {
+            this.notifications.info(
+                `已为 ${adapter.displayName} 配置好 GlanceTerm hook`,
+                '正在运行的会话需重开后才会加载 hook；之后启动的会话自动生效。',
+            )
+        }
     }
 
-    private async tryInstall (adapter: HookAdapter): Promise<void> {
+    private async tryInstall (adapter: HookAdapter): Promise<InstallReport | null> {
         if (!this.gatePasses(adapter)) {
             // Quiet log — common case: user has GlanceTerm but not this agent.
             // eslint-disable-next-line no-console
             console.log(`[glanceterm] skipping ${adapter.displayName} hook install — agent not detected on this machine yet`)
-            return
+            return null
         }
         try {
             const command = this.runtime.handlerInvocation(adapter.id)
@@ -84,9 +104,11 @@ export class HookInstallerService {
                 // eslint-disable-next-line no-console
                 console.log(`[glanceterm] installed ${adapter.displayName} hooks → ${result.settingsPath}`)
             }
+            return result
         } catch (e: any) {
             // eslint-disable-next-line no-console
             console.error(`[glanceterm] could not install ${adapter.displayName} hooks:`, e?.message ?? e)
+            return null
         }
     }
 

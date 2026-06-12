@@ -1,6 +1,26 @@
-# GlanceTerm
+<p align="center">
+  <img src="app/assets/logo.svg" alt="GlanceTerm logo" width="120" height="120">
+</p>
 
-**See every AI agent at a glance. Never miss the one that needs you.**
+<h1 align="center">GlanceTerm</h1>
+
+<p align="center">
+  <strong>See every AI agent at a glance. Never miss the one that needs you.</strong>
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-yellow.svg"></a>
+  <img alt="Platforms" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
+  <img alt="Status" src="https://img.shields.io/badge/status-v0.2%20pre--release-orange">
+  <img alt="Built on Tabby" src="https://img.shields.io/badge/built%20on-Tabby-blue">
+  <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg">
+</p>
+
+<p align="center">
+  English&nbsp;·&nbsp;<a href="README.zh-CN.md">简体中文</a>
+</p>
+
+---
 
 If you have 5+ Claude Code / Codex / Gemini / opencode sessions running in
 different tabs, you've probably done this dance: Cmd-Tab through them all,
@@ -10,6 +30,19 @@ for the next task.
 GlanceTerm fixes that. It puts every tab in a side panel with a live status
 dot — green when the AI is working, blue when it's done and waiting for you,
 amber when it's asking permission. Click a row → jump straight to that tab.
+
+**What you get**
+
+- 🟢 **Live status per tab** — working / done / needs-permission, driven by the
+  agent's own hook events (zero polling, zero screen-scraping, zero false positives).
+- 🎯 **Click to jump** — one click takes you straight to the tab that needs you.
+- 🤖 **Multi-agent** — Claude Code is first-class and tested; Codex / Gemini /
+  opencode adapters ship too ([support matrix](docs/feature-matrix.md)).
+- 🧩 **No habit change** — keep typing `claude`; the hook wires itself up on first launch.
+- 🛡️ **Opt-in auto-approve** — stop alt-tabbing to click "Allow"; every action is
+  audit-logged. Off by default (read the ⚠️ warning before enabling).
+- 📸 **Screenshot → paste & split shell** — capture straight into the focused
+  agent, or open a shell in its working directory.
 
 ```
 ┌────────────────┬──────────────────────────────────┐
@@ -136,12 +169,14 @@ Alternatively, from a terminal:
 xattr -d com.apple.quarantine /Applications/GlanceTerm.app
 ```
 
-**Linux / Windows** — `.AppImage`, `.deb`, `.rpm`, and Windows `.exe`
-installers are also produced by CI and attached to each release, but
-**none have been validated end-to-end**. The hook handler ships a
-PowerShell variant for Windows and POSIX `sh` for Linux; everything
-compiles, nothing has been smoke-tested. PRs reporting "works on my
-distro" / "breaks here, fix attached" are very welcome.
+**Linux / Windows** — **no prebuilt installers are provided yet.** There's no
+CI at the moment, so only the macOS `.dmg` is built (locally) and uploaded by
+hand. The cross-platform code paths exist — the hook handler ships a PowerShell
+variant for Windows and POSIX `sh` for Linux, and everything compiles — but
+nothing has been smoke-tested. To try GlanceTerm on Linux/Windows, build from
+source (see [Dev / Build](#dev--build)). PRs reporting "works on my distro" /
+"breaks here, fix attached" — or contributing a build workflow — are very
+welcome.
 
 ## Dev / Build
 

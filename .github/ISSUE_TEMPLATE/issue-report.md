@@ -11,8 +11,8 @@ assignees: ''
 # READ CAREFULLY:
 
 * **ENGLISH ONLY** - this issue tracker is English-only. Please respect the people who take time to help you with your problems.
-* Search existing issues first: https://github.com/Eugeny/tabby/issues
-* Test with the latest Tabby version: https://github.com/Eugeny/tabby/releases
+* Search existing issues first: https://github.com/jessemaxh/glanceterm/issues
+* Test with the latest GlanceTerm version: https://github.com/jessemaxh/glanceterm/releases
 * Disable third-party plugins.
 -->
 

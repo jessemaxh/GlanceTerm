@@ -32,7 +32,7 @@ Adding a new agent means editing that file **and** adding a column here.
 | Process-tree detection (regex in `AI_PATTERNS`) | ✅ | 🧪 | 🧪 | 🧪 |
 | Tool tag on row line2 (Claude / Codex / …) | ✅ | 🧪 | 🧪 | 🧪 |
 | Active model shown next to the tag | 🧪 (`SessionStart` slug; mid-session `/model` not yet tracked) | 🧪 (hook `.model` every event — source-confirmed) | ❌ deferred (`.llm_request.model` on `BeforeModel`, not subscribed) | 🧪 (plugin `event.properties.info.modelID`) |
-| Session token usage shown (`↑in ↓out`, k/M) | 🧪 (transcript `message.usage` summed, incremental; cache excluded) | ❌ deferred (rollout `total_token_usage` — running total, locate file by session_id) | ❌ deferred (`~/.gemini/tmp/<hash>/chats` `message.tokens`) | ❌ deferred (plugin `info.tokens.{input,output}` summed) |
+| Session token usage shown (`in: … out: …`, k/m) | 🧪 (transcript `message.usage` summed, incremental; input includes cache read/creation) | ❌ deferred (rollout `total_token_usage` — running total, locate file by session_id) | ❌ deferred (`~/.gemini/tmp/<hash>/chats` `message.tokens`) | ❌ deferred (plugin `info.tokens.{input,output}` summed) |
 | Detected tab counts toward sidebar pill totals | ✅ | 🧪 | 🧪 | 🧪 |
 | **Hook adapter** |||||
 | HookAdapter implementation exists | ✅ | ✅ (verified 2026-06-10, codex 0.138.0) | 🧪 (`gemini.ts`; routing source-confirmed, events untested) | 🧪 (`opencode.ts` ships a JS plugin, untested) |
