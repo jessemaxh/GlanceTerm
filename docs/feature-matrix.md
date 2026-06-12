@@ -200,6 +200,43 @@ onto one env. Auto-approve is observe-only (the `permission.ask` interceptor is
 unused). `tool.execute.before` is a hook key (not a bus event) so it's omitted.
 Docs: https://opencode.ai/docs/plugins/ and https://opencode.ai/docs/server/
 
+## Platform support (macOS / Linux / Windows)
+
+The matrix above is implicitly **macOS** — that's the only platform anything has
+been validated on. This section is the platform dimension: which OS code paths
+*exist* vs which have been *run*. Same legend (✅ tested · 🧪 implemented, not
+tested · ❌ not implemented). Grounded in a code audit on 2026-06-12, not
+optimism — every 🧪 here is real code that has **never been executed on that OS**.
+
+| Capability | macOS | Linux | Windows | Platform-specific implementation |
+|---|---|---|---|---|
+| Base terminal (Tabby) | ✅ | ✅ | ✅ | Upstream Tabby ships all three; low risk |
+| Process-tree detection (agent / shell·bg / monitor counts) | ✅ | 🧪 | 🧪 | linux: `/proc/<pid>/stat`; win32: PowerShell `Get-CimInstance` (`tab-monitor.ts`) |
+| `GLANCETERM_TAB_ID` read-back (tab ↔ process match) | ✅ | 🧪 | 🧪 | linux: `/proc/<pid>/environ`; win32: PowerShell env query |
+| Hook install into agent settings | ✅ | 🧪 | 🧪 | path resolution is cross-platform; win32 installs a `powershell.exe …` invocation |
+| **Hook handler exec + status tracking** | ✅ | 🧪 (`HANDLER_SH`) | 🧪 (`HANDLER_PS1`) | **highest risk** — the PowerShell handler (`hook-runtime.service.ts`) is complex (JSON parse, env, timers) and has never run |
+| Auto-approve permission prompts | ✅ | 🧪 | 🧪 | rides the same hook handler; inherits its risk |
+| Screenshot → paste | ✅ | 🧪 | 🧪 | Electron `desktopCapturer` is cross-platform; mac-only permission preflight; clipboard/paste quoting differs per OS (`image-paste-hook.service.ts`) |
+| Split shell | ✅ | 🧪 | 🧪 | Tabby profile-based; low-medium risk |
+
+### Test-first order when validating a new platform
+
+Implemented-but-unrun code reliably has bugs. Test in descending risk:
+
+1. **Windows hook handler (`HANDLER_PS1`)** — PowerShell 5.1 quoting / JSON /
+   env quirks; most likely to break.
+2. **Windows process detection** — PowerShell cold-start, WQL client-side filter.
+3. **Linux `/proc` parsing** — `stat` / `environ` edge cases.
+4. **Screenshot clipboard/paste** — per-OS quoting in the paste path.
+
+### How to flip a cell 🧪 → ✅
+
+Build natively (CI on a public repo, or a VM/Docker — see
+`docs/open-source-checklist.md` CI section), **run the app on that OS**, exercise
+the capability against a real agent, then update the cell here with a one-line
+note of what was observed. Until then GlanceTerm only *claims* macOS (the README
+already says so) — Linux/Windows are "compiles + probably works, unproven."
+
 ## Dropped agents (2026-06-10)
 
 `aider` and `goose` were removed from `AI_PATTERNS` and this matrix.

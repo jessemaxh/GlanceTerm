@@ -436,6 +436,14 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             --gt-meta-br:  rgba(255, 255, 255, 0.09);
             --gt-meta-tx:  #AEB4BC;
 
+            /* Process-tree chips (agents / shells·bgs / monitors) — designer
+               handoff 2026-06-12. Cyan tint reads clearly against the dark row
+               without competing with the status rail. Light theme is deferred
+               for the sidebar; when it lands, override with:
+                 --gt-proc: #0E8FA3;  --gt-proc-bg: rgba(14, 143, 163, 0.12); */
+            --gt-proc:     #45CFE0;
+            --gt-proc-bg:  rgba(69, 207, 224, 0.13);
+
             display: block;
             width: 100%;
             height: 100%;
@@ -846,9 +854,21 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             white-space: nowrap;
             min-width: 0;
         }
-        .conc { flex: none; display: inline-flex; gap: 8px; }
-        .conc span { white-space: nowrap; }
-        .conc b { color: var(--gt-text-dim); font-weight: 600; }
+        .conc { flex: none; display: inline-flex; gap: 6px; }
+        .conc > span {
+            display: inline-flex;
+            align-items: center;
+            white-space: nowrap;
+            font-family: var(--gt-mono);
+            font-size: 10px;
+            font-weight: 600;
+            line-height: 1;
+            color: var(--gt-proc);
+            background: var(--gt-proc-bg);
+            padding: 1.5px 6px;
+            border-radius: 5px;
+        }
+        .conc b { color: var(--gt-proc); font-weight: 700; margin-right: 3px; }
 
         /* ---- agent + model pill (METADATA — neutral) ----
            One quiet pill holding a tool glyph, the tool name, and the active

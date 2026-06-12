@@ -552,6 +552,43 @@ Status legend: ✅ verified · 🔬 reviewed (adversarial) · 📝 docs only · 
   3.2.6; consider removing one (repo is yarn-based) as a separate cleanup.
 - **Review:** ✅ tests green.
 
+### CL-13 — Process-tree chips restyled to designer spec (clearer)
+
+- **What / where:** `sidebar.component.ts` — the `.conc` process-tree chips
+  (agents / shells·bgs / monitors on line3) were plain dim text; restyled to
+  legible pills per a designer handoff.
+  - New tokens in `:host` (L444-445): `--gt-proc: #45CFE0`,
+    `--gt-proc-bg: rgba(69,207,224,0.13)` (dark). Light-theme values
+    (`#0E8FA3` / `rgba(14,143,163,0.12)`) documented in a comment, to wire up
+    when the deferred sidebar light theme lands.
+  - `.conc` CSS (L857+): each chip is now a pill — `var(--gt-mono)` 10px,
+    color `--gt-proc` on `--gt-proc-bg`, padding `1.5px 6px`, radius `5px`,
+    inter-chip `gap: 6px`; number `<b>` weight 700 + `margin-right: 3px`, label
+    weight 600. Exact values from the spec.
+- **Why:** User feedback — the shell/agent status counts were hard to read as
+  flat dim text; the cyan-tinted pill makes them clear without competing with
+  the status rail.
+- **Verification:** `tsc --noEmit` 0 errors. Visual: pending a rebuild/reload
+  (CSS lives in a template string; not covered by unit tests).
+- **Note:** screenshot mockup shows pluralized "shells/bgs"; current `bgLabel()`
+  returns singular — separate from this styling change, left as-is.
+- **Review:** ⬜ visual check pending.
+
+### CL-14 — feature-matrix: add platform (macOS/Linux/Windows) support section
+
+- **What / where:** `docs/feature-matrix.md` — added a "Platform support" section
+  before "Dropped agents". The existing matrix is agent-dimensioned and
+  implicitly macOS; the new section adds the OS dimension: a capability × OS
+  table (✅/🧪/❌), a test-first risk order, and the 🧪→✅ validation procedure.
+- **Why:** User asked whether features actually work when built on Linux/Windows.
+  Answer (from a 2026-06-12 code audit): the win/linux code paths EXIST
+  (`/proc` reads, PowerShell process detection, a full `HANDLER_PS1`) but have
+  NEVER been run — so "compiles + probably works, unproven." The matrix is the
+  authoritative doc (per MEMORY) and lacked the platform view; now it has one.
+- **Highest-risk cell flagged:** the Windows PowerShell hook handler.
+- **Verification:** reused the existing legend; no code change.
+- **Review:** 📝 docs.
+
 ### Pre-existing uncommitted changes NOT from this session
 
 For audit completeness — these were already modified/untracked in the working
