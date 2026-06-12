@@ -5,6 +5,7 @@ import { flipFuses, FuseV1Options, FuseVersion } from '@electron/fuses'
 import { build as builder } from 'electron-builder'
 import { execFileSync } from 'node:child_process'
 import * as fs from 'node:fs'
+import os from 'node:os'
 import path from 'node:path'
 import * as vars from './vars.mjs'
 
@@ -291,7 +292,12 @@ builder({
         ] : undefined,
     },
     publish: (process.env.KEYGEN_TOKEN && isTag) ? 'always' : 'never',
-}).then(() => {
+}).then(async () => {
+    // electron-builder's built-in notarization only handles the .app — it
+    // leaves the DMG wrapper unsigned + un-notarized, so a freshly-built dmg
+    // is rejected by Gatekeeper ("no usable signature") on download even
+    // though the .app inside is fine. Close that gap before anything else.
+    await signNotarizeStapleDmg()
     // The .dmg and .zip already contain a copy of GlanceTerm.app; keeping the
     // loose `dist/mac-arm64/GlanceTerm.app` around just makes LaunchServices
     // index it alongside `/Applications/GlanceTerm.app`, which leaves Launchpad
@@ -307,6 +313,76 @@ builder({
     console.error(e)
     process.exit(1)
 })
+
+/**
+ * Sign + notarize + staple every .dmg in dist/.
+ *
+ * electron-builder's built-in notarization (mac.notarize) only handles the
+ * .app — it does NOT sign, notarize, or staple the DMG *wrapper*. A fresh
+ * `npm run dmg:mac` therefore yields a dmg that `codesign` reports as "no
+ * usable signature" and Gatekeeper rejects on download (the .app inside is
+ * notarized + stapled and fine; the dmg layer isn't). We close that gap here.
+ *
+ * Gated on the real signing+notarization env (CSC_LINK + the three APPLE_*
+ * vars). The ad-hoc / local path skips it — an ad-hoc dmg can't be notarized.
+ *
+ * Steps mirror Apple's recommended flow: re-establish the Developer ID
+ * identity in a throwaway keychain (electron-builder's own CSC keychain is
+ * gone by now), codesign the dmg with a secure timestamp, submit it to the
+ * notary service (--wait), then staple the ticket so it validates offline.
+ */
+async function signNotarizeStapleDmg () {
+    const { CSC_LINK, CSC_KEY_PASSWORD, APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID } = process.env
+    if (!CSC_LINK || !APPLE_TEAM_ID || !APPLE_ID || !APPLE_APP_SPECIFIC_PASSWORD) {
+        return
+    }
+    const distDir = path.resolve('dist')
+    let dmgs = []
+    try { dmgs = fs.readdirSync(distDir).filter(f => f.endsWith('.dmg')) } catch { return }
+    if (dmgs.length === 0) return
+
+    // CSC_LINK is either a .p12 path or base64 (electron-builder accepts both);
+    // security(1) needs a file on disk, so materialise base64 to a temp file.
+    let p12Path = CSC_LINK
+    let tmpP12 = null
+    if (!fs.existsSync(CSC_LINK)) {
+        tmpP12 = path.join(os.tmpdir(), `gt-csc-${process.pid}.p12`)
+        fs.writeFileSync(tmpP12, Buffer.from(CSC_LINK, 'base64'), { mode: 0o600 })
+        p12Path = tmpP12
+    }
+
+    const kc = path.join(os.tmpdir(), `gt-dmgsign-${process.pid}.keychain-db`)
+    const kcPass = `tmp-${process.pid}`
+    const sec = args => execFileSync('security', args, { stdio: 'pipe' })
+    try {
+        try { sec(['delete-keychain', kc]) } catch { /* none yet */ }
+        sec(['create-keychain', '-p', kcPass, kc])
+        sec(['unlock-keychain', '-p', kcPass, kc])
+        sec(['import', p12Path, '-k', kc, '-P', CSC_KEY_PASSWORD ?? '', '-T', '/usr/bin/codesign', '-A'])
+        // Allow codesign to use the key WITHOUT a GUI authorization prompt.
+        sec(['set-key-partition-list', '-S', 'apple-tool:,apple:', '-s', '-k', kcPass, kc])
+
+        const ids = execFileSync('security', ['find-identity', '-v', '-p', 'codesigning', kc], { encoding: 'utf8' })
+        const line = ids.split('\n').find(l => /Developer ID Application/.test(l))
+        const hash = line && (line.match(/\b([0-9A-Fa-f]{40})\b/) || [])[1]
+        if (!hash) throw new Error('signNotarizeStapleDmg: no Developer ID Application identity found in CSC_LINK')
+
+        for (const dmg of dmgs) {
+            const dmgPath = path.join(distDir, dmg)
+            console.log(`  • signing dmg ${dmg}`)
+            execFileSync('codesign', ['--force', '--keychain', kc, '--sign', hash, '--timestamp', dmgPath], { stdio: 'inherit' })
+            console.log(`  • notarizing dmg ${dmg} (submitting to Apple — this waits)`)
+            execFileSync('xcrun', ['notarytool', 'submit', dmgPath,
+                '--apple-id', APPLE_ID, '--password', APPLE_APP_SPECIFIC_PASSWORD, '--team-id', APPLE_TEAM_ID, '--wait'],
+            { stdio: 'inherit' })
+            console.log(`  • stapling dmg ${dmg}`)
+            execFileSync('xcrun', ['stapler', 'staple', dmgPath], { stdio: 'inherit' })
+        }
+    } finally {
+        try { sec(['delete-keychain', kc]) } catch { /* best-effort */ }
+        if (tmpP12) { try { fs.rmSync(tmpP12, { force: true }) } catch { /* best-effort */ } }
+    }
+}
 
 // Canary modules that MUST end up inside app.asar's node_modules. If any are
 // missing the dep walker bailed (almost always: stale/missing
