@@ -17,6 +17,14 @@ export class AiSidebarHotkeyProvider extends HotkeyProvider {
             id:   'ai-jump-prev-attention',
             name: 'AI Tabs: Jump to previous tab waiting on you',
         },
+        {
+            id:   'ai-screenshot',
+            name: 'AI Tabs: Screenshot → paste into the focused agent',
+        },
+        {
+            id:   'ai-split-shell',
+            name: 'AI Tabs: Toggle a shell pane beside the current tab',
+        },
     ]
 
     async provide (): Promise<HotkeyDescription[]> {

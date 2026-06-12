@@ -45,6 +45,14 @@ import { UsageTrackerService } from './usage-tracker.service'
  * is only here to discover when an AI tool starts/stops in a tab. */
 const POLL_MS = 1500
 
+/** Max consecutive ticks the AI-tool detection hysteresis will hold a tab's
+ *  last-known tool open while the process probe is in a total outage (can't
+ *  confirm OR deny the agent's pid). ~3 ticks ≈ 4.5 s — long enough to ride
+ *  out a transient `ps` storm, short enough that a genuinely-exited agent
+ *  doesn't linger as "alive" for more than a few seconds. When the snapshot
+ *  IS usable, liveness is checked directly and this grace doesn't apply. */
+const AI_DETECT_GRACE_MISSES = 3
+
 /** A direct child of the AI agent process is counted as a "background job"
  *  once it has survived at least this many ms — i.e. been observed across
  *  ≥ 2 polls (POLL_MS = 1500). Short-lived synchronous Bash invocations
@@ -313,6 +321,21 @@ export class TabMonitor implements OnDestroy {
     private pendingTick = false
     /** Cache so we don't re-stat per tick when nothing has changed. */
     private shellPidCache = new WeakMap<BaseTabComponent, number>()
+    /**
+     * Last successful AI-tool detection per tab — the hysteresis anchor that
+     * stops a single failed `ps -p … -o command=` read from collapsing a live
+     * agent row to `no_ai` for one tick (visible flicker: agent → no-agent →
+     * agent). The command-read probe is the SOLE source of command text
+     * (candidates carry `command: ''`), is capped at 500 ms, and — since the
+     * async-exec refactor — competes with a busy event loop, so it misses
+     * often enough to flap. We retain this tool while its pid is still present
+     * in the per-tick process snapshot; see `makeState`.
+     */
+    private aiDetectCache = new WeakMap<BaseTabComponent, { tool: AiTool, pid: number, cmd: string }>()
+    /** Consecutive ticks we've held `aiDetectCache` open during a whole-tick
+     *  process-probe outage (snapshot empty AND command-read empty). Bounds the
+     *  hold so a permanently wedged `ps` can't pin a dead agent forever. */
+    private aiDetectMisses = new WeakMap<BaseTabComponent, number>()
     /**
      * Per-tab cache of the REAL `GLANCETERM_TAB_ID` read from the running
      * PTY process's environment block. Authoritative over `sess.glancetermTabId`
@@ -623,6 +646,42 @@ export class TabMonitor implements OnDestroy {
             if (!real) continue
             const match = detectAiToolFromCommand(real)
             if (match) { aiTool = match; aiPid = c.pid; aiCommandLine = real; break }
+        }
+
+        // --- detection hysteresis -------------------------------------------
+        // The command-read above (`realCommandsFor`) is one 500 ms-capped `ps`
+        // call and the ONLY source of command text (candidates seed
+        // `command: ''`). A single timeout/partial read yields no match → the
+        // row would flip to `no_ai` for one tick then snap back next tick —
+        // the agent ⇄ no-agent flicker. So when we fail to detect but saw a
+        // tool last tick, hold that tool as long as we can't positively prove
+        // the agent exited:
+        //   • pid still in the snapshot  → alive, command-read just missed → hold.
+        //   • snapshot itself unavailable → can't tell → hold for a bounded grace.
+        //   • snapshot good but pid gone  → genuinely exited → release to no_ai.
+        // A real agent exit still surfaces within one tick because the
+        // `ps -A` snapshot (built separately, 800 ms cap) is far more reliable
+        // than a per-pid command read and tells us the pid is gone immediately.
+        const prevAi = this.aiDetectCache.get(t.inner)
+        if (aiTool) {
+            this.aiDetectCache.set(t.inner, { tool: aiTool, pid: aiPid!, cmd: aiCommandLine ?? '' })
+            this.aiDetectMisses.delete(t.inner)
+        } else if (prevAi) {
+            const snapshotUsable = snapshot.pidParent.size > 0
+            if (snapshot.pidParent.has(prevAi.pid)) {
+                aiTool = prevAi.tool; aiPid = prevAi.pid; aiCommandLine = prevAi.cmd
+                this.aiDetectMisses.delete(t.inner)
+            } else if (!snapshotUsable) {
+                const misses = (this.aiDetectMisses.get(t.inner) ?? 0) + 1
+                if (misses <= AI_DETECT_GRACE_MISSES) {
+                    aiTool = prevAi.tool; aiPid = prevAi.pid; aiCommandLine = prevAi.cmd
+                    this.aiDetectMisses.set(t.inner, misses)
+                } else {
+                    this.aiDetectCache.delete(t.inner); this.aiDetectMisses.delete(t.inner)
+                }
+            } else {
+                this.aiDetectCache.delete(t.inner); this.aiDetectMisses.delete(t.inner)
+            }
         }
 
         // First-detection trigger for late hook install — if Claude (etc.)

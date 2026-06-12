@@ -12,6 +12,11 @@ export class AiSidebarConfigProvider extends ConfigProvider {
         hotkeys: {
             'ai-jump-next-attention': ['Ctrl-J'],
             'ai-jump-prev-attention': ['Ctrl-Shift-J'],
+            // G = "grab" a screenshot, B = shell "beside" the agent. Both land
+            // in GlanceTerm's free Ctrl-Shift-letter space (rebindable in
+            // Settings → Hotkeys).
+            'ai-screenshot': ['Ctrl-Shift-G'],
+            'ai-split-shell': ['Ctrl-Shift-B'],
         },
         ai: {
             // Play a short chime when an AI tab transitions working → done.
@@ -62,6 +67,8 @@ export class AiSidebarConfigProvider extends ConfigProvider {
             hotkeys: {
                 'ai-jump-next-attention': ['⌘-J'],
                 'ai-jump-prev-attention': ['⌘-Shift-J'],
+                'ai-screenshot': ['⌘-Shift-G'],
+                'ai-split-shell': ['⌘-Shift-B'],
             },
         },
     }

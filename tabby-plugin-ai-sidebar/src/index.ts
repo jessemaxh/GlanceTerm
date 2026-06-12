@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-extraneous-class */
 import { NgModule, Injectable } from '@angular/core'
 import { CommonModule } from '@angular/common'
+import { NgbTooltipModule } from '@ng-bootstrap/ng-bootstrap'
 import {
     ConfigProvider,
     HotkeyProvider,
@@ -16,6 +17,7 @@ import { AiSidebarComponent } from './sidebar.component'
 import { AiSidebarConfigProvider } from './ai-config-provider'
 import { AiSidebarHotkeyProvider } from './ai-hotkey-provider'
 import { AttentionJumperService } from './attention-jumper.service'
+import { AiHotkeyActionsService } from './ai-hotkey-actions.service'
 import { AttentionNotifierService } from './attention-notifier.service'
 import { TabMonitor } from './tab-monitor'
 import { UnreadService } from './unread.service'
@@ -113,7 +115,7 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
 }
 
 @NgModule({
-    imports: [CommonModule],
+    imports: [CommonModule, NgbTooltipModule],
     declarations: [AiSidebarComponent],
     providers: [
         HookAdapterRegistry,
@@ -125,6 +127,7 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
         TabMonitor,
         UnreadService,
         AttentionJumperService,
+        AiHotkeyActionsService,
         AttentionNotifierService,
         ScreenshotService,
         ScreenshotPasteService,
@@ -170,6 +173,10 @@ export default class AiSidebarModule {
         // ever switches focus. Without this the first ESC in a freshly
         // launched session would land before the service had subscribed.
         _e: EscInterruptService,
+        // Eager-inject so the screenshot / split-shell hotkeys are live for the
+        // whole session — including while the sidebar panel is hidden (you
+        // can't click a toolbar button that isn't on screen).
+        _h: AiHotkeyActionsService,
     ) {
         // eslint-disable-next-line no-console
         console.log('[glanceterm] plugin loaded')

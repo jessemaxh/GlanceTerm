@@ -1,9 +1,38 @@
 import { Injectable, OnDestroy } from '@angular/core'
 import { Subscription } from 'rxjs'
+import * as fsSync from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 
 import { AppService, ConfigService, BaseTabComponent } from 'tabby-core'
 
 import { TabMonitor, TabState, AiTool } from './tab-monitor'
+
+/**
+ * Diagnostic trace for the auto-resume pipeline. The happy path is otherwise
+ * completely silent, and renderer `console.*` is NOT forwarded to Tabby's
+ * on-disk `log.txt` (only main-process logs land there) — so after an app
+ * restart there is no artifact recording whether REPLAY fired or which gate
+ * blocked it. This appends one timestamped line per decision to
+ * `~/.glanceterm/auto-resume.log` (same dir as `auto-approve.log`), which
+ * survives the restart for post-hoc inspection.
+ *
+ * Flip DIAG_LOG to false (or delete this block + its call sites) once a
+ * resume issue has been diagnosed. Writes are best-effort and synchronous-
+ * append only; a failed write never disturbs the feature.
+ */
+const DIAG_LOG = true
+const DIAG_PATH = path.join(os.homedir(), '.glanceterm', 'auto-resume.log')
+function diag (msg: string): void {
+    if (!DIAG_LOG) {
+        return
+    }
+    try {
+        fsSync.appendFileSync(DIAG_PATH, `${new Date().toISOString()} ${msg}\n`)
+    } catch {
+        /* best-effort; never break auto-resume for a log write */
+    }
+}
 
 /**
  * "When I restart GlanceTerm, the tab comes back but my Claude session is
@@ -178,7 +207,30 @@ export class AutoResumeService implements OnDestroy {
      *  feet. */
     private readonly warmedUp = new WeakSet<BaseTabComponent>()
 
+    /** DIAG-only dedup: last CAPTUREd command logged per inner tab, and last
+     *  REPLAY gate-state string logged per inner tab. Prevents the per-1.5 s
+     *  poll from flooding `auto-resume.log` with identical lines — we only
+     *  emit when something actually changed. */
+    private readonly lastCaptureLog = new WeakMap<BaseTabComponent, string>()
+    private readonly lastGateLog = new WeakMap<BaseTabComponent, string>()
+
     private sub: Subscription | null = null
+
+    /** DIAG-only: short human label for a tab in the trace. */
+    private label (tab: BaseTabComponent | null | undefined): string {
+        const t = tab as unknown as { title?: string, customTitle?: string }
+        return (t && (t.customTitle || t.title)) ? String(t.customTitle || t.title) : '(untitled)'
+    }
+
+    /** DIAG-only: log the REPLAY gate evaluation for a restored tab, but only
+     *  when the gate string differs from the last one logged for this tab. */
+    private logReplayGate (inner: BaseTabComponent, label: string, gate: string): void {
+        if (this.lastGateLog.get(inner) === gate) {
+            return
+        }
+        this.lastGateLog.set(inner, gate)
+        diag(`replay-gate ${label}: ${gate}`)
+    }
 
     constructor (
         private config: ConfigService,
@@ -194,11 +246,14 @@ export class AutoResumeService implements OnDestroy {
         // After the capture window closes, new tabs the user opens manually
         // are NOT tagged, so a fresh shell (or a reopened-closed-tab whose
         // token happens to carry a command) does not auto-launch unexpectedly.
+        diag(`═══════ AutoResumeService construct ═══════ enabled=${this.enabled} tabsAtConstruct=${app.tabs.length} activeTab=${app.activeTab ? this.label(app.activeTab) : 'none'}`)
         for (const tab of app.tabs) this.restoredOuterTabs.add(tab)
+        diag(`restored-tagged@construct: [${app.tabs.map(t => this.label(t)).join(' | ')}]`)
         const captureUntil = this.startupTs + AutoResumeService.RESTORED_CAPTURE_MS
         const openedSub = app.tabOpened$.subscribe(tab => {
             if (Date.now() < captureUntil) {
                 this.restoredOuterTabs.add(tab)
+                diag(`restored-tag(tabOpened): ${this.label(tab)}`)
                 this.scheduleWarmup(tab, app, monitor)
             }
         })
@@ -227,7 +282,10 @@ export class AutoResumeService implements OnDestroy {
             // immediately so REPLAY can fire without waiting for the next
             // 1.5 s poll. Idempotent: a no-op if cwd isn't yet known or the
             // tab carries no command.
-            if (firstFocus) this.onStates(monitor.current)
+            if (firstFocus) {
+                diag(`focus(first): ${this.label(tab)}`)
+                this.onStates(monitor.current)
+            }
         })
 
         // States stream fires on every TabMonitor tick AND when a hook event
@@ -287,6 +345,10 @@ export class AutoResumeService implements OnDestroy {
                 const command = toRunnableCommand(s.aiCommandLine, s.aiTool)
                 if (isShellSafe(command)) {
                     this.setResumeCommand(s.innerTab, command)
+                    if (this.lastCaptureLog.get(s.innerTab) !== command) {
+                        this.lastCaptureLog.set(s.innerTab, command)
+                        diag(`CAPTURE ${this.label(s.outerTab)}: ${JSON.stringify(command)}`)
+                    }
                 } else if (!this.warnedUnsafeCapture.has(s.innerTab)) {
                     this.warnedUnsafeCapture.add(s.innerTab)
                     // eslint-disable-next-line no-console
@@ -306,6 +368,7 @@ export class AutoResumeService implements OnDestroy {
             if (s.cwd && !s.aiTool && this.hadAgentThisSession.has(s.innerTab)) {
                 this.clearResumeCommand(s.innerTab)
                 this.hadAgentThisSession.delete(s.innerTab)
+                diag(`CLEANUP ${this.label(s.outerTab)}: agent exited this session → command cleared (won't auto-resume)`)
                 continue
             }
 
@@ -315,15 +378,23 @@ export class AutoResumeService implements OnDestroy {
             // gave it a command — type it in after the settle delay. Each
             // inner tab fires at most once (the `attempted` guard), so an
             // agent that quits and reappears doesn't re-trigger.
-            if (
-                this.restoredOuterTabs.has(s.outerTab)
-                && this.focusedOuterTabs.has(s.outerTab)
-                && s.cwd && !s.aiTool
-                && !this.attempted.has(s.innerTab)
-            ) {
+            if (this.restoredOuterTabs.has(s.outerTab) && !this.attempted.has(s.innerTab)) {
                 const command = this.getResumeCommand(s.innerTab)
-                if (command) {
+                // DIAG: log exactly which gate is (un)satisfied, deduped so a
+                // tab that's simply waiting doesn't flood the log. This is the
+                // line that tells us WHY a restored tab didn't auto-resume.
+                this.logReplayGate(
+                    s.innerTab,
+                    this.label(s.outerTab),
+                    `restored=1 focused=${this.focusedOuterTabs.has(s.outerTab) ? 1 : 0} cwd=${s.cwd ? 1 : 0} noAgent=${!s.aiTool ? 1 : 0} cmd=${command ? JSON.stringify(command) : '∅'}`,
+                )
+                if (
+                    this.focusedOuterTabs.has(s.outerTab)
+                    && s.cwd && !s.aiTool
+                    && command
+                ) {
                     this.attempted.add(s.innerTab)
+                    diag(`REPLAY fire ${this.label(s.outerTab)}: ${JSON.stringify(command)}`)
                     this.scheduleResume(s, command)
                 }
             }
@@ -350,13 +421,14 @@ export class AutoResumeService implements OnDestroy {
      */
     private scheduleWarmup (tab: BaseTabComponent, app: AppService, monitor: TabMonitor): void {
         setTimeout(() => {
-            if (!this.enabled) return
-            if (!app.tabs.includes(tab)) return
+            if (!this.enabled) { diag(`warmup skip ${this.label(tab)}: feature disabled`); return }
+            if (!app.tabs.includes(tab)) { diag(`warmup skip ${this.label(tab)}: tab closed during delay`); return }
             if (tab === app.activeTab) return
-            if (!this.restoredOuterTabs.has(tab)) return
+            if (!this.restoredOuterTabs.has(tab)) { diag(`warmup skip ${this.label(tab)}: not a restored tab`); return }
             if (this.warmedUp.has(tab)) return
             this.warmedUp.add(tab)
             this.focusedOuterTabs.add(tab)
+            diag(`warmup fire ${this.label(tab)}: emitFocused/emitBlurred → kick lazy session`)
             // Best-effort: in production these trigger Tabby's lazy
             // `frontend.attach` on a non-active recovered tab (focus) and then
             // revert `hasFocus` (blur). In unit tests the FakeTab's stubs are
@@ -395,12 +467,16 @@ export class AutoResumeService implements OnDestroy {
         const existing = this.pendingTimers.get(s.innerTab)
         if (existing) clearTimeout(existing)
 
+        const label = this.label(s.outerTab)
+        diag(`scheduleResume ${label}: will type ${JSON.stringify(command)} in ${AutoResumeService.RESUME_DELAY_MS}ms`)
         const tab = s.innerTab as unknown as { sendInput?: (s: string) => void }
         const t = setTimeout(() => {
             this.pendingTimers.delete(s.innerTab)
             try {
                 tab.sendInput?.(`${command}\r`)
+                diag(`SENT ${label}: typed ${JSON.stringify(command)}\\r into the shell`)
             } catch (e: any) {
+                diag(`SENT-FAIL ${label}: ${e?.message ?? e}`)
                 // eslint-disable-next-line no-console
                 console.error('[glanceterm] auto-resume sendInput failed:', e?.message ?? e)
             }

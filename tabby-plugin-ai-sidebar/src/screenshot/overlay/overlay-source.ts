@@ -305,11 +305,24 @@ const OVERLAY_JS = `
       // dimmed snapshot: the visible whole-screen "jitter". onerror still
       // signals so a failed decode can't leave the window stuck invisible.
       const signalReady = () => { try { window.postMessage({ kind: 'ready' }, '*'); } catch (_) {} };
+      // Defer the ready signal until the painted frame is actually COMMITTED to
+      // the compositor, not just enqueued as canvas draw calls. drawBackground()
+      // /renderDim() only issue draw commands synchronously — the pixels aren't
+      // on screen until the next compositor frame. If we signal ready right
+      // after the draw calls, main's win.show() can land BEFORE that frame is
+      // composited, so the transparent window reveals one frame of the live
+      // desktop (the whole-screen "jump") before the frozen snapshot appears.
+      // A double rAF waits for one full frame to be produced (rAF #1 fires
+      // before paint, rAF #2 after it has been committed), so by the time main
+      // shows the window the snapshot is guaranteed to be the first visible frame.
+      const signalReadyAfterPaint = () => {
+        requestAnimationFrame(() => requestAnimationFrame(() => signalReady()));
+      };
       img.onload = () => {
         bgImage = img;
         drawBackground();
         renderDim();
-        signalReady();
+        signalReadyAfterPaint();
       };
       img.onerror = () => { signalReady(); };
       img.src = m.dataURL;
