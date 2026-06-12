@@ -138,16 +138,22 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                             <span class="status" [attr.data-status]="effStatus(s)">{{ statusLabel(s) }}</span>
                         </div>
 
-                        <!-- line2 (AI) — neutral agent·model pill · token usage · age -->
+                        <!-- line2 (AI) — neutral agent·model pill · (spacer) · age -->
                         <div class="line2" *ngIf="s.aiTool">
                             <span class="agent-tag" [attr.data-tool]="s.aiTool" [attr.title]="s.model || toolTag(s.aiTool)">
                                 <span class="tg" aria-hidden="true">{{ toolGlyph(s.aiTool) }}</span>
                                 <span class="agent-name">{{ toolTag(s.aiTool) }}</span>
                                 <span *ngIf="s.model" class="agent-model">{{ modelLabel(s.aiTool, s.model) }}</span>
                             </span>
-                            <span class="usage tokens" *ngIf="s.tokensIn || s.tokensOut" [title]="tokensTitle(s)"><span class="tk"><span class="tk-l">in:</span><span class="tk-v">{{ fmtTokens(s.tokensIn) }}</span></span><span class="tk"><span class="tk-l">out:</span><span class="tk-v">{{ fmtTokens(s.tokensOut) }}</span></span></span>
                             <span class="l2-sp"></span>
                             <span class="age" *ngIf="s.lastActiveMs !== null">{{ ageStr(s.lastActiveMs) }}</span>
+                        </div>
+
+                        <!-- token usage — its own line: the in/cache/out chip got
+                             too wide to share line2 with the agent pill (overflowed
+                             the row), so it sits below, left-aligned under the pill. -->
+                        <div class="line-tok" *ngIf="s.aiTool && (s.tokensIn || s.tokensOut || s.tokensCacheRead)">
+                            <span class="usage tokens" [title]="tokensTitle(s)"><span class="tk"><span class="tk-l">in:</span><span class="tk-v">{{ fmtTokens(s.tokensIn) }}</span></span><span class="tk tk-cache" *ngIf="s.tokensCacheRead"><span class="tk-l">cache:</span><span class="tk-v">{{ fmtTokens(s.tokensCacheRead) }}</span></span><span class="tk"><span class="tk-l">out:</span><span class="tk-v">{{ fmtTokens(s.tokensOut) }}</span></span></span>
                         </div>
 
                         <!-- line2 (shell) — cwd · age -->
@@ -819,7 +825,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
         .status[data-status="needs_permission"] { color: var(--gt-needsyou); }
         .status[data-status="done"]             { color: var(--gt-done); }
 
-        /* line2 — neutral agent·model pill · token usage · (spacer) · age */
+        /* line2 — neutral agent·model pill · (spacer) · age */
         .line2 {
             display: flex;
             align-items: center;
@@ -828,6 +834,14 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             min-width: 0;
         }
         .l2-sp { flex: 1; }
+        /* token usage row — the in/cache/out chip lives on its own line below
+           line2 so it can't overflow the row beside the agent pill. */
+        .line-tok {
+            display: flex;
+            align-items: center;
+            margin-top: 5px;
+            min-width: 0;
+        }
         .age { flex: none; font-family: var(--gt-mono); font-size: 12.5px; color: var(--gt-text-faint); }
 
         /* Token usage base (shared with the shell cwd label) — dim mono. */
@@ -862,6 +876,10 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
         .usage.tokens .tk { display: inline-flex; align-items: baseline; gap: 4px; }
         .usage.tokens .tk-l { color: var(--gt-text-faint); }
         .usage.tokens .tk-v { color: var(--gt-text); font-weight: 600; }
+        /* cache-read is the cheap re-read of the cached context (0.1x billed) —
+           de-emphasised so it doesn't compete with the real in/out figures. */
+        .usage.tokens .tk-cache .tk-l,
+        .usage.tokens .tk-cache .tk-v { color: var(--gt-text-faint); font-weight: 400; }
 
         /* line3 — full path (every AI row with a cwd) + process-tree counts. */
         .line3 {
@@ -2216,7 +2234,9 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
 
     /** Hover text for the token chip — exact counts. */
     tokensTitle (s: TabState): string {
-        return `session tokens — input ${s.tokensIn ?? 0}, output ${s.tokensOut ?? 0} (input includes cache read/creation)`
+        const cache = s.tokensCacheRead ? `, cache-read ${s.tokensCacheRead}` : ''
+        return `session tokens — input ${s.tokensIn ?? 0}${cache}, output ${s.tokensOut ?? 0} `
+            + `(input = fresh input + cache creation; cache-read is the cached context re-read each turn, billed ~0.1x)`
     }
 
     ageStr (ms: number | null): string {

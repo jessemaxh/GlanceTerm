@@ -15,12 +15,13 @@ import type { AiTool } from './tab-monitor'
  *     `message.usage.{input_tokens, cache_creation_input_tokens,
  *     cache_read_input_tokens, output_tokens}` for THAT turn. We sum across
  *     the session. The transcript path arrives in every hook payload
- *     (HookSnapshot.transcriptPath). Cache read/creation tokens ARE counted
- *     as input: for a Claude agent they are the bulk of the input (the whole
- *     context is re-read from cache each turn), so excluding them made "in" a
- *     tiny residue and showed an abnormal in < out. Cumulative cache-read can
- *     reach the hundreds of millions — that is the real input volume, and the
- *     k/m-suffixed display keeps it legible.
+ *     (HookSnapshot.transcriptPath). `inTok` counts what the model processed
+ *     as NEW this turn — fresh `input_tokens` + cache CREATION. Cache READ is
+ *     tracked separately as `cacheReadTok`: the same growing context re-read
+ *     from cache every turn (cheap, billed ~0.1x), so its cumulative total
+ *     reaches the hundreds of millions and would dwarf the real input (in > out
+ *     by 100x+) if folded in. The sidebar shows it as its own dim "cache"
+ *     figure so in/out stay comparable; k/m suffixes keep it legible.
  *
  *   - Codex (implemented): rollout JSONL `event_msg` records periodically
  *     carry `payload.type:"token_count"` with
@@ -51,6 +52,10 @@ interface ClaudeUsageState {
     /** Next unread byte offset (advances only past complete lines). */
     offset: number
     inTok: number
+    /** Cumulative cache-read tokens — tracked apart from inTok (the headline
+     *  input) so the UI can show it as its own dim figure; see
+     *  sumClaudeAssistantUsage for why. */
+    cacheReadTok: number
     outTok: number
     /** ms of the last read — throttle gate. */
     lastReadAt: number
@@ -119,7 +124,7 @@ export class UsageTrackerService {
         key: object,
         tool: AiTool | null,
         source: string | null | UsageSource,
-    ): Promise<{ inTok: number; outTok: number } | null> {
+    ): Promise<{ inTok: number; outTok: number; cacheReadTok?: number } | null> {
         const src = normalizeUsageSource(source)
         if (tool === 'claude' && src.transcriptPath) {
             return this.computeClaude(key, src.transcriptPath)
@@ -148,20 +153,20 @@ export class UsageTrackerService {
     private async computeClaude (
         key: object,
         path: string,
-    ): Promise<{ inTok: number; outTok: number } | null> {
+    ): Promise<{ inTok: number; cacheReadTok: number; outTok: number } | null> {
         let st = this.claude.get(key)
         const now = Date.now()
 
         // New tab, or the session's transcript changed → start fresh.
         if (!st || st.path !== path) {
-            st = { path, offset: 0, inTok: 0, outTok: 0, lastReadAt: 0 }
+            st = { path, offset: 0, inTok: 0, cacheReadTok: 0, outTok: 0, lastReadAt: 0 }
             this.claude.set(key, st)
         }
 
         // Throttle: return the last computed value between reads.
         if (now - st.lastReadAt < USAGE_READ_INTERVAL_MS) {
             return st.offset > 0 || st.lastReadAt > 0
-                ? { inTok: st.inTok, outTok: st.outTok }
+                ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok }
                 : null
         }
         st.lastReadAt = now
@@ -175,7 +180,7 @@ export class UsageTrackerService {
 
         // File shrank (truncated / replaced) → re-read from the top.
         if (size < st.offset) {
-            st.offset = 0; st.inTok = 0; st.outTok = 0
+            st.offset = 0; st.inTok = 0; st.cacheReadTok = 0; st.outTok = 0
         }
         if (size > st.offset) {
             try {
@@ -192,6 +197,7 @@ export class UsageTrackerService {
                         const complete = text.slice(0, lastNl)
                         const delta = sumClaudeAssistantUsage(complete)
                         st.inTok += delta.inTok
+                        st.cacheReadTok += delta.cacheReadTok
                         st.outTok += delta.outTok
                         st.offset += Buffer.byteLength(text.slice(0, lastNl + 1), 'utf8')
                     }
@@ -202,7 +208,7 @@ export class UsageTrackerService {
                 /* transient read error — keep prior sums, retry next interval */
             }
         }
-        return { inTok: st.inTok, outTok: st.outTok }
+        return { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok }
     }
 
     private async computeCodex (
@@ -372,14 +378,16 @@ export class UsageTrackerService {
 }
 
 /**
- * Sum the input side (`input_tokens` + `cache_creation_input_tokens` +
- * `cache_read_input_tokens`) and `output_tokens` across the `type:"assistant"`
- * records in a chunk of Claude transcript NDJSON. Pure; exported for tests.
- * Non-assistant lines, malformed lines, and missing usage are skipped. Cache
- * tokens ARE summed into the input total (see UsageTrackerService doc).
+ * Sum the per-turn usage across the `type:"assistant"` records in a chunk of
+ * Claude transcript NDJSON, into three buckets: `inTok` (`input_tokens` +
+ * `cache_creation_input_tokens`), `cacheReadTok` (`cache_read_input_tokens`,
+ * kept apart — see UsageTrackerService doc), and `outTok` (`output_tokens`).
+ * Pure; exported for tests. Non-assistant lines, malformed lines, and missing
+ * usage are skipped.
  */
-export function sumClaudeAssistantUsage (text: string): { inTok: number; outTok: number } {
+export function sumClaudeAssistantUsage (text: string): { inTok: number; cacheReadTok: number; outTok: number } {
     let inTok = 0
+    let cacheReadTok = 0
     let outTok = 0
     for (const line of text.split('\n')) {
         if (!line) continue
@@ -390,18 +398,20 @@ export function sumClaudeAssistantUsage (text: string): { inTok: number; outTok:
         if (rec?.type !== 'assistant') continue
         const u = rec?.message?.usage
         if (!u) continue
-        // Input = ALL tokens fed to the model that turn: the new uncached
-        // input PLUS cache creation/read. For a Claude agent the cache-read
-        // portion is the bulk of the input (the whole growing context is
-        // re-read from cache every turn); excluding it made "in" a tiny
-        // residue and produced the abnormal in < out display. This matches
-        // the input-token total Anthropic's console / `/cost` report.
+        // `inTok` = the input the model actually had to PROCESS as new content
+        // this turn: fresh uncached input + cache CREATION. cache READ is summed
+        // separately into `cacheReadTok` — it's the same growing context re-read
+        // from cache every turn (cheap, billed at ~0.1x), so over a long agentic
+        // session its cumulative total dwarfs everything (e.g. 360m read vs ~6m
+        // real input). Folding it into `inTok` made the headline meaningless
+        // (in ≫ out by 100x+); the sidebar now shows it as its own dim "cache"
+        // figure so `in`/`out` stay comparable while the cache volume is visible.
         if (typeof u.input_tokens === 'number') inTok += u.input_tokens
         if (typeof u.cache_creation_input_tokens === 'number') inTok += u.cache_creation_input_tokens
-        if (typeof u.cache_read_input_tokens === 'number') inTok += u.cache_read_input_tokens
+        if (typeof u.cache_read_input_tokens === 'number') cacheReadTok += u.cache_read_input_tokens
         if (typeof u.output_tokens === 'number') outTok += u.output_tokens
     }
-    return { inTok, outTok }
+    return { inTok, cacheReadTok, outTok }
 }
 
 /**

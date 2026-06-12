@@ -273,6 +273,10 @@ export interface TabState {
      * compact k/m units.
      */
     tokensIn: number | null
+    /** Claude only: cumulative cache-READ tokens, tracked apart from tokensIn
+     *  (which is fresh input + cache creation). null for agents that don't
+     *  report it; rendered as a dim "cache" figure beside in/out. */
+    tokensCacheRead: number | null
     tokensOut: number | null
 }
 
@@ -719,6 +723,7 @@ export class TabMonitor implements OnDestroy {
         // Cumulative session token usage. Read from the per-agent source by
         // UsageTrackerService — see below.
         let tokensIn: number | null = null
+        let tokensCacheRead: number | null = null
         let tokensOut: number | null = null
 
         if (!aiTool) {
@@ -764,7 +769,7 @@ export class TabMonitor implements OnDestroy {
                     sessionId: snap.sessionId,
                     tabId: snap.tabId,
                 })
-                if (usage) { tokensIn = usage.inTok; tokensOut = usage.outTok }
+                if (usage) { tokensIn = usage.inTok; tokensOut = usage.outTok; tokensCacheRead = usage.cacheReadTok ?? null }
                 // Subagent in-flight override: when the main agent has
                 // spawned a backgrounded Task subagent, the main agent's
                 // response ends → Stop → raw status = idle. The subagent
@@ -842,6 +847,7 @@ export class TabMonitor implements OnDestroy {
             monitorCount: tabId ? this.hooks.getMonitorInFlight(tabId) : 0,
             model,
             tokensIn,
+            tokensCacheRead,
             tokensOut,
         }
     }
@@ -1174,6 +1180,7 @@ export class TabMonitor implements OnDestroy {
             monitorCount: 0,
             model: null,
             tokensIn: null,
+            tokensCacheRead: null,
             tokensOut: null,
         }
     }

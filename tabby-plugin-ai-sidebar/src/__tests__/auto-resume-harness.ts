@@ -100,6 +100,7 @@ export function makeTabState (tab: FakeTab, overrides: FakeStateOverrides = {}):
         monitorCount: 0,
         model: null,
         tokensIn: null,
+        tokensCacheRead: null,
         tokensOut: null,
     }
 }

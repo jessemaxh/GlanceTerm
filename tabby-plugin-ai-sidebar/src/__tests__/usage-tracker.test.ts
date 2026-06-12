@@ -61,18 +61,20 @@ const opencodeRecord = (inT: number, outT: number) => JSON.stringify({
 describe('sumClaudeAssistantUsage', () => {
     it('sums input + output across assistant records', () => {
         const text = [asst(100, 50), userLine, asst(200, 75)].join('\n')
-        expect(sumClaudeAssistantUsage(text)).toEqual({ inTok: 300, outTok: 125 })
+        expect(sumClaudeAssistantUsage(text)).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 125 })
     })
 
     it('ignores non-assistant lines', () => {
-        expect(sumClaudeAssistantUsage([userLine, userLine].join('\n'))).toEqual({ inTok: 0, outTok: 0 })
+        expect(sumClaudeAssistantUsage([userLine, userLine].join('\n'))).toEqual({ inTok: 0, cacheReadTok: 0, outTok: 0 })
     })
 
-    it('INCLUDES cache read/creation in the input total', () => {
-        // cache-read + cache-creation are the bulk of a Claude turn's input
-        // (the whole context is re-read from cache each turn), so they MUST be
-        // counted: 100 input + 9_000_000 cache-read + 500 cache-creation.
-        expect(sumClaudeAssistantUsage(asst(100, 50, 9_000_000, 500))).toEqual({ inTok: 9_000_600, outTok: 50 })
+    it('counts cache CREATION in input but tracks cache READ separately', () => {
+        // cache creation is new content the model processed → part of `inTok`
+        // (100 input + 500 creation = 600). cache read is the re-read of the
+        // already-cached context → its own `cacheReadTok` (9_000_000), NOT
+        // folded into the input headline (where it would dwarf it 100x+).
+        expect(sumClaudeAssistantUsage(asst(100, 50, 9_000_000, 500)))
+            .toEqual({ inTok: 600, cacheReadTok: 9_000_000, outTok: 50 })
     })
 
     it('skips malformed lines and lines without usage', () => {
@@ -82,11 +84,11 @@ describe('sumClaudeAssistantUsage', () => {
             asst(10, 20),
             '',
         ].join('\n')
-        expect(sumClaudeAssistantUsage(text)).toEqual({ inTok: 10, outTok: 20 })
+        expect(sumClaudeAssistantUsage(text)).toEqual({ inTok: 10, cacheReadTok: 0, outTok: 20 })
     })
 
     it('returns zero for empty input', () => {
-        expect(sumClaudeAssistantUsage('')).toEqual({ inTok: 0, outTok: 0 })
+        expect(sumClaudeAssistantUsage('')).toEqual({ inTok: 0, cacheReadTok: 0, outTok: 0 })
     })
 })
 
@@ -166,42 +168,42 @@ describe('UsageTrackerService.compute (Claude transcript)', () => {
     it('sums the transcript on first read', async () => {
         fs.writeFileSync(tx, [asst(100, 50), userLine, asst(200, 75)].join('\n') + '\n')
         const u = await new UsageTrackerService().compute({}, 'claude', tx)
-        expect(u).toEqual({ inTok: 300, outTok: 125 })
+        expect(u).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 125 })
     })
 
     it('accumulates incrementally as the transcript grows (byte-offset read)', async () => {
         const svc = new UsageTrackerService()
         const key = {}
         fs.writeFileSync(tx, asst(100, 50) + '\n')
-        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 100, outTok: 50 })
+        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50 })
 
         // Append a second turn; advance past the throttle so the next call reads.
         fs.appendFileSync(tx, asst(200, 75) + '\n')
         vi.advanceTimersByTime(5_000)
         // Only the NEW bytes are parsed and added — not a re-sum of the whole file.
-        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 300, outTok: 125 })
+        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 125 })
     })
 
     it('does not re-read within the throttle window (returns the cached value)', async () => {
         const svc = new UsageTrackerService()
         const key = {}
         fs.writeFileSync(tx, asst(100, 50) + '\n')
-        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 100, outTok: 50 })
+        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50 })
         // Append but do NOT advance the clock → throttled, stale value returned.
         fs.appendFileSync(tx, asst(999, 999) + '\n')
-        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 100, outTok: 50 })
+        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50 })
     })
 
     it('resets when the transcript path changes (new session)', async () => {
         const svc = new UsageTrackerService()
         const key = {}
         fs.writeFileSync(tx, asst(100, 50) + '\n')
-        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 100, outTok: 50 })
+        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50 })
 
         const tx2 = path.join(tmp, 'session2.jsonl')
         fs.writeFileSync(tx2, asst(7, 3) + '\n')
         vi.advanceTimersByTime(5_000)
-        expect(await svc.compute(key, 'claude', tx2)).toEqual({ inTok: 7, outTok: 3 })
+        expect(await svc.compute(key, 'claude', tx2)).toEqual({ inTok: 7, cacheReadTok: 0, outTok: 3 })
     })
 })
 
