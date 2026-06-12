@@ -3,13 +3,36 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { UsageTrackerService, sumClaudeAssistantUsage } from '../usage-tracker.service'
+import { UsageTrackerService, latestCodexTokenUsage, sumClaudeAssistantUsage } from '../usage-tracker.service'
 
 const asst = (inT: number, outT: number, cacheRead = 0, cacheCreate = 0) => JSON.stringify({
     type: 'assistant',
     message: { model: 'claude-opus-4-8', usage: { input_tokens: inT, output_tokens: outT, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheCreate } },
 })
 const userLine = JSON.stringify({ type: 'user', message: { role: 'user', content: 'hi' } })
+const codexTokenCount = (inT: number, outT: number) => JSON.stringify({
+    timestamp: '2026-06-12T04:47:37.468Z',
+    type: 'event_msg',
+    payload: {
+        type: 'token_count',
+        info: {
+            total_token_usage: {
+                input_tokens: inT,
+                cached_input_tokens: 9000,
+                output_tokens: outT,
+                reasoning_output_tokens: 7,
+                total_tokens: inT + outT,
+            },
+            last_token_usage: {
+                input_tokens: inT,
+                cached_input_tokens: 9000,
+                output_tokens: outT,
+                reasoning_output_tokens: 7,
+                total_tokens: inT + outT,
+            },
+        },
+    },
+})
 
 describe('sumClaudeAssistantUsage', () => {
     it('sums input + output across assistant records', () => {
@@ -43,6 +66,26 @@ describe('sumClaudeAssistantUsage', () => {
     })
 })
 
+describe('latestCodexTokenUsage', () => {
+    it('returns the newest token_count running total', () => {
+        const text = [
+            JSON.stringify({ type: 'response_item', payload: { type: 'message' } }),
+            codexTokenCount(100, 50),
+            codexTokenCount(300, 75),
+        ].join('\n')
+        expect(latestCodexTokenUsage(text)).toEqual({ inTok: 300, outTok: 75 })
+    })
+
+    it('skips malformed and non-token records', () => {
+        const text = [
+            '{ not json',
+            JSON.stringify({ type: 'event_msg', payload: { type: 'task_complete' } }),
+            JSON.stringify({ type: 'event_msg', payload: { type: 'token_count', info: {} } }),
+        ].join('\n')
+        expect(latestCodexTokenUsage(text)).toBeNull()
+    })
+})
+
 describe('UsageTrackerService.compute (Claude transcript)', () => {
     let tmp: string
     let tx: string
@@ -55,11 +98,6 @@ describe('UsageTrackerService.compute (Claude transcript)', () => {
     afterEach(() => {
         vi.useRealTimers()
         try { fs.rmSync(tmp, { recursive: true, force: true }) } catch { /* */ }
-    })
-
-    it('returns null for a non-Claude tool', async () => {
-        fs.writeFileSync(tx, asst(100, 50) + '\n')
-        expect(await new UsageTrackerService().compute({}, 'codex', tx)).toBeNull()
     })
 
     it('returns null when there is no transcript path', async () => {
@@ -105,5 +143,56 @@ describe('UsageTrackerService.compute (Claude transcript)', () => {
         fs.writeFileSync(tx2, asst(7, 3) + '\n')
         vi.advanceTimersByTime(5_000)
         expect(await svc.compute(key, 'claude', tx2)).toEqual({ inTok: 7, outTok: 3 })
+    })
+})
+
+describe('UsageTrackerService.compute (Codex transcript)', () => {
+    let tmp: string
+    let tx: string
+
+    beforeEach(() => {
+        vi.useFakeTimers()
+        tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-usage-codex-'))
+        tx = path.join(tmp, 'rollout.jsonl')
+    })
+    afterEach(() => {
+        vi.useRealTimers()
+        try { fs.rmSync(tmp, { recursive: true, force: true }) } catch { /* */ }
+    })
+
+    it('returns null when there is no transcript path', async () => {
+        expect(await new UsageTrackerService().compute({}, 'codex', null)).toBeNull()
+    })
+
+    it('returns null until a token_count record appears', async () => {
+        fs.writeFileSync(tx, JSON.stringify({ type: 'response_item', payload: { type: 'message' } }) + '\n')
+        expect(await new UsageTrackerService().compute({}, 'codex', tx)).toBeNull()
+    })
+
+    it('reads the latest token_count running total on first read', async () => {
+        fs.writeFileSync(tx, [codexTokenCount(100, 50), codexTokenCount(300, 75)].join('\n') + '\n')
+        const u = await new UsageTrackerService().compute({}, 'codex', tx)
+        expect(u).toEqual({ inTok: 300, outTok: 75 })
+    })
+
+    it('updates incrementally as the transcript grows', async () => {
+        const svc = new UsageTrackerService()
+        const key = {}
+        fs.writeFileSync(tx, codexTokenCount(100, 50) + '\n')
+        expect(await svc.compute(key, 'codex', tx)).toEqual({ inTok: 100, outTok: 50 })
+
+        fs.appendFileSync(tx, codexTokenCount(300, 75) + '\n')
+        vi.advanceTimersByTime(5_000)
+        expect(await svc.compute(key, 'codex', tx)).toEqual({ inTok: 300, outTok: 75 })
+    })
+
+    it('does not re-read within the throttle window (returns the cached value)', async () => {
+        const svc = new UsageTrackerService()
+        const key = {}
+        fs.writeFileSync(tx, codexTokenCount(100, 50) + '\n')
+        expect(await svc.compute(key, 'codex', tx)).toEqual({ inTok: 100, outTok: 50 })
+
+        fs.appendFileSync(tx, codexTokenCount(999, 999) + '\n')
+        expect(await svc.compute(key, 'codex', tx)).toEqual({ inTok: 100, outTok: 50 })
     })
 })

@@ -20,13 +20,17 @@ import type { AiTool } from './tab-monitor'
  *     reach the hundreds of millions — that is the real input volume, and the
  *     k/m-suffixed display keeps it legible.
  *
- *   - Codex / Gemini / opencode (deferred): sources are known (Codex rollout
- *     `~/.codex/sessions/.../rollout-*-<id>.jsonl` last `token_count` line's
- *     `total_token_usage` — a running total; Gemini `~/.gemini/tmp/<hash>/
- *     chats/*.jsonl` `message.tokens`; opencode `message.updated`
- *     `info.tokens.{input,output}` summed in the plugin). Add a branch in
- *     `compute()` (or, for opencode, carry it in the hook log like `model`).
- *     See docs/feature-matrix.md.
+ *   - Codex (implemented): rollout JSONL `event_msg` records periodically
+ *     carry `payload.type:"token_count"` with
+ *     `payload.info.total_token_usage.{input_tokens,output_tokens}`. That is
+ *     already a running total, so we keep the newest complete token_count
+ *     record seen in the transcript.
+ *
+ *   - Gemini / opencode (deferred): sources are known (Gemini
+ *     `~/.gemini/tmp/<hash>/chats/*.jsonl` `message.tokens`; opencode
+ *     `message.updated` `info.tokens.{input,output}` summed in the plugin).
+ *     Add a branch in `compute()` (or, for opencode, carry it in the hook log
+ *     like `model`). See docs/feature-matrix.md.
  *
  * Efficiency: the Claude transcript can be many MB. We read INCREMENTALLY —
  * track a byte offset per tab and only parse the bytes appended since the last
@@ -46,6 +50,19 @@ interface ClaudeUsageState {
     lastReadAt: number
 }
 
+interface CodexUsageState {
+    /** Transcript path these totals belong to — reset everything if it changes. */
+    path: string
+    /** Next unread byte offset (advances only past complete lines). */
+    offset: number
+    inTok: number
+    outTok: number
+    /** Whether at least one token_count record has been observed. */
+    seen: boolean
+    /** ms of the last read — throttle gate. */
+    lastReadAt: number
+}
+
 /** Minimum gap between transcript reads per tab. Usage changes at most once
  *  per turn (seconds-to-minutes apart); 4 s keeps the sidebar fresh without
  *  re-statting a multi-MB file every 1.5 s poll. */
@@ -54,6 +71,7 @@ const USAGE_READ_INTERVAL_MS = 4_000
 @Injectable({ providedIn: 'root' })
 export class UsageTrackerService {
     private claude = new WeakMap<object, ClaudeUsageState>()
+    private codex = new WeakMap<object, CodexUsageState>()
 
     /**
      * Cumulative {inTok, outTok} for this tab, or null if unavailable
@@ -68,7 +86,10 @@ export class UsageTrackerService {
         if (tool === 'claude' && transcriptPath) {
             return this.computeClaude(key, transcriptPath)
         }
-        // Codex / Gemini / opencode: deferred — see class doc.
+        if (tool === 'codex' && transcriptPath) {
+            return this.computeCodex(key, transcriptPath)
+        }
+        // Gemini / opencode: deferred — see class doc.
         return null
     }
 
@@ -76,6 +97,7 @@ export class UsageTrackerService {
      *  collects closed tabs, but callers may clear eagerly. */
     forget (key: object): void {
         this.claude.delete(key)
+        this.codex.delete(key)
     }
 
     private async computeClaude (
@@ -137,6 +159,67 @@ export class UsageTrackerService {
         }
         return { inTok: st.inTok, outTok: st.outTok }
     }
+
+    private async computeCodex (
+        key: object,
+        path: string,
+    ): Promise<{ inTok: number; outTok: number } | null> {
+        let st = this.codex.get(key)
+        const now = Date.now()
+
+        // New tab, or the session's transcript changed → start fresh.
+        if (!st || st.path !== path) {
+            st = { path, offset: 0, inTok: 0, outTok: 0, seen: false, lastReadAt: 0 }
+            this.codex.set(key, st)
+        }
+
+        // Throttle: return the last computed value between reads.
+        if (now - st.lastReadAt < USAGE_READ_INTERVAL_MS) {
+            return st.seen ? { inTok: st.inTok, outTok: st.outTok } : null
+        }
+        st.lastReadAt = now
+
+        let size: number
+        try {
+            size = (await fs.stat(path)).size
+        } catch {
+            return null   // transcript not present (yet)
+        }
+
+        // File shrank (truncated / replaced) → re-read from the top.
+        if (size < st.offset) {
+            st.offset = 0; st.inTok = 0; st.outTok = 0; st.seen = false
+        }
+        if (size > st.offset) {
+            try {
+                const fh = await fs.open(path, 'r')
+                try {
+                    const len = size - st.offset
+                    const buf = Buffer.allocUnsafe(len)
+                    await fh.read(buf, 0, len, st.offset)
+                    const text = buf.toString('utf8')
+                    // Only advance past COMPLETE lines; a trailing partial line
+                    // is left for the next read (offset stops at the last \n).
+                    const lastNl = text.lastIndexOf('\n')
+                    if (lastNl >= 0) {
+                        const complete = text.slice(0, lastNl)
+                        const latest = latestCodexTokenUsage(complete)
+                        if (latest) {
+                            st.inTok = latest.inTok
+                            st.outTok = latest.outTok
+                            st.seen = true
+                        }
+                        st.offset += Buffer.byteLength(text.slice(0, lastNl + 1), 'utf8')
+                    }
+                } finally {
+                    await fh.close()
+                }
+            } catch {
+                /* transient read error — keep prior totals, retry next interval */
+            }
+        }
+        return st.seen ? { inTok: st.inTok, outTok: st.outTok } : null
+    }
 }
 
 /**
@@ -170,4 +253,26 @@ export function sumClaudeAssistantUsage (text: string): { inTok: number; outTok:
         if (typeof u.output_tokens === 'number') outTok += u.output_tokens
     }
     return { inTok, outTok }
+}
+
+/**
+ * Return the newest Codex `token_count` running total in a chunk of rollout
+ * JSONL. Pure; exported for tests. Malformed lines and partial/non-token
+ * records are skipped.
+ */
+export function latestCodexTokenUsage (text: string): { inTok: number; outTok: number } | null {
+    let latest: { inTok: number; outTok: number } | null = null
+    for (const line of text.split('\n')) {
+        if (!line) continue
+        if (!line.includes('"token_count"')) continue
+        let rec: any
+        try { rec = JSON.parse(line) } catch { continue }
+        if (rec?.type !== 'event_msg') continue
+        if (rec?.payload?.type !== 'token_count') continue
+        const u = rec?.payload?.info?.total_token_usage
+        if (!u) continue
+        if (typeof u.input_tokens !== 'number' || typeof u.output_tokens !== 'number') continue
+        latest = { inTok: u.input_tokens, outTok: u.output_tokens }
+    }
+    return latest
 }
