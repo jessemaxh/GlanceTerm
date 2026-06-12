@@ -2127,14 +2127,28 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         return m
     }
 
-    /** Compact token count: <1k raw, then `k`, then `m` (1 decimal). null→0.
-     *  Thresholds sit just below the round boundary so rounding never spills
-     *  into a wrong magnitude (e.g. 999_999 → `1.0m`, not `1000k`). */
+    /** Compact token count: <1k raw, then `k`, `m`, `b`, `t`. From `m` up,
+     *  shows up to 2 decimals with a trailing zero trimmed (min 1 decimal) —
+     *  `1.00t`→`1.0t`, `56.70b`→`56.7b`, but `12.34m` keeps both — so big
+     *  counts stay precise without trailing-zero noise. Exact value is in the
+     *  hover tooltip. null→0. Each threshold sits just below the round
+     *  boundary so rounding never spills a magnitude (999_999 → `1.0m`, not
+     *  `1000k`; 999_500_000 → `1.0b`). Cumulative cache-read input on a long
+     *  Claude session reaches the hundreds of millions / billions. */
     fmtTokens (n: number | null): string {
         const v = n ?? 0
         if (v < 1000) return String(v)
         if (v < 999_500) return `${(v / 1000).toFixed(v < 9_950 ? 1 : 0)}k`
-        return `${(v / 1_000_000).toFixed(1)}m`
+        if (v < 999_500_000) return `${this.trim2(v / 1_000_000)}m`
+        if (v < 999_500_000_000) return `${this.trim2(v / 1_000_000_000)}b`
+        return `${this.trim2(v / 1_000_000_000_000)}t`
+    }
+
+    /** `x` to ≤2 decimals, dropping a trailing zero in the 2nd place
+     *  (`1.00`→`1.0`, `56.70`→`56.7`) while keeping `12.34` intact. Always
+     *  ≥1 decimal so the value still reads as a rounded magnitude. */
+    private trim2 (x: number): string {
+        return x.toFixed(2).replace(/(\.\d)0$/, '$1')
     }
 
     /** Hover text for the token chip — exact counts. */
