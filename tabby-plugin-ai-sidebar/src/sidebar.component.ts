@@ -144,7 +144,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                                 <span class="agent-name">{{ toolTag(s.aiTool) }}</span>
                                 <span *ngIf="s.model" class="agent-model">{{ modelLabel(s.aiTool, s.model) }}</span>
                             </span>
-                            <span class="usage" *ngIf="s.tokensIn || s.tokensOut" [title]="tokensTitle(s)">in: {{ fmtTokens(s.tokensIn) }}, out: {{ fmtTokens(s.tokensOut) }}</span>
+                            <span class="usage tokens" *ngIf="s.tokensIn || s.tokensOut" [title]="tokensTitle(s)"><span class="tk"><span class="tk-l">in:</span><span class="tk-v">{{ fmtTokens(s.tokensIn) }}</span></span><span class="tk"><span class="tk-l">out:</span><span class="tk-v">{{ fmtTokens(s.tokensOut) }}</span></span></span>
                             <span class="l2-sp"></span>
                             <span class="age" *ngIf="s.lastActiveMs !== null">{{ ageStr(s.lastActiveMs) }}</span>
                         </div>
@@ -816,7 +816,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
         .l2-sp { flex: 1; }
         .age { flex: none; font-family: var(--gt-mono); font-size: 12.5px; color: var(--gt-text-faint); }
 
-        /* Token usage ("in: 27k, out: 284k") — dim mono metadata. */
+        /* Token usage base (shared with the shell cwd label) — dim mono. */
         .usage {
             font-family: var(--gt-mono);
             font-size: 12.5px;
@@ -832,6 +832,22 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             flex: 0 1 auto;
             opacity: 0.85;
         }
+        /* Token usage chip ("in: 27k out: 284k") — label-first: dimmed label
+           with trailing colon, bright value (weight 600), in the neutral
+           --gt-meta chip (same bg/border as the agent pill it sits beside).
+           Designer handoff 2026-06-12. */
+        .usage.tokens {
+            display: inline-flex;
+            align-items: baseline;
+            gap: 7px;
+            padding: 1.5px 6px;
+            border-radius: 5px;
+            background: var(--gt-meta-bg);
+            border: 1px solid var(--gt-meta-br);
+        }
+        .usage.tokens .tk { display: inline-flex; align-items: baseline; gap: 4px; }
+        .usage.tokens .tk-l { color: var(--gt-text-faint); }
+        .usage.tokens .tk-v { color: var(--gt-text); font-weight: 600; }
 
         /* line3 — full path (every AI row with a cwd) + process-tree counts. */
         .line3 {
