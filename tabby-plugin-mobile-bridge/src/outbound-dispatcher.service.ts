@@ -1,5 +1,6 @@
 import { Injectable, OnDestroy } from '@angular/core'
 import { Subscription } from 'rxjs'
+import { NotificationsService } from 'tabby-core'
 
 import { TabMonitor, TabState, TabStatus } from 'tabby-plugin-ai-sidebar'
 
@@ -8,7 +9,7 @@ import { BindingStoreService } from './binding/store.service'
 import { ChannelBinding } from './binding/types'
 import { TopicService } from './topic.service'
 import { BackendRegistry } from './backends/registry.service'
-import { MessagingError } from './backends/types'
+import { MessagingError, isUnrecoverableStartError } from './backends/types'
 import { retryWithBackoff } from './retry'
 import { appendAudit, redactToken } from './audit-log'
 import { TranscriptTailerService, TranscriptEvent } from './transcript/tailer.service'
@@ -67,6 +68,12 @@ export class OutboundDispatcherService implements OnDestroy {
      *  while a token stays revoked would write a duplicate audit row,
      *  drowning out actually new failures. */
     private lastStartFailureSig = new Map<ChannelBinding['platform'], string>()
+    /** Binding ids already torn down for an unrecoverable start failure.
+     *  A re-entrant bindings$ emission (store.remove itself re-emits) can
+     *  route a second teardown for the same id before the first resolves;
+     *  this keeps the user notification + audit row single. store.remove()
+     *  is independently idempotent for an already-removed id. */
+    private tornDownBindingIds = new Set<string>()
 
     constructor (
         private monitor: TabMonitor,
@@ -77,6 +84,7 @@ export class OutboundDispatcherService implements OnDestroy {
         private transcript: TranscriptTailerService,
         private pty: PtyTailerService,
         private lock: InstanceLockService,
+        private notifications: NotificationsService,
     ) {
         this.subs.push(this.monitor.states$.subscribe(states => this.diff(states)))
         this.subs.push(this.store.bindings$.subscribe(bindings => void this.syncTransport(bindings)))
@@ -134,12 +142,28 @@ export class OutboundDispatcherService implements OnDestroy {
                 this.lastStartFailureSig.delete(platform)
             } catch (err) {
                 const safe = redactToken(err instanceof Error ? err.message : String(err))
+                // Unrecoverable credential failure — the stored secret can
+                // NEVER produce a working backend: keystore decrypt failed
+                // (the host's hostname|username KDF inputs changed, so the
+                // key can't be re-derived) or the platform rejected the
+                // token (revoked). Both normalise to MessagingError
+                // kind='auth_failed'. Leaving the binding `enabled` here is
+                // exactly what trapped this dispatcher AND TopicSyncService
+                // in a permanent failing-retry loop — every assistant_text
+                // dispatch and every topic close/retitle re-failed forever
+                // (the 1489 outbound-drops + the steady `op close failed`
+                // spam). Self-heal: tear the binding down to the unbound
+                // state. The user re-pairs to reconnect.
+                if (isUnrecoverableStartError(err)) {
+                    await this.tearDownDeadBinding(active, safe)
+                    return
+                }
+                // Transient failure (network blip, rate limit): keep the
+                // binding enabled so the next bindings$ emission retries
+                // start(). Audit ONLY when the error fingerprint changes so
+                // a chronically-flapping network doesn't flood the log.
                 // eslint-disable-next-line no-console
-                console.warn(`[mobile-bridge:dispatch] ${platform} start failed:`, safe)
-                // Audit ONLY when the error fingerprint changes — a
-                // chronically-broken binding (revoked token, hostname
-                // drift) would otherwise re-audit on every bindings$
-                // emission, drowning the log in N copies of the same row.
+                console.warn(`[mobile-bridge:dispatch] ${platform} start failed (will retry):`, safe)
                 const sig = `${active.id}|${safe}`
                 if (this.lastStartFailureSig.get(platform) !== sig) {
                     this.lastStartFailureSig.set(platform, sig)
@@ -155,6 +179,50 @@ export class OutboundDispatcherService implements OnDestroy {
             await backend.stop()
             this.lastStartFailureSig.delete(platform)
         }
+    }
+
+    /**
+     * Remove a binding whose backend can never start (unrecoverable
+     * credential failure), reverting to the unbound state. Removing it
+     * from the store makes bindings$ re-emit WITHOUT it, which is what
+     * stops both this dispatcher and TopicSyncService from issuing — and
+     * re-failing, and re-logging — any further ops against the dead
+     * backend. store.remove() also clears the now-unreadable keystore
+     * secret, so we don't leave an orphaned encrypted entry behind.
+     */
+    private async tearDownDeadBinding (binding: ChannelBinding, safeError: string): Promise<void> {
+        if (this.tornDownBindingIds.has(binding.id)) return
+        this.tornDownBindingIds.add(binding.id)
+        // eslint-disable-next-line no-console
+        console.warn(
+            `[mobile-bridge:dispatch] ${binding.platform} binding ${binding.id} is unrecoverable `
+            + `(${safeError}) — removing it (back to unbound). Re-pair to reconnect.`,
+        )
+        await appendAudit({
+            kind: 'binding-auto-removed',
+            platform: binding.platform,
+            bindingId: binding.id,
+            reason: 'unrecoverable-start-failure',
+            error: safeError,
+        })
+        try {
+            await this.store.remove(binding.id)
+        } catch (rmErr) {
+            // Store is in degraded (mutation-refuse) mode — e.g. the
+            // bindings file itself failed to load, so it won't persist a
+            // removal. We can't safely tear down; the store's degraded
+            // reason already carries recovery guidance. Drop the guard so a
+            // future healthy state can retry the teardown.
+            this.tornDownBindingIds.delete(binding.id)
+            // eslint-disable-next-line no-console
+            console.warn('[mobile-bridge:dispatch] could not remove dead binding (store degraded?):', rmErr)
+            return
+        }
+        this.notifications.error(
+            `Mobile bridge: the ${platformLabel(binding.platform)} connection stopped working `
+            + '(its saved credentials can no longer be read — this happens when the machine or '
+            + 'login name changes) and was disconnected. Re-pair it in the bridge settings to reconnect.',
+        )
     }
 
     /**
@@ -344,4 +412,12 @@ function truncateForChat (s: string): string {
     const MAX = 3500
     if (s.length <= MAX) return s
     return s.slice(0, MAX) + `\n… (${s.length - MAX} chars truncated — see desktop)`
+}
+
+/** Human label for a platform id in a user-facing notification. */
+function platformLabel (platform: ChannelBinding['platform']): string {
+    return platform === 'telegram' ? 'Telegram'
+        : platform === 'feishu' ? 'Feishu/Lark'
+        : platform === 'discord' ? 'Discord'
+        : platform
 }

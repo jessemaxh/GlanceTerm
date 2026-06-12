@@ -198,6 +198,22 @@ export class MessagingError extends Error {
 }
 
 /**
+ * Is this `start()` failure one that retrying can NEVER fix? The stored
+ * credential is unreadable (keystore GCM auth fails because the host's
+ * hostname|username KDF inputs changed) or was rejected by the platform
+ * (bot token revoked) — both normalised to `auth_failed`. The
+ * OutboundDispatcher uses this to decide between tearing the binding down
+ * to the unbound state vs. retrying on the next bindings$ emission.
+ *
+ * Deliberately narrow: transient kinds (`rate_limited`, network `unknown`,
+ * `thread_*`) AND `chat_not_found` (the bot can be re-added to the chat)
+ * stay retryable, so a passing blip never auto-nukes a good binding.
+ */
+export function isUnrecoverableStartError (err: unknown): boolean {
+    return err instanceof MessagingError && err.kind === 'auth_failed'
+}
+
+/**
  * The cross-platform messaging surface. Implemented per platform; consumed
  * by OutboundDispatcher / TopicService / PermissionRelay through
  * {@link BackendRegistry.forPlatform}.
