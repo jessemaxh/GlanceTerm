@@ -93,9 +93,21 @@ export const GlanceTerm = async () => {
     // (event.properties.info.modelID). Included in every emitted record once
     // known so the sidebar can show it next to the opencode tag.
     let model = null
+    // Running token totals, built from assistant message.updated
+    // event.properties.info.tokens.{input,output}. message.updated can fire
+    // repeatedly for the same message as streaming progresses, so keep the
+    // latest token block per message id and recompute the session total from
+    // those latest values instead of double-counting every update.
+    const messageTokens = new Map()
+    let tokensIn = 0
+    let tokensOut = 0
     const emit = (event) => {
         const rec = { tab_id: tabId, agent: "opencode", event: event, ts: Math.floor(Date.now() / 1000) }
         if (model) rec.model = model
+        if (tokensIn || tokensOut) {
+            rec.tokens_in = tokensIn
+            rec.tokens_out = tokensOut
+        }
         try { appendFileSync(logPath, JSON.stringify(rec) + "\\n") } catch (e) {}
     }
 
@@ -116,6 +128,19 @@ export const GlanceTerm = async () => {
                 // Emit a model-carrying record now if we're already working; if
                 // we're not yet working, the working edge below emits it.
                 model = info.modelID
+                if (working) emit("working")
+            }
+            if (info && info.role === "assistant" && info.tokens) {
+                const input = typeof info.tokens.input === "number" ? info.tokens.input : 0
+                const output = typeof info.tokens.output === "number" ? info.tokens.output : 0
+                const messageId = info.id || info.messageID || info.messageId || "__latest__"
+                messageTokens.set(messageId, { input, output })
+                tokensIn = 0
+                tokensOut = 0
+                for (const usage of messageTokens.values()) {
+                    tokensIn += usage.input || 0
+                    tokensOut += usage.output || 0
+                }
                 if (working) emit("working")
             }
             // NOTE: session.idle is the turn-end signal (source-confirmed). It

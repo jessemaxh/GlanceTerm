@@ -3,7 +3,13 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { UsageTrackerService, latestCodexTokenUsage, sumClaudeAssistantUsage } from '../usage-tracker.service'
+import {
+    UsageTrackerService,
+    latestCodexTokenUsage,
+    latestOpencodeTokenUsage,
+    sumClaudeAssistantUsage,
+    sumGeminiMessageUsage,
+} from '../usage-tracker.service'
 
 const asst = (inT: number, outT: number, cacheRead = 0, cacheCreate = 0) => JSON.stringify({
     type: 'assistant',
@@ -32,6 +38,24 @@ const codexTokenCount = (inT: number, outT: number) => JSON.stringify({
             },
         },
     },
+})
+const geminiChat = (sessionId: string, messages: any[]) => JSON.stringify({
+    sessionId,
+    projectHash: 'abc123',
+    messages,
+})
+const geminiMessage = (inT: number, outT: number, cached = 0, thoughts = 0) => ({
+    type: 'assistant',
+    content: 'ok',
+    tokens: { input: inT, output: outT, cached, thoughts },
+})
+const opencodeRecord = (inT: number, outT: number) => JSON.stringify({
+    tab_id: '11111111-2222-4333-8444-555555555555',
+    agent: 'opencode',
+    event: 'working',
+    ts: 1781257658,
+    tokens_in: inT,
+    tokens_out: outT,
 })
 
 describe('sumClaudeAssistantUsage', () => {
@@ -83,6 +107,41 @@ describe('latestCodexTokenUsage', () => {
             JSON.stringify({ type: 'event_msg', payload: { type: 'token_count', info: {} } }),
         ].join('\n')
         expect(latestCodexTokenUsage(text)).toBeNull()
+    })
+})
+
+describe('sumGeminiMessageUsage', () => {
+    it('sums explicit Gemini input/output token fields', () => {
+        const text = geminiChat('600336a0-b038-4cb7-8322-a418ebdc2ab5', [
+            geminiMessage(100, 50, 9000, 7),
+            { type: 'user', content: 'hi' },
+            geminiMessage(200, 75),
+        ])
+        expect(sumGeminiMessageUsage(text)).toEqual({ inTok: 300, outTok: 125 })
+    })
+
+    it('returns zero for malformed or token-less saved chats', () => {
+        expect(sumGeminiMessageUsage('{ not json')).toEqual({ inTok: 0, outTok: 0 })
+        expect(sumGeminiMessageUsage(JSON.stringify({ messages: [{ type: 'user' }] }))).toEqual({ inTok: 0, outTok: 0 })
+    })
+})
+
+describe('latestOpencodeTokenUsage', () => {
+    it('returns the newest opencode running total', () => {
+        const text = [
+            JSON.stringify({ agent: 'opencode', event: 'working' }),
+            opencodeRecord(100, 50),
+            opencodeRecord(300, 75),
+        ].join('\n')
+        expect(latestOpencodeTokenUsage(text)).toEqual({ inTok: 300, outTok: 75 })
+    })
+
+    it('skips malformed and non-opencode records', () => {
+        const text = [
+            '{ not json',
+            JSON.stringify({ agent: 'claude', tokens_in: 100, tokens_out: 50 }),
+        ].join('\n')
+        expect(latestOpencodeTokenUsage(text)).toBeNull()
     })
 })
 
@@ -194,5 +253,88 @@ describe('UsageTrackerService.compute (Codex transcript)', () => {
 
         fs.appendFileSync(tx, codexTokenCount(999, 999) + '\n')
         expect(await svc.compute(key, 'codex', tx)).toEqual({ inTok: 100, outTok: 50 })
+    })
+})
+
+describe('UsageTrackerService.compute (Gemini saved chat)', () => {
+    let oldHome: string | undefined
+    let oldUserProfile: string | undefined
+    let tmp: string
+    let tx: string
+    const sessionId = '600336a0-b038-4cb7-8322-a418ebdc2ab5'
+
+    beforeEach(() => {
+        vi.useFakeTimers()
+        oldHome = process.env.HOME
+        oldUserProfile = process.env.USERPROFILE
+        tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-usage-gemini-'))
+        process.env.HOME = tmp
+        process.env.USERPROFILE = tmp
+        tx = path.join(tmp, '.gemini', 'tmp', 'projecthash', 'chats', 'session-2026-06-12T13-00-600336a0.json')
+        fs.mkdirSync(path.dirname(tx), { recursive: true })
+    })
+    afterEach(() => {
+        process.env.HOME = oldHome
+        process.env.USERPROFILE = oldUserProfile
+        vi.useRealTimers()
+        try { fs.rmSync(tmp, { recursive: true, force: true }) } catch { /* */ }
+    })
+
+    it('locates the saved chat by session id and sums message tokens', async () => {
+        fs.writeFileSync(tx, geminiChat(sessionId, [geminiMessage(100, 50), geminiMessage(200, 75)]))
+        const u = await new UsageTrackerService().compute({}, 'gemini', { sessionId })
+        expect(u).toEqual({ inTok: 300, outTok: 125 })
+    })
+
+    it('returns cached Gemini usage inside the throttle window', async () => {
+        const svc = new UsageTrackerService()
+        const key = {}
+        fs.writeFileSync(tx, geminiChat(sessionId, [geminiMessage(100, 50)]))
+        expect(await svc.compute(key, 'gemini', { sessionId })).toEqual({ inTok: 100, outTok: 50 })
+
+        fs.writeFileSync(tx, geminiChat(sessionId, [geminiMessage(999, 999)]))
+        expect(await svc.compute(key, 'gemini', { sessionId })).toEqual({ inTok: 100, outTok: 50 })
+    })
+})
+
+describe('UsageTrackerService.compute (opencode hook log)', () => {
+    let oldHome: string | undefined
+    let oldUserProfile: string | undefined
+    let tmp: string
+    let log: string
+    const tabId = '11111111-2222-4333-8444-555555555555'
+
+    beforeEach(() => {
+        vi.useFakeTimers()
+        oldHome = process.env.HOME
+        oldUserProfile = process.env.USERPROFILE
+        tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-usage-opencode-'))
+        process.env.HOME = tmp
+        process.env.USERPROFILE = tmp
+        log = path.join(tmp, '.glanceterm', 'hooks', `${tabId}.log`)
+        fs.mkdirSync(path.dirname(log), { recursive: true })
+    })
+    afterEach(() => {
+        process.env.HOME = oldHome
+        process.env.USERPROFILE = oldUserProfile
+        vi.useRealTimers()
+        try { fs.rmSync(tmp, { recursive: true, force: true }) } catch { /* */ }
+    })
+
+    it('reads the latest opencode token total from the hook log', async () => {
+        fs.writeFileSync(log, [opencodeRecord(100, 50), opencodeRecord(300, 75)].join('\n') + '\n')
+        const u = await new UsageTrackerService().compute({}, 'opencode', { tabId })
+        expect(u).toEqual({ inTok: 300, outTok: 75 })
+    })
+
+    it('updates incrementally as the hook log grows', async () => {
+        const svc = new UsageTrackerService()
+        const key = {}
+        fs.writeFileSync(log, opencodeRecord(100, 50) + '\n')
+        expect(await svc.compute(key, 'opencode', { tabId })).toEqual({ inTok: 100, outTok: 50 })
+
+        fs.appendFileSync(log, opencodeRecord(300, 75) + '\n')
+        vi.advanceTimersByTime(5_000)
+        expect(await svc.compute(key, 'opencode', { tabId })).toEqual({ inTok: 300, outTok: 75 })
     })
 })

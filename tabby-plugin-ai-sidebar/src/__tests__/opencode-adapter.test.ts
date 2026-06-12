@@ -193,6 +193,18 @@ describe('shipped opencode plugin — runtime behaviour', () => {
         expect(recs[0].model).toBe('claude-opus-4-5')
         expect(recs[1].model).toBe('claude-opus-4-5')   // sticky within the session
     })
+
+    it('captures assistant token totals without double-counting repeated message updates', () => {
+        const recs = driveEvents(UUID, [
+            { type: 'message.updated', properties: { info: { id: 'm1', role: 'assistant', tokens: { input: 100, output: 50 } } } },
+            { type: 'message.updated', properties: { info: { id: 'm1', role: 'assistant', tokens: { input: 120, output: 60 } } } },
+            { type: 'message.updated', properties: { info: { id: 'm2', role: 'assistant', tokens: { input: 20, output: 10 } } } },
+            'session.idle',
+        ])
+        const last = recs[recs.length - 1]
+        expect(last.tokens_in).toBe(140)
+        expect(last.tokens_out).toBe(70)
+    })
 })
 
 describe('opencodeConfigDirExistsSync', () => {

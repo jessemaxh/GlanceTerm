@@ -1,5 +1,7 @@
 import { Injectable } from '@angular/core'
 import * as fs from 'fs/promises'
+import * as os from 'os'
+import * as path from 'path'
 
 import type { AiTool } from './tab-monitor'
 
@@ -26,11 +28,15 @@ import type { AiTool } from './tab-monitor'
  *     already a running total, so we keep the newest complete token_count
  *     record seen in the transcript.
  *
- *   - Gemini / opencode (deferred): sources are known (Gemini
- *     `~/.gemini/tmp/<hash>/chats/*.jsonl` `message.tokens`; opencode
- *     `message.updated` `info.tokens.{input,output}` summed in the plugin).
- *     Add a branch in `compute()` (or, for opencode, carry it in the hook log
- *     like `model`). See docs/feature-matrix.md.
+ *   - Gemini (implemented): `~/.gemini/tmp/<project_hash>/chats/*.json`
+ *     stores the complete session, and assistant messages carry
+ *     `tokens.{input,output,cached,thoughts}`. We locate by `session_id` and
+ *     sum `input` / `output` across messages with token blocks.
+ *
+ *   - opencode (implemented): our shipped plugin copies assistant
+ *     `message.updated` `info.tokens.{input,output}` into the per-tab hook log
+ *     as running `tokens_in` / `tokens_out` totals. We read the newest complete
+ *     totals from `~/.glanceterm/hooks/<tab_id>.log`.
  *
  * Efficiency: the Claude transcript can be many MB. We read INCREMENTALLY —
  * track a byte offset per tab and only parse the bytes appended since the last
@@ -63,6 +69,35 @@ interface CodexUsageState {
     lastReadAt: number
 }
 
+interface JsonUsageState {
+    path: string
+    inTok: number
+    outTok: number
+    seen: boolean
+    size: number
+    mtimeMs: number
+    lastReadAt: number
+}
+
+interface GeminiUsageState extends JsonUsageState {
+    sessionId: string
+}
+
+interface LogUsageState {
+    path: string
+    offset: number
+    inTok: number
+    outTok: number
+    seen: boolean
+    lastReadAt: number
+}
+
+export interface UsageSource {
+    transcriptPath?: string | null
+    sessionId?: string | null
+    tabId?: string | null
+}
+
 /** Minimum gap between transcript reads per tab. Usage changes at most once
  *  per turn (seconds-to-minutes apart); 4 s keeps the sidebar fresh without
  *  re-statting a multi-MB file every 1.5 s poll. */
@@ -72,6 +107,8 @@ const USAGE_READ_INTERVAL_MS = 4_000
 export class UsageTrackerService {
     private claude = new WeakMap<object, ClaudeUsageState>()
     private codex = new WeakMap<object, CodexUsageState>()
+    private gemini = new WeakMap<object, GeminiUsageState>()
+    private opencode = new WeakMap<object, LogUsageState>()
 
     /**
      * Cumulative {inTok, outTok} for this tab, or null if unavailable
@@ -81,15 +118,21 @@ export class UsageTrackerService {
     async compute (
         key: object,
         tool: AiTool | null,
-        transcriptPath: string | null,
+        source: string | null | UsageSource,
     ): Promise<{ inTok: number; outTok: number } | null> {
-        if (tool === 'claude' && transcriptPath) {
-            return this.computeClaude(key, transcriptPath)
+        const src = normalizeUsageSource(source)
+        if (tool === 'claude' && src.transcriptPath) {
+            return this.computeClaude(key, src.transcriptPath)
         }
-        if (tool === 'codex' && transcriptPath) {
-            return this.computeCodex(key, transcriptPath)
+        if (tool === 'codex' && src.transcriptPath) {
+            return this.computeCodex(key, src.transcriptPath)
         }
-        // Gemini / opencode: deferred — see class doc.
+        if (tool === 'gemini' && src.sessionId) {
+            return this.computeGemini(key, src.sessionId)
+        }
+        if (tool === 'opencode' && src.tabId) {
+            return this.computeOpencode(key, src.tabId)
+        }
         return null
     }
 
@@ -98,6 +141,8 @@ export class UsageTrackerService {
     forget (key: object): void {
         this.claude.delete(key)
         this.codex.delete(key)
+        this.gemini.delete(key)
+        this.opencode.delete(key)
     }
 
     private async computeClaude (
@@ -220,6 +265,110 @@ export class UsageTrackerService {
         }
         return st.seen ? { inTok: st.inTok, outTok: st.outTok } : null
     }
+
+    private async computeGemini (
+        key: object,
+        sessionId: string,
+    ): Promise<{ inTok: number; outTok: number } | null> {
+        let st = this.gemini.get(key)
+        const now = Date.now()
+
+        if (!st || st.sessionId !== sessionId) {
+            const chatPath = await findGeminiChatPath(sessionId)
+            if (!chatPath) return null
+            st = { sessionId, path: chatPath, inTok: 0, outTok: 0, seen: false, size: -1, mtimeMs: -1, lastReadAt: 0 }
+            this.gemini.set(key, st)
+        }
+
+        if (now - st.lastReadAt < USAGE_READ_INTERVAL_MS) {
+            return st.seen ? { inTok: st.inTok, outTok: st.outTok } : null
+        }
+        st.lastReadAt = now
+
+        let stat
+        try {
+            stat = await fs.stat(st.path)
+        } catch {
+            this.gemini.delete(key)
+            return null
+        }
+
+        if (stat.size === st.size && stat.mtimeMs === st.mtimeMs) {
+            return st.seen ? { inTok: st.inTok, outTok: st.outTok } : null
+        }
+
+        try {
+            const raw = await fs.readFile(st.path, 'utf8')
+            const usage = sumGeminiMessageUsage(raw)
+            st.inTok = usage.inTok
+            st.outTok = usage.outTok
+            st.seen = usage.inTok > 0 || usage.outTok > 0
+            st.size = stat.size
+            st.mtimeMs = stat.mtimeMs
+        } catch {
+            /* Gemini may be rewriting the JSON; keep prior totals, retry later. */
+        }
+
+        return st.seen ? { inTok: st.inTok, outTok: st.outTok } : null
+    }
+
+    private async computeOpencode (
+        key: object,
+        tabId: string,
+    ): Promise<{ inTok: number; outTok: number } | null> {
+        const logPath = path.join(homeDir(), '.glanceterm', 'hooks', `${tabId}.log`)
+        let st = this.opencode.get(key)
+        const now = Date.now()
+
+        if (!st || st.path !== logPath) {
+            st = { path: logPath, offset: 0, inTok: 0, outTok: 0, seen: false, lastReadAt: 0 }
+            this.opencode.set(key, st)
+        }
+
+        if (now - st.lastReadAt < USAGE_READ_INTERVAL_MS) {
+            return st.seen ? { inTok: st.inTok, outTok: st.outTok } : null
+        }
+        st.lastReadAt = now
+
+        let size: number
+        try {
+            size = (await fs.stat(logPath)).size
+        } catch {
+            return null
+        }
+
+        if (size < st.offset) {
+            st.offset = 0; st.inTok = 0; st.outTok = 0; st.seen = false
+        }
+        if (size > st.offset) {
+            try {
+                const fh = await fs.open(logPath, 'r')
+                try {
+                    const len = size - st.offset
+                    const buf = Buffer.allocUnsafe(len)
+                    await fh.read(buf, 0, len, st.offset)
+                    const text = buf.toString('utf8')
+                    const lastNl = text.lastIndexOf('\n')
+                    if (lastNl >= 0) {
+                        const complete = text.slice(0, lastNl)
+                        const latest = latestOpencodeTokenUsage(complete)
+                        if (latest) {
+                            st.inTok = latest.inTok
+                            st.outTok = latest.outTok
+                            st.seen = true
+                        }
+                        st.offset += Buffer.byteLength(text.slice(0, lastNl + 1), 'utf8')
+                    }
+                } finally {
+                    await fh.close()
+                }
+            } catch {
+                /* transient read error — keep prior totals, retry next interval */
+            }
+        }
+
+        return st.seen ? { inTok: st.inTok, outTok: st.outTok } : null
+    }
 }
 
 /**
@@ -275,4 +424,92 @@ export function latestCodexTokenUsage (text: string): { inTok: number; outTok: n
         latest = { inTok: u.input_tokens, outTok: u.output_tokens }
     }
     return latest
+}
+
+/**
+ * Sum Gemini CLI saved-chat `message.tokens.{input,output}` values. Gemini's
+ * saved JSON also carries `cached` and `thoughts`; those are kept separate by
+ * Gemini, so the sidebar's in/out display follows the explicit in/out fields.
+ */
+export function sumGeminiMessageUsage (text: string): { inTok: number; outTok: number } {
+    let parsed: any
+    try { parsed = JSON.parse(text) } catch { return { inTok: 0, outTok: 0 } }
+    const messages = Array.isArray(parsed?.messages) ? parsed.messages : []
+    let inTok = 0
+    let outTok = 0
+    for (const msg of messages) {
+        const t = msg?.tokens
+        if (!t) continue
+        if (typeof t.input === 'number') inTok += t.input
+        if (typeof t.output === 'number') outTok += t.output
+    }
+    return { inTok, outTok }
+}
+
+/**
+ * Return the newest opencode token total emitted by our plugin into the per-tab
+ * hook log. The plugin writes running totals, so the latest complete record is
+ * authoritative.
+ */
+export function latestOpencodeTokenUsage (text: string): { inTok: number; outTok: number } | null {
+    let latest: { inTok: number; outTok: number } | null = null
+    for (const line of text.split('\n')) {
+        if (!line) continue
+        if (!line.includes('"tokens_in"') && !line.includes('"tokens_out"')) continue
+        let rec: any
+        try { rec = JSON.parse(line) } catch { continue }
+        if (rec?.agent !== 'opencode') continue
+        const inTok = typeof rec.tokens_in === 'number' ? rec.tokens_in : null
+        const outTok = typeof rec.tokens_out === 'number' ? rec.tokens_out : null
+        if (inTok === null && outTok === null) continue
+        const prev = latest
+        latest = {
+            inTok: inTok !== null ? inTok : (prev ? prev.inTok : 0),
+            outTok: outTok !== null ? outTok : (prev ? prev.outTok : 0),
+        }
+    }
+    return latest
+}
+
+function normalizeUsageSource (source: string | null | UsageSource): UsageSource {
+    if (typeof source === 'string' || source === null) return { transcriptPath: source }
+    return source
+}
+
+async function findGeminiChatPath (sessionId: string): Promise<string | null> {
+    const short = sessionId.split('-')[0]
+    const tmpRoot = path.join(homeDir(), '.gemini', 'tmp')
+    let projects: string[]
+    try {
+        projects = await fs.readdir(tmpRoot)
+    } catch {
+        return null
+    }
+
+    for (const project of projects) {
+        const chatsDir = path.join(tmpRoot, project, 'chats')
+        let entries: string[]
+        try {
+            entries = await fs.readdir(chatsDir)
+        } catch {
+            continue
+        }
+        for (const entry of entries) {
+            if (!entry.endsWith('.json')) continue
+            if (short && !entry.includes(short)) continue
+            const candidate = path.join(chatsDir, entry)
+            try {
+                const raw = await fs.readFile(candidate, 'utf8')
+                const parsed = JSON.parse(raw)
+                if (parsed?.sessionId === sessionId) return candidate
+            } catch {
+                continue
+            }
+        }
+    }
+    return null
+}
+
+function homeDir (): string {
+    return process.env.HOME ?? process.env.USERPROFILE ?? os.homedir()
 }

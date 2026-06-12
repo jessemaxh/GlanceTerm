@@ -267,11 +267,10 @@ export interface TabState {
      */
     model: string | null
     /**
-     * Cumulative session token usage for this tab — `in`/`out` (uncached
-     * input + output). Null when unknown. Summed from the agent's transcript
-     * (hook events don't carry session totals); cache-read/creation tokens are
-     * deliberately excluded (they dwarf real usage and would mislead). Sidebar
-     * renders `↑<in> ↓<out>` in k/M units. See the transcript usage reader.
+     * Cumulative session token usage for this tab — `in`/`out`. Null when
+     * unknown. UsageTrackerService reads the per-agent source: transcript path,
+     * saved-chat session id, or hook-log tab id. Sidebar renders in/out in
+     * compact k/m units.
      */
     tokensIn: number | null
     tokensOut: number | null
@@ -717,8 +716,8 @@ export class TabMonitor implements OnDestroy {
         // (Codex every event / Claude SessionStart / opencode plugin). Null
         // for unsupported tools or before any model-bearing event.
         let model: string | null = null
-        // Cumulative session token usage (uncached input/output). Summed from
-        // the transcript by UsageTrackerService — see below.
+        // Cumulative session token usage. Read from the per-agent source by
+        // UsageTrackerService — see below.
         let tokensIn: number | null = null
         let tokensOut: number | null = null
 
@@ -757,10 +756,14 @@ export class TabMonitor implements OnDestroy {
             const snap = tabId ? this.hooks.getStatus(tabId) : null
             if (snap) {
                 model = snap.model
-                // Cumulative token usage from the transcript (Claude today;
-                // other agents return null until their reader lands). Throttled
-                // + incremental inside the tracker, so this is cheap per tick.
-                const usage = await this.usage.compute(t.inner, aiTool, snap.transcriptPath)
+                // Cumulative token usage. Each agent has a different source
+                // (Claude/Codex transcript path, Gemini session id, opencode
+                // hook log tab id); the tracker handles the per-agent reader.
+                const usage = await this.usage.compute(t.inner, aiTool, {
+                    transcriptPath: snap.transcriptPath,
+                    sessionId: snap.sessionId,
+                    tabId: snap.tabId,
+                })
                 if (usage) { tokensIn = usage.inTok; tokensOut = usage.outTok }
                 // Subagent in-flight override: when the main agent has
                 // spawned a backgrounded Task subagent, the main agent's
