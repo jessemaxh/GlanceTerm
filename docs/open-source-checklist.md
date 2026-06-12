@@ -530,6 +530,28 @@ Status legend: ✅ verified · 🔬 reviewed (adversarial) · 📝 docs only · 
     leftovers — optional delete (not blocking).
 - **Review:** 📝 docs/presentation.
 
+### CL-12 — Upgrade vitest 1.6 → 3.2.6 (fix CVE-2026-47429, the 2 "our" criticals)
+
+- **What / where:** Bumped `vitest` `^1.6.0` → `^3.2.6` in both fork plugins and
+  regenerated their lockfiles:
+  - `tabby-plugin-ai-sidebar/package.json` + `yarn.lock` + `package-lock.json`
+    (the latter synced via `npm install --package-lock-only` — this plugin has
+    both lockfiles).
+  - `tabby-plugin-mobile-bridge/package.json` + `yarn.lock`.
+- **Why:** Of the 14 critical Dependabot alerts, exactly 2 were "ours" — both
+  CVE-2026-47429 in `vitest` (a dev-only test runner) in the two fork-added
+  plugins. CVE patched only in 3.2.6 (no 1.x/2.x fix), so a major bump was
+  required. The other 12 criticals are inherited Tabby transitive deps
+  (root/web/app `yarn.lock`) — left for a separate pass / Dependabot.
+- **Verification:** ✅ Major-version jump caused NO breakage — configs use only
+  1→3-stable APIs (`include`/`environment`/`pool`/`poolOptions`/`reporters`).
+  ai-sidebar **243/243** pass; mobile-bridge **26/26** pass under vitest 3.2.6.
+  All manifests + node_modules confirmed on 3.2.6.
+- **Note:** `tabby-plugin-ai-sidebar` carries BOTH `yarn.lock` and
+  `package-lock.json` (pre-existing dual-lock anti-pattern). Both were synced to
+  3.2.6; consider removing one (repo is yarn-based) as a separate cleanup.
+- **Review:** ✅ tests green.
+
 ### Pre-existing uncommitted changes NOT from this session
 
 For audit completeness — these were already modified/untracked in the working
