@@ -119,7 +119,7 @@ export class ScreenshotService {
             // The next Screenshot click finds status === 'granted' and the
             // very first getSources is a fresh call: no restart required.
             if (process.platform === 'darwin' && !this.preflightBypassed) {
-                const blocked = await this.checkMacScreenPermission(remote, ourWindow)
+                const blocked = await this.checkMacScreenPermission(remote, ourWindow, desktopCapturer)
                 if (blocked) return null
             }
 
@@ -199,43 +199,61 @@ export class ScreenshotService {
     }
 
     /**
-     * Pre-flight macOS Screen Recording permission check.
+     * macOS Screen Recording permission gate.
      *
-     * Returns `true` when capture should be aborted (no permission, user was
-     * shown a "go to System Settings" dialog) and `false` when capture can
-     * proceed (status === 'granted'). The TCC cache caveat in the caller's
-     * comment is the reason this lives upstream of any `desktopCapturer`
-     * call — we MUST NOT touch getSources() until the OS-level status is
-     * 'granted', otherwise the user falls into the restart trap.
+     * Returns `true` when capture should be aborted, `false` when it can
+     * proceed (permission is granted, or the user chose "try anyway"). Three
+     * cases, by live status:
      *
-     * Live-status correctness on our target: Electron's
-     * `getMediaAccessStatus('screen')` returns a STALE cached value on
-     * macOS 12 Monterey and older (electron#36722). On macOS 13 Ventura+
-     * Chromium switched to `CGPreflightScreenCaptureAccess`, which returns
-     * the actual current state with no restart needed — confirmed by
-     * Electron maintainers in that thread. GlanceTerm targets macOS 13+,
-     * so the gate's "next click finds 'granted' after user toggles"
-     * assumption holds in practice.
+     *   granted        → proceed immediately.
      *
-     * Defensive against missing API surface: `getMediaAccessStatus('screen')`
-     * is supported in Electron 25+; older Electrons return undefined for
-     * unknown media types. If the call throws or returns undefined we fall
-     * through and let getSources do whatever it does — degraded to the old
-     * (sometimes-restart-needed) flow, which is still better than blocking
-     * the button outright. We log a warning in that case so any future
-     * Electron regression that drops support shows up in console rather
-     * than silently re-trapping users.
+     *   not-determined → FIRST RUN. We trigger the OS's own native prompt with
+     *     a throwaway `desktopCapturer.getSources()` call (see
+     *     `triggerAndAwaitScreenGrant`). That single act does two things
+     *     nothing else can: it registers GlanceTerm into the Screen Recording
+     *     list, and it shows Apple's "GlanceTerm would like to record this
+     *     computer's screen" dialog whose "Open System Settings" button
+     *     deep-links straight to the pane with GlanceTerm already listed and
+     *     highlighted. We then poll the live status and resolve the moment it
+     *     flips to 'granted', so capture continues on its own — no second
+     *     click, and on Electron 38 + macOS 13+ (ScreenCaptureKit) no restart.
+     *
+     *     Why trigger the native prompt instead of bouncing to Settings like
+     *     we used to: `getMediaAccessStatus('screen')`
+     *     (CGPreflightScreenCaptureAccess) only READS status — it never
+     *     registers the app. The old "go enable GlanceTerm in Settings" dialog
+     *     therefore sent users to a list that did NOT contain GlanceTerm. The
+     *     getSources() call is what puts it there.
+     *
+     *   denied / restricted / unknown → the user previously denied, or an MDM
+     *     profile locked it. The OS will not re-prompt on its own, so we fall
+     *     back to the explicit "Open System Settings" dialog with the session
+     *     "try anyway" escape hatch (see `preflightBypassed`).
+     *
+     * Live-status correctness: on macOS 13+ Chromium reads permission via
+     * CGPreflightScreenCaptureAccess, which reflects the real current state
+     * with no restart. GlanceTerm targets macOS 13+, so polling for 'granted'
+     * resolves as soon as the user flips the toggle.
+     *
+     * Defensive against missing API surface: if `getMediaAccessStatus('screen')`
+     * throws or returns undefined (older/unexpected Electron) we fall through to
+     * the legacy capture flow rather than blocking the button outright, logging
+     * a warning so a future regression shows up in console.
      */
-    private async checkMacScreenPermission (remote: any, win: any): Promise<boolean> {
-        let status: string | undefined
-        try {
-            const systemPreferences = remote.getBuiltin('systemPreferences')
-            status = systemPreferences?.getMediaAccessStatus?.('screen')
-        } catch (e) {
-            // eslint-disable-next-line no-console
-            console.warn('[glanceterm] getMediaAccessStatus(screen) threw — falling through to legacy capture flow; permission UX may degrade:', e)
-            return false
+    private async checkMacScreenPermission (remote: any, win: any, desktopCapturer: any): Promise<boolean> {
+        let systemPreferences: any
+        const readStatus = (): string | undefined => {
+            try {
+                systemPreferences = systemPreferences ?? remote.getBuiltin('systemPreferences')
+                return systemPreferences?.getMediaAccessStatus?.('screen')
+            } catch (e) {
+                // eslint-disable-next-line no-console
+                console.warn('[glanceterm] getMediaAccessStatus(screen) threw:', e)
+                return undefined
+            }
         }
+
+        const status = readStatus()
         if (status === undefined) {
             // eslint-disable-next-line no-console
             console.warn('[glanceterm] getMediaAccessStatus(screen) returned undefined — Electron API surface unexpected, falling through to legacy capture flow.')
@@ -243,10 +261,105 @@ export class ScreenshotService {
         }
         if (status === 'granted') return false
 
-        // status is 'not-determined' | 'denied' | 'restricted' | 'unknown'.
-        // 'restricted' is MDM-locked — opening Settings won't help, but the
-        // language we use is still accurate ("doesn't have permission"). We
-        // collapse all three non-granted cases into one dialog.
+        if (status === 'not-determined') {
+            // granted within timeout → proceed (return false); else abort.
+            return !(await this.triggerAndAwaitScreenGrant(desktopCapturer, win, readStatus))
+        }
+
+        // denied | restricted | unknown
+        return await this.promptOpenScreenSettings(remote, win, desktopCapturer)
+    }
+
+    /**
+     * First-run path: fire the OS's native Screen Recording prompt, then wait
+     * for the user to grant it. Resolves `true` once status is 'granted' (so
+     * capture continues automatically), `false` on timeout.
+     *
+     * The throwaway getSources() call registers GlanceTerm in the Screen
+     * Recording list AND shows Apple's native dialog. It typically returns
+     * empty/black frames while the grant is still pending — we don't use its
+     * result, only its side effects — then we poll `readStatus()` until the
+     * user flips the toggle.
+     */
+    private async triggerAndAwaitScreenGrant (
+        desktopCapturer: any,
+        win: any,
+        readStatus: () => string | undefined,
+    ): Promise<boolean> {
+        try {
+            // 1×1 thumbnail: we only need the enumeration to trip the OS prompt
+            // + list registration, not the pixels.
+            await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } })
+        } catch (e) {
+            // Expected to fail/return empty while permission is pending — the
+            // side effect (prompt + registration) still happens.
+            // eslint-disable-next-line no-console
+            console.warn('[glanceterm] priming getSources() threw while triggering the Screen Recording prompt (expected if not yet granted):', e)
+        }
+
+        this.notifications.info(
+            'Waiting for Screen Recording permission — enable GlanceTerm in System Settings and the screenshot will continue automatically.',
+        )
+
+        const granted = await this.waitForScreenGrant(win, readStatus)
+        if (!granted) {
+            this.notifications.error(
+                'Screen Recording permission not granted. Enable GlanceTerm in System Settings → ' +
+                'Privacy & Security → Screen & System Audio Recording, then click Screenshot again.',
+            )
+        }
+        return granted
+    }
+
+    /**
+     * Poll the live Screen Recording status until 'granted' or timeout. The
+     * window 'focus' event — fired when the user tabs back from System Settings
+     * — triggers an immediate re-check, so the common case resolves within a
+     * frame of the user returning rather than on the next poll tick.
+     */
+    private waitForScreenGrant (win: any, readStatus: () => string | undefined): Promise<boolean> {
+        return new Promise<boolean>(resolve => {
+            let settled = false
+            const POLL_MS = 700
+            const TIMEOUT_MS = 120000
+
+            const check = (): void => {
+                if (settled) return
+                if (readStatus() === 'granted') finish(true)
+            }
+            const finish = (granted: boolean): void => {
+                if (settled) return
+                settled = true
+                clearInterval(timer)
+                clearTimeout(timeout)
+                try { win.removeListener?.('focus', check) } catch { /* */ }
+                resolve(granted)
+            }
+
+            const timer = setInterval(check, POLL_MS)
+            const timeout = setTimeout(() => finish(false), TIMEOUT_MS)
+            try { win.on?.('focus', check) } catch { /* */ }
+            check()
+        })
+    }
+
+    /**
+     * denied / restricted / unknown path: the OS won't re-prompt, so steer the
+     * user to System Settings explicitly, with the session "try anyway" escape
+     * hatch for when the OS's TCC cache disagrees with reality (bundle /
+     * signature mismatch, dev vs release build, …).
+     *
+     * Returns `true` to abort capture, `false` to proceed (user chose
+     * "try anyway").
+     *
+     * Takes `desktopCapturer` so the "Open System Settings" path can fire a
+     * throwaway getSources() first — that's what REGISTERS GlanceTerm into the
+     * Screen Recording list. getMediaAccessStatus only reads status; it never
+     * adds the app. Without the priming call a denied / stale-TCC app sends the
+     * user to a pane that doesn't list GlanceTerm to toggle (the "enable an app
+     * that isn't there" trap).
+     */
+    private async promptOpenScreenSettings (remote: any, win: any, desktopCapturer: any): Promise<boolean> {
         let dialog: any
         try {
             dialog = remote.getBuiltin('dialog')
@@ -254,14 +367,10 @@ export class ScreenshotService {
             return true   // can't dialog — silently abort capture
         }
 
-        const message = status === 'not-determined'
-            ? 'GlanceTerm needs Screen Recording permission to capture screenshots.'
-            : 'GlanceTerm doesn\'t have Screen Recording permission yet.'
-
         const detail =
-            'Open System Settings → Privacy & Security → Screen Recording, ' +
-            'then enable GlanceTerm. You do NOT need to restart — just click ' +
-            'Screenshot again once the toggle is on.\n\n' +
+            'Open System Settings → Privacy & Security → Screen & System Audio ' +
+            'Recording, then enable GlanceTerm. On macOS 13+ you do NOT need to ' +
+            'restart — the screenshot works as soon as the toggle is on.\n\n' +
             'If the toggle is already on and you\'re still seeing this, the OS\'s ' +
             'permission cache may disagree with reality (bundle / signature ' +
             'mismatch, dev vs release build, …). Click "Already granted — try ' +
@@ -287,7 +396,7 @@ export class ScreenshotService {
                 defaultId: BTN_OPEN,
                 cancelId: BTN_CANCEL,
                 title: 'Screen Recording permission needed',
-                message,
+                message: 'GlanceTerm doesn\'t have Screen Recording permission yet.',
                 detail,
             })
             response = result?.response ?? BTN_CANCEL
@@ -301,6 +410,18 @@ export class ScreenshotService {
             return false
         }
         if (response !== BTN_OPEN) return true
+
+        // Register GlanceTerm into the Screen Recording list BEFORE steering the
+        // user to the pane. CGPreflightScreenCaptureAccess (what
+        // getMediaAccessStatus reads) only READS status — a throwaway
+        // getSources() is the only thing that ADDS the app to the list. Without
+        // it, a denied / stale-TCC app opens a pane that doesn't contain
+        // GlanceTerm to toggle — the user is told to enable an app that isn't
+        // there. Best-effort: it returns empty/black while denied; we only want
+        // the registration side effect, so failures are swallowed.
+        try {
+            await desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } })
+        } catch { /* expected to fail while denied — the registration side effect still happens */ }
 
         // Try the modern URL scheme (macOS 13+ Privacy_ScreenCapture). If
         // shell.openExternal fails or the URL isn't recognised, fall back
