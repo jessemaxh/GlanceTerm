@@ -219,6 +219,9 @@ export class CodexHookAdapter extends HookAdapter {
             case 'SubagentStop':
                 return null
             case 'PermissionRequest':
+                // Overridden to `working` by HookWatcher.processEvent when the
+                // event carries `auto_approved:1` (auto-approve toggle granted
+                // it instantly). See the claude adapter's matching note.
                 return TabStatus.NeedsPermission
             case 'SessionStart':
                 return TabStatus.Idle

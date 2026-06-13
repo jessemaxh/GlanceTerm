@@ -125,6 +125,111 @@ d('hook handler (POSIX) — auto-approve exclusion + tab-id recovery', () => {
         expect(rec.tool_name).toBe('AskUserQuestion')
     })
 
+    // ── auto_approved marker (unsticks needs_permission for auto-approved,
+    //    long-running tools — see HookWatcher.processEvent) ────────────────
+
+    /** Read the last per-tab log record for the default 'test-tab'. */
+    function lastTestTabRecord (): any {
+        const log = fs.readFileSync(
+            path.join(tmpHome, '.glanceterm', 'hooks', 'test-tab.log'), 'utf8',
+        )
+        return JSON.parse(log.trim().split('\n').pop() as string)
+    }
+
+    it('stamps auto_approved:1 on a PermissionRequest it auto-approves (Bash, flag on)', () => {
+        // This is the marker HookWatcher maps to `working` instead of leaving the
+        // row stuck on needs_permission for the tool's whole runtime.
+        runPermissionRequest('1', 'Bash')
+        expect(lastTestTabRecord().auto_approved).toBe(1)
+    })
+
+    it('stamps auto_approved:0 when the flag is OFF (genuine local/relay prompt)', () => {
+        runPermissionRequest('0', 'Bash')
+        expect(lastTestTabRecord().auto_approved).toBe(0)
+    })
+
+    it('stamps auto_approved:0 on AskUserQuestion even with the flag on', () => {
+        // Excluded from auto-approve → must still surface as needs_permission.
+        runPermissionRequest('1', 'AskUserQuestion')
+        expect(lastTestTabRecord().auto_approved).toBe(0)
+    })
+
+    it('stamps auto_approved:1 for Codex too (same auto-approve path)', () => {
+        runPermissionRequest('1', 'Bash', 'codex')
+        expect(lastTestTabRecord().auto_approved).toBe(1)
+    })
+
+    it('never stamps auto_approved for other agents (gemini), even with flag on', () => {
+        const tabId = 'gem-marker-tab'
+        const payload = JSON.stringify({ hook_event_name: 'PermissionRequest', tool_name: 'Bash', session_id: 's', cwd: '/tmp/g' })
+        fs.writeFileSync(path.join(tmpHome, '.glanceterm', 'auto-approve.flag'), '1')
+        execFileSync('/bin/sh', [handlerPath, 'gemini'], {
+            input: payload, encoding: 'utf8',
+            env: { ...process.env, HOME: tmpHome, GLANCETERM_TAB_ID: tabId }, timeout: 10_000,
+        })
+        const rec = JSON.parse(
+            fs.readFileSync(path.join(tmpHome, '.glanceterm', 'hooks', `${tabId}.log`), 'utf8').trim().split('\n').pop() as string,
+        )
+        expect(rec.auto_approved).toBe(0)
+    })
+
+    it('does not stamp auto_approved on non-PermissionRequest events (flag on)', () => {
+        // PreToolUse already maps to `working`; the marker is only meaningful for
+        // PermissionRequest. A PreToolUse with the flag on must stay auto_approved:0.
+        const tabId = 'pre-marker-tab'
+        const payload = JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Bash', session_id: 's', cwd: '/tmp/p' })
+        fs.writeFileSync(path.join(tmpHome, '.glanceterm', 'auto-approve.flag'), '1')
+        execFileSync('/bin/sh', [handlerPath, 'claude'], {
+            input: payload, encoding: 'utf8',
+            env: { ...process.env, HOME: tmpHome, GLANCETERM_TAB_ID: tabId }, timeout: 10_000,
+        })
+        const rec = JSON.parse(
+            fs.readFileSync(path.join(tmpHome, '.glanceterm', 'hooks', `${tabId}.log`), 'utf8').trim().split('\n').pop() as string,
+        )
+        expect(rec.event).toBe('PreToolUse')
+        expect(rec.auto_approved).toBe(0)
+    })
+
+    // ── SessionStart `source` capture (drives the compact → not-idle fix) ──
+
+    /** Run an arbitrary event payload through the handler under a throwaway tab
+     *  id and return the last log record for it. */
+    function runEvent (tabId: string, payload: object, agent = 'claude'): any {
+        execFileSync('/bin/sh', [handlerPath, agent], {
+            input: JSON.stringify(payload), encoding: 'utf8',
+            env: { ...process.env, HOME: tmpHome, GLANCETERM_TAB_ID: tabId }, timeout: 10_000,
+        })
+        return JSON.parse(
+            fs.readFileSync(path.join(tmpHome, '.glanceterm', 'hooks', `${tabId}.log`), 'utf8').trim().split('\n').pop() as string,
+        )
+    }
+
+    it('captures source:"compact" on a post-compaction SessionStart', () => {
+        const rec = runEvent('src-compact', {
+            hook_event_name: 'SessionStart', source: 'compact', session_id: 's', cwd: '/repo', model: 'claude-opus-4-8[1m]',
+        })
+        expect(rec.event).toBe('SessionStart')
+        expect(rec.source).toBe('compact')
+    })
+
+    it('captures source:"startup" on a fresh SessionStart', () => {
+        const rec = runEvent('src-startup', {
+            hook_event_name: 'SessionStart', source: 'startup', session_id: 's', cwd: '/repo',
+        })
+        expect(rec.source).toBe('startup')
+    })
+
+    it('does NOT leak a nested "source" from a non-SessionStart payload (scoped extraction)', () => {
+        // A tool whose payload happens to contain a "source" key must not stamp
+        // it — only SessionStart carries the field we act on.
+        const rec = runEvent('src-scoped', {
+            hook_event_name: 'PostToolUse', tool_name: 'Read', session_id: 's', cwd: '/repo',
+            tool_response: { source: 'compact' },
+        })
+        expect(rec.event).toBe('PostToolUse')
+        expect(rec.source).toBe('')
+    })
+
     it('extracts the active model slug into the per-tab log record', () => {
         // Codex sends a top-level `model` on every event; the handler writes it
         // to the log so the sidebar can show it. Drive a UserPromptSubmit with

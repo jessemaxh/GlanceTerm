@@ -126,6 +126,14 @@ extract () {
 EVENT=$(extract hook_event_name)
 SESSION_ID=$(extract session_id)
 MATCHER=$(extract matcher)
+# SessionStart \`source\` — "startup" | "resume" | "clear" | "compact". Only the
+# \`compact\` value matters downstream: a post-compaction SessionStart is a
+# mid-turn continuation (the agent keeps working), NOT a fresh idle session, so
+# HookWatcher must NOT flip the row to idle/"ready" on it. Scoped to SessionStart
+# so a nested "source" key inside some tool's payload can't leak in on other
+# events. Empty on every non-SessionStart event / agents that don't send it.
+SOURCE=""
+if [ "\$EVENT" = "SessionStart" ]; then SOURCE=$(extract source); fi
 # Active model slug. Codex sends a top-level "model" on EVERY hook event
 # (live); Claude sends it only on SessionStart. Empty for events/agents that
 # don't carry it — HookWatcher keeps the last non-empty value, so a one-shot
@@ -256,6 +264,27 @@ if [ "\$EVENT" = "PostToolUse" ]; then
     fi
 fi
 
+# Pre-resolve the auto-approve decision BEFORE writing the per-tab .log line.
+# A PermissionRequest that we are about to grant instantly (auto-approve on)
+# must NOT read as \`needs_permission\` in the sidebar: the tool runs the moment
+# we emit the allow, but the next status-changing event (PostToolUse) only
+# lands when the tool finishes — which for a long command is 1-2 min later. So
+# we stamp the logged event with \`auto_approved:1\` and HookWatcher maps it to
+# \`working\` instead of \`needs_permission\`.
+#
+# Read the flag ONCE here and reuse it in the grant branch below: reading it
+# twice would let a flag toggle between the two reads desync the marker from
+# the actual decision (e.g. stamp working but then NOT grant → row says working
+# while the agent is really blocked on a local prompt). The guard mirrors the
+# grant branch exactly — same agents, same AskUserQuestion exclusion — so we
+# never stamp an event we wouldn't also auto-grant.
+AUTO_APPROVED=0
+if { [ "\$AGENT" = "claude" ] || [ "\$AGENT" = "codex" ]; } && [ "\$EVENT" = "PermissionRequest" ] && [ "\$TOOL_NAME" != "AskUserQuestion" ]; then
+    if [ "\$(head -c 1 "\${HOME}/.glanceterm/auto-approve.flag" 2>/dev/null)" = "1" ]; then
+        AUTO_APPROVED=1
+    fi
+fi
+
 # IMPORTANT — write the per-tab .log line HERE (before any PermissionRequest
 # handling) so HookWatcher sees the event immediately, not 25 minutes later
 # when relay polling resolves. Without this, a tab sitting in permission-
@@ -267,8 +296,8 @@ OUT="\$STATE_DIR/\$TAB_ID.log"
 # other concurrent appenders. Our records are ~250 bytes — well under the
 # limit — so two handler processes firing simultaneously cannot interleave
 # bytes mid-record.
-printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s","ts":%s,"bg":%s,"interrupted":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s","monitor_task_id":"%s","monitor_timeout_ms":%s,"stop_task_id":"%s","model":"%s"}\\n' \\
-    "\$TAB_ID" "\$AGENT" "\$EVENT" "\$MATCHER" "\$TOOL_NAME" "\$SESSION_ID" "\$CWD" "\$TRANSCRIPT_PATH" "\$TS" "\$BG" "\$INTERRUPTED" "\$AGENT_ID" "\$AGENT_TYPE" "\$SPAWN_AGENT_ID" "\$MONITOR_TASK_ID" "\$MONITOR_TIMEOUT_MS" "\$STOP_TASK_ID" "\$MODEL" \\
+printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s","ts":%s,"bg":%s,"interrupted":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s","monitor_task_id":"%s","monitor_timeout_ms":%s,"stop_task_id":"%s","model":"%s","auto_approved":%s,"source":"%s"}\\n' \\
+    "\$TAB_ID" "\$AGENT" "\$EVENT" "\$MATCHER" "\$TOOL_NAME" "\$SESSION_ID" "\$CWD" "\$TRANSCRIPT_PATH" "\$TS" "\$BG" "\$INTERRUPTED" "\$AGENT_ID" "\$AGENT_TYPE" "\$SPAWN_AGENT_ID" "\$MONITOR_TASK_ID" "\$MONITOR_TIMEOUT_MS" "\$STOP_TASK_ID" "\$MODEL" "\$AUTO_APPROVED" "\$SOURCE" \\
     >> "\$OUT" 2>/dev/null
 
 # Auto-approve permission prompts (Claude + Codex). When the user has
@@ -300,9 +329,12 @@ printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s"
 # Claude tool name; harmless to also guard for Codex. Add any other
 # selection-class tools to the guard below as they surface.
 if { [ "\$AGENT" = "claude" ] || [ "\$AGENT" = "codex" ]; } && [ "\$EVENT" = "PermissionRequest" ] && [ "\$TOOL_NAME" != "AskUserQuestion" ]; then
-    AUTO_FLAG=$(head -c 1 "\${HOME}/.glanceterm/auto-approve.flag" 2>/dev/null)
+    # AUTO_APPROVED was resolved above from a single read of auto-approve.flag
+    # (reused here so the logged \`auto_approved\` marker and this grant decision
+    # can never disagree). RELAY_FLAG is read fresh — it only matters on the
+    # else branch, where a stale read is harmless.
     RELAY_FLAG=$(head -c 1 "\${HOME}/.glanceterm/permission-relay.flag" 2>/dev/null)
-    if [ "\$AUTO_FLAG" = "1" ]; then
+    if [ "\$AUTO_APPROVED" = "1" ]; then
         printf '{"hookSpecificOutput":{"hookEventName":"PermissionRequest","decision":{"behavior":"allow"}}}\\n'
         printf '%s\\t%s\\t%s\\t%s\\n' "\$TS" "\$TAB_ID" "\$TOOL_NAME" "\$CWD" \\
             >> "\${HOME}/.glanceterm/auto-approve.log" 2>/dev/null
@@ -419,6 +451,14 @@ if ($json.matcher -and ($json.matcher -is [string])) { $matcher = [string]$json.
 $toolName = ""
 if ($json.tool_name -and ($json.tool_name -is [string])) { $toolName = [string]$json.tool_name }
 
+# SessionStart \`source\` — see HANDLER_SH. Only \`compact\` matters downstream
+# (a post-compaction SessionStart must NOT flip the row to idle). Scoped to
+# SessionStart; empty everywhere else.
+$source = ""
+if ([string]$json.hook_event_name -eq "SessionStart" -and $json.source -and ($json.source -is [string])) {
+    $source = [string]$json.source
+}
+
 # Subagent identity — see the HANDLER_SH equivalent block for the full
 # contract. PowerShell can hit nested fields directly via ConvertFrom-Json,
 # so the spawn-id extraction is just $json.tool_response.agentId — no
@@ -481,6 +521,19 @@ if ([string]$json.hook_event_name -eq "PreToolUse" -and $toolName -eq "Bash") {
     }
 }
 
+# Pre-resolve auto-approve BEFORE building/writing the .log line — see
+# HANDLER_SH for why an auto-approved PermissionRequest must be stamped
+# auto_approved:1 so the sidebar shows \`working\`, not a stuck
+# \`needs_permission\`, while the granted tool runs. Read the flag ONCE and reuse
+# it in the grant branch below so a toggle between reads can't desync the marker
+# from the actual decision.
+$autoApproved = 0
+if (($Agent -eq "claude" -or $Agent -eq "codex") -and [string]$json.hook_event_name -eq "PermissionRequest" -and $toolName -ne "AskUserQuestion") {
+    try {
+        if ((([System.IO.File]::ReadAllText((Join-Path $env:USERPROFILE ".glanceterm\\auto-approve.flag"))).Trim()) -eq "1") { $autoApproved = 1 }
+    } catch {}
+}
+
 $out = [ordered]@{
     tab_id          = [string]$tabId
     agent           = [string]$Agent
@@ -504,6 +557,12 @@ $out = [ordered]@{
     # Active model slug — Codex sends it on every event, Claude on SessionStart;
     # empty otherwise (HookWatcher keeps the last non-empty). See HANDLER_SH.
     model           = [string]$json.model
+    # 1 when this PermissionRequest is being auto-approved (see above) — tells
+    # HookWatcher to render \`working\` rather than a stuck \`needs_permission\`.
+    auto_approved   = [int]$autoApproved
+    # SessionStart source (\`compact\` etc.) — lets HookWatcher keep a
+    # post-compaction SessionStart from flipping the row to idle. See above.
+    source          = [string]$source
 }
 
 # IMPORTANT — write the per-tab .log line HERE (before any PermissionRequest
@@ -524,12 +583,14 @@ $line = ($out | ConvertTo-Json -Compress) + "\`n"
 # gets an empty answer. Emit nothing — the agent shows its interactive selector
 # and the row stays needs_permission until the user picks.
 if (($Agent -eq "claude" -or $Agent -eq "codex") -and $out.event -eq "PermissionRequest" -and $out.tool_name -ne "AskUserQuestion") {
-    $autoFlagFile = Join-Path $env:USERPROFILE ".glanceterm\\auto-approve.flag"
+    # $autoApproved was resolved above from a single read of auto-approve.flag
+    # (reused here so the logged auto_approved marker and this grant decision
+    # can never disagree). $relayFlag is read fresh — it only matters on the
+    # else branch, where a stale read is harmless.
     $relayFlagFile = Join-Path $env:USERPROFILE ".glanceterm\\permission-relay.flag"
-    $autoFlag = ""; $relayFlag = ""
-    try { $autoFlag = ([System.IO.File]::ReadAllText($autoFlagFile)).Trim() } catch {}
+    $relayFlag = ""
     try { $relayFlag = ([System.IO.File]::ReadAllText($relayFlagFile)).Trim() } catch {}
-    if ($autoFlag -eq "1") {
+    if ($autoApproved -eq 1) {
         # Claude reads stdout for sync hooks. Hard-coded JSON (rather than
         # ConvertTo-Json on a hashtable) keeps the on-the-wire payload
         # byte-identical to the POSIX handler, which simplifies regression

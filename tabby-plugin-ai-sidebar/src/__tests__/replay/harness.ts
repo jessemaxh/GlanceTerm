@@ -66,6 +66,14 @@ export interface TraceEvent {
     /** Extracted from PreToolUse(TaskStop).tool_input.{task_id,taskId}
      *  in the real handler. Empty / missing on every other event. */
     stop_task_id?: string
+    /** Set to 1 by the handler on an auto-approved PermissionRequest — drives
+     *  the processEvent override that maps it to `working` instead of
+     *  needs_permission. Missing / 0 on every genuinely user-gated request. */
+    auto_approved?: 0 | 1
+    /** SessionStart source (`startup`/`resume`/`clear`/`compact`). Only
+     *  `compact` is acted on — a post-compaction SessionStart is held as a
+     *  status no-op so the row doesn't read idle while the agent works on. */
+    source?: string
 }
 
 /**

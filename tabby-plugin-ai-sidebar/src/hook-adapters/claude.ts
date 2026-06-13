@@ -318,6 +318,11 @@ export class ClaudeHookAdapter extends HookAdapter {
                 // remains correct.
                 return null
             case 'PermissionRequest':
+                // NOTE: HookWatcher.processEvent overrides this to `working`
+                // when the event carries `auto_approved:1` (the handler granted
+                // it instantly via the auto-approve toggle). Only genuinely
+                // user-gated requests — relay-to-phone, local y/n dialog,
+                // AskUserQuestion — reach the UI as needs_permission.
                 return TabStatus.NeedsPermission
             case 'Notification':
                 // The settings.json matcher already narrowed the firing set
@@ -327,6 +332,10 @@ export class ClaudeHookAdapter extends HookAdapter {
                 // the payload (which Claude does not always populate).
                 return TabStatus.NeedsPermission
             case 'SessionStart':
+                // NOTE: a post-compaction SessionStart (`source:"compact"`) is
+                // overridden upstream in HookWatcher.processEvent to a status
+                // no-op — it's a mid-turn continuation, not a fresh idle. Only
+                // startup/clear/resume actually surface as idle here.
                 return TabStatus.Idle
             case 'SessionEnd':
                 return TabStatus.NoAi

@@ -97,6 +97,23 @@ interface HookStatusFile {
      *  watcher keeps the last NON-EMPTY value per tab (see processEvent), so a
      *  one-shot SessionStart model persists across later model-less events. */
     model?: string
+    /** Set to 1 by the handler on a PermissionRequest it is auto-approving
+     *  (auto-approve toggle on, Claude/Codex, non-AskUserQuestion). The grant
+     *  is instant, so this request never blocks the user — `processEvent` maps
+     *  it to `working` (the tool starts running immediately) instead of
+     *  `needs_permission`, which would otherwise sit stuck for the tool's whole
+     *  runtime until PostToolUse. Absent/0 on every genuinely user-gated
+     *  request (relay-to-phone, local y/n dialog, AskUserQuestion) and on older
+     *  log lines, so those still surface as `needs_permission`. */
+    auto_approved?: 0 | 1
+    /** SessionStart `source` (Claude): `startup` | `resume` | `clear` |
+     *  `compact`. Only `compact` is acted on: a post-compaction SessionStart is
+     *  a mid-turn continuation (the agent keeps working immediately, firing no
+     *  tool events for the duration of the compaction + follow-up thinking), so
+     *  processEvent treats it as a status no-op rather than letting the adapter
+     *  map it to idle — otherwise the row reads "ready" while the agent is still
+     *  working. Empty on non-SessionStart events and non-Claude agents. */
+    source?: string
 }
 
 /** Per-tab snapshot the rest of the plugin consumes. */
@@ -1112,9 +1129,40 @@ export class HookWatcherService implements OnDestroy {
 
         }
 
+        // A post-compaction SessionStart (`source: compact`) is a mid-turn
+        // continuation, not a fresh idle session: auto-compact fires while the
+        // agent is actively working, and the compaction + follow-up thinking
+        // emits NO tool events for a long stretch (observed: 60-100 s). Letting
+        // the adapter map it to idle leaves the row stuck on "ready" that whole
+        // time while the agent is plainly still working. Treat it as a status
+        // no-op — keep whatever the row already showed (working through the
+        // compact) until the next real event. The counter/model side-channel
+        // above still ran, matching the pre-fix SessionStart behavior; only the
+        // displayed status is held. `startup`/`clear`/`resume` are genuine
+        // waiting-for-input states and keep mapping to idle. Claude-only — other
+        // agents never set `source`, so this never matches for them.
+        if (parsed.event === 'SessionStart' && parsed.source === 'compact') {
+            return changed
+        }
+
         let status = adapter.mapEventToStatus(parsed.event, parsed.matcher)
         if (parsed.event === 'PostToolUse' && parsed.interrupted === 1) {
             status = TabStatus.Idle
+        }
+        // Auto-approved PermissionRequest → working, not needs_permission.
+        // The handler grants the permission instantly (auto-approve toggle on),
+        // so the user is never blocked: the tool runs immediately and the row
+        // should read `working` until the matching PostToolUse. Without this,
+        // a long-running auto-approved tool (e.g. a 2-min build) would leave the
+        // row stuck on `needs_permission` ("needs you") for its entire runtime,
+        // because PermissionRequest is the last status-changing event until
+        // PostToolUse lands. Event-name literal keeps this agent-agnostic across
+        // claude/codex (both emit `PermissionRequest`) while never matching
+        // opencode's distinct `permission.asked`. Only the auto-approve path
+        // sets the flag — relay / local-dialog / AskUserQuestion stay
+        // needs_permission. See HookStatusFile.auto_approved.
+        if (parsed.event === 'PermissionRequest' && parsed.auto_approved === 1) {
+            status = TabStatus.Working
         }
         if (!status) return changed
 
