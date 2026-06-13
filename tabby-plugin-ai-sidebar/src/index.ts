@@ -32,6 +32,8 @@ import { ScreenshotPasteService } from './screenshot/paste.service'
 import { ImagePasteHookService } from './image-paste-hook.service'
 import { SplitShellService } from './split-shell.service'
 import { EscInterruptService } from './esc-interrupt.service'
+import { UpdateCheckService } from './update-check.service'
+import { UpdateForceModalComponent } from './update-force-modal.component'
 
 // Public exports for cross-plugin consumers (currently
 // tabby-plugin-mobile-bridge). Surface kept deliberately narrow — every
@@ -116,7 +118,7 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
 
 @NgModule({
     imports: [CommonModule, NgbTooltipModule],
-    declarations: [AiSidebarComponent],
+    declarations: [AiSidebarComponent, UpdateForceModalComponent],
     providers: [
         HookAdapterRegistry,
         HookRuntimeService,
@@ -134,6 +136,7 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
         ImagePasteHookService,
         SplitShellService,
         EscInterruptService,
+        UpdateCheckService,
         { provide: SidebarProvider,       useClass: AiSidebarContribProvider,      multi: true },
         { provide: ToolbarButtonProvider, useClass: ToggleAiSidebarButtonProvider, multi: true },
         { provide: HotkeyProvider,        useClass: AiSidebarHotkeyProvider,       multi: true },
@@ -177,6 +180,9 @@ export default class AiSidebarModule {
         // whole session — including while the sidebar panel is hidden (you
         // can't click a toolbar button that isn't on screen).
         _h: AiHotkeyActionsService,
+        // Eager-inject so the remote update check schedules itself at launch
+        // (first check + interval) without waiting for any UI consumer.
+        _uc: UpdateCheckService,
     ) {
         // eslint-disable-next-line no-console
         console.log('[glanceterm] plugin loaded')

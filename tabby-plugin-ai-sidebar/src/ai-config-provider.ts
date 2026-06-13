@@ -59,6 +59,20 @@ export class AiSidebarConfigProvider extends ConfigProvider {
             // command back. See AutoResumeService. The old cwd-keyed
             // `autoResumeCommandByCwd` map has been removed — any leftover
             // entry in a user's config is simply ignored.
+
+            // Remote update check (see UpdateCheckService). Reads a small JSON
+            // from `configUrl` holding `latest`/`minimum` versions: newer than
+            // running → dismissible notify; below `minimum` → forced update
+            // gate. Fail-open: any fetch/parse error is a silent no-op.
+            updateCheck: {
+                enabled: true,
+                // Empty by default → the check is a no-op until pointed at a
+                // hosted JSON endpoint. Set this to your update-config URL
+                // (Cloudflare Worker / R2 / GitHub raw) to switch it on.
+                configUrl: '',
+                // Poll cadence in hours; first check fires shortly after launch.
+                intervalHours: 6,
+            },
         },
     }
 
