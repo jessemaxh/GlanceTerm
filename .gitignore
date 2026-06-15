@@ -51,3 +51,6 @@ tabby-plugin-ai-sidebar/package-lock.json
 
 # webpack output that occasionally lands at repo root from running webpack outside app/
 /main.js
+
+# Maintainer-internal planning / runbook / handoff docs — kept locally, never published
+/internal/
