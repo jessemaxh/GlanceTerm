@@ -84,7 +84,10 @@ describe('coldLoad skips closed-tab logs on the periodic rescan', () => {
             watcher.retainOnly(new Set([LIVE])) // LIVE is the (only) live tab
             await fs.writeFile(path.join(runtime.stateDir, `${LIVE}.log`), line(LIVE, 'PreToolUse', { tool_name: 'Bash' }))
             await (watcher as unknown as { coldLoad(): Promise<void> }).coldLoad()
-            expect(watcher.getStatus(LIVE)).toBeTruthy()
+            // coldLoad's ingest may coalesce with the fs.watch ingest of the same
+            // write (per-file serialization), so the state can land via the async
+            // re-run — poll for it rather than asserting synchronously.
+            expect(await waitFor(() => watcher.getStatus(LIVE))).toBeTruthy()
         } finally {
             watcher.ngOnDestroy()
         }

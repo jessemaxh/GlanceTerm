@@ -486,6 +486,12 @@ export class HookWatcherService implements OnDestroy {
      */
     private lastKnownLiveTabIds: ReadonlySet<string> | null = null
 
+    /** Per-file in-flight guard for {@link ingest}: filePath → "a concurrent
+     *  call arrived while this one ran, so re-run once after". Serializes
+     *  ingests of one file so two passes can't snapshot the same tailOffset and
+     *  double-process the same lines. */
+    private readonly ingestInFlight = new Map<string, boolean>()
+
     /**
      * Stamp of when this HookWatcher instance was constructed. Used to
      * distinguish "fresh" events written during this run from "stale" events
@@ -733,7 +739,16 @@ export class HookWatcherService implements OnDestroy {
             const tabId = e.replace(/\.log$/, '')
             if (this.lastKnownLiveTabIds && !this.lastKnownLiveTabIds.has(tabId)) continue
             const before = this.map.size + (this.lastTsOf(e) ?? 0)
-            await this.ingest(path.join(this.runtime.stateDir, e), { skipEmit: true })
+            try {
+                await this.ingest(path.join(this.runtime.stateDir, e), { skipEmit: true })
+            } catch (err) {
+                // One unreadable/throwing log must not abort the rescan for every
+                // file after it — that would stall ALL tabs' updates. Skip it;
+                // the next rescan retries.
+                // eslint-disable-next-line no-console
+                console.error('[glanceterm] coldLoad ingest failed for', e, err)
+                continue
+            }
             const after = this.map.size + (this.lastTsOf(e) ?? 0)
             if (after !== before) anyChanged = true
         }
@@ -791,6 +806,28 @@ export class HookWatcherService implements OnDestroy {
      * stale counters.
      */
     private async ingest (filePath: string, opts: { skipEmit?: boolean } = {}): Promise<void> {
+        // Coalesce concurrent ingests of the SAME file. fs.watch fires
+        // `void this.ingest(...)` per event without awaiting, so two passes can
+        // snapshot the same tailOffset before either writes it back and process
+        // the same lines twice (the one non-idempotent effect is a double
+        // pendingBgArrivals push → transient bg over-count). Run at most one
+        // pass per file; fold concurrent calls into a single re-run afterwards
+        // (which always emits, so no update is dropped).
+        if (this.ingestInFlight.has(filePath)) {
+            this.ingestInFlight.set(filePath, true)
+            return
+        }
+        this.ingestInFlight.set(filePath, false)
+        try {
+            await this.ingestImpl(filePath, opts)
+        } finally {
+            const rerun = this.ingestInFlight.get(filePath)
+            this.ingestInFlight.delete(filePath)
+            if (rerun) void this.ingest(filePath)
+        }
+    }
+
+    private async ingestImpl (filePath: string, opts: { skipEmit?: boolean } = {}): Promise<void> {
         const baseName = path.basename(filePath, '.log')
 
         // Reject malformed/sentinel tab IDs at the file-name layer so we
@@ -851,7 +888,14 @@ export class HookWatcherService implements OnDestroy {
             if (!parsed.tab_id || parsed.tab_id !== baseName || !TAB_ID_RE.test(parsed.tab_id)) continue
             const adapter = this.registry.forTool(parsed.agent as AiTool)
             if (!adapter) continue
-            if (this.processEvent(parsed, adapter)) anyChanged = true
+            try {
+                if (this.processEvent(parsed, adapter)) anyChanged = true
+            } catch (err) {
+                // A malformed/edge event must not abort the rest of this file's
+                // lines (or, via coldLoad's loop, every later file). Skip it.
+                // eslint-disable-next-line no-console
+                console.error('[glanceterm] processEvent failed', err)
+            }
         }
 
         if (anyChanged && !opts.skipEmit) this.scheduleEmit()
@@ -900,6 +944,16 @@ export class HookWatcherService implements OnDestroy {
         // tabs (see lastKnownLiveTabIds). The caller skips zero-tab scans, so
         // this is never an empty set.
         this.lastKnownLiveTabIds = liveTabIds
+        // Prune stale bg-arrival queue heads every tick — not only when
+        // claim/peek happens. An arrival whose child process never appeared
+        // would otherwise linger past its window and be mis-credited to a later
+        // unrelated child (transient `· N shell` over-count). Same age window
+        // the claim/peek paths already enforce; nothing time-based about state.
+        const bgNow = Date.now()
+        for (const [tabId, arr] of this.pendingBgArrivals) {
+            while (arr.length > 0 && bgNow - arr[0] > BG_ARRIVAL_TTL_MS) arr.shift()
+            if (arr.length === 0) this.pendingBgArrivals.delete(tabId)
+        }
         const keys = new Set<string>()
         for (const k of this.map.keys()) keys.add(k)
         for (const k of this.tailOffset.keys()) keys.add(k)
