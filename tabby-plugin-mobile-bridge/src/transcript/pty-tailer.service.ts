@@ -23,8 +23,7 @@ import type { TranscriptEvent } from './tailer.service'
  * For Claude, use {@link TranscriptTailerService} which reads the
  * structured jsonl. For Codex / Gemini / opencode / future agents, the
  * right answer is a per-agent adapter that knows the transcript file
- * shape — those don't exist yet (see Block 4 of
- * docs/todo-mobile-bridge-v2.md).
+ * shape — those don't exist yet.
  *
  * The code stays in-tree as a fallback for line-mode tools that DON'T
  * use alt-screen (rare but exist — simple chat shells, single-shot

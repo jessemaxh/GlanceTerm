@@ -8,9 +8,6 @@ import { Observable } from 'rxjs'
  * platform cap). The interface intentionally omits anything Telegram- or
  * Feishu-specific — the dispatcher / topic-sync / permission-relay code
  * depend on this contract alone, never on platform wire types.
- *
- * See docs/feishu-bridge-design.md for the rationale + Phase 1/2/3
- * rollout.
  */
 
 /** All identifier types are strings even when the underlying platform uses

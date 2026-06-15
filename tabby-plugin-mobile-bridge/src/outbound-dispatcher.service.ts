@@ -17,7 +17,7 @@ import { PtyTailerService } from './transcript/pty-tailer.service'
 import { InstanceLockService } from './instance-lock.service'
 
 /** Event types pushed to phones. Aligned with the per-event-type filter
- *  defaults documented in docs/todo-mobile-bridge.md. */
+ *  defaults. */
 export type BridgeEventType =
     | 'needs_permission'
     | 'task_completed'
