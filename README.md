@@ -75,7 +75,7 @@ Gemini and opencode ship adapters that aren't tested end-to-end yet.**
 | Auto-approve permission prompts | ✅ | 🧪 | ❌ † | ❌ |
 | Resume exact session on restart | ✅ | 🧪 | ❌ ‡ | 🧪 |
 | Subagent + background-job badges | ✅ | ❌ | ❌ | ❌ |
-| Model + token-usage display | 🧪 | 🧪 | 🧪 | 🧪 |
+| Model + token-usage display | 🧪 | 🧪 | 🧪 § | 🧪 |
 
 **✅ tested** on a real install · **🧪 implemented, not yet tested** with this
 agent · **❌ not available** (not built, or the agent's hooks can't express it)
@@ -83,7 +83,8 @@ agent · **❌ not available** (not built, or the agent's hooks can't express it
 <sub>\* Codex working→done is verified; the *needs-you* permission state is
 implemented but untested live. † Gemini's hook can only *deny*, never
 auto-allow — auto-approve is impossible, not just unwritten. ‡ Gemini CLI has
-no launch-time resume-by-id flag, so a restored tab starts fresh.</sub>
+no launch-time resume-by-id flag, so a restored tab starts fresh. § Gemini
+shows token usage but not the model name.</sub>
 
 Screenshot-to-paste, split-shell, and pin-to-top are agent-agnostic and behave
 the same across all four. The full per-event breakdown (and what's

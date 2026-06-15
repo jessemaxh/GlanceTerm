@@ -38,7 +38,7 @@ Adding a new agent means editing that file **and** adding a column here.
 | HookAdapter implementation exists | ✅ | ✅ (verified 2026-06-10, codex 0.138.0) | 🧪 (`gemini.ts`; routing source-confirmed, events untested) | 🧪 (`opencode.ts` ships a JS plugin, untested) |
 | Auto-install hook into agent's settings file | ✅ | ✅ (`~/.codex/hooks.json` — installed entries fire correctly) | 🧪 (`~/.gemini/settings.json`) | 🧪 (writes `~/.config/opencode/plugins/glanceterm.ts`) |
 | **Status states** |||||
-| `working` state | ✅ | ✅ (UserPromptSubmit/Pre/PostToolUse — verified e2e) | 🧪 (`BeforeAgent`) | 🧪 (debounced `message`/`tool.execute.before`) |
+| `working` state | ✅ | ✅ (UserPromptSubmit/Pre/PostToolUse — verified e2e) | 🧪 (`BeforeAgent`) | 🧪 (debounced `message.updated`/`message.part.updated`) |
 | `idle` / "ready" state | ✅ | ✅ (Stop — verified e2e) | 🧪 (`AfterAgent`) | 🧪 (`session.idle`) |
 | `needs_permission` state | ✅ | 🧪 (PermissionRequest — fires only in interactive codex, not `exec`; untested e2e) | ❌ deferred (`Notification`/`ToolPermission` — matcher filtering unverified) | 🧪 (`permission.asked`) |
 | `done` (working → idle → unfocused) | ✅ | ✅ (derives from Stop — verified e2e) | 🧪 (depends on `AfterAgent`) | 🧪 (depends on `session.idle`) |
@@ -48,7 +48,7 @@ Adding a new agent means editing that file **and** adding a column here.
 | Actually responds `allow` to permission prompts | ✅ | 🧪 (Codex added it in PR #17563 — same decision JSON as Claude, source-confirmed; untested e2e) | 🚫 (`Notification` is advisory — "cannot grant permissions automatically"; `BeforeTool` can only `deny`) | ❌ (observe-only; `permission.ask` interceptor exists but unused — flaky) |
 | **Background-job indicator (`· N bg`)** |||||
 | Hook-anchored count (zero false positives) | ✅ | ❌ (Codex Bash bg-flag detection not implemented) | ❌ adapter | ❌ adapter |
-| Heuristic ≥2 s persistence fallback | ✅ (also active) | ❌ (suppressed: `spawnsNativeHelper()` true forces `hookAuthoritative` from t=0, and no Bash bg-flag is set → count stays 0) | 🧪 | 🧪 |
+| Heuristic ≥2 s persistence fallback | ✅ (also active) | ❌ (suppressed: `spawnsNativeHelper()` true forces `hookAuthoritative` from t=0, and no Bash bg-flag is set → count stays 0) | 🧪 | ❌ (suppressed since `ce30262a`: like Codex, `spawnsNativeHelper()`+`signalsBgJobs()` force `hookAuthoritative` from t=0 and the plugin emits no bg signal → count stays 0) |
 | **Notifications** |||||
 | OS notification on `needs_permission` | ✅ | 🧪 (gated on PermissionRequest firing) | ❌ no needs_permission state yet | 🧪 (gated on `permission.asked`) |
 | OS notification on `working → idle` | ✅ | 🧪 (gated on Stop firing) | 🧪 (gated on `AfterAgent`) | 🧪 (gated on `session.idle`) |
@@ -183,7 +183,7 @@ IN opencode's Bun process, so — unlike Gemini — there's no env problem: it r
 `session.idle`.
 
 Status mapping (plugin `event.type` → emitted log event → TabStatus):
-`message`/`tool.execute.before` → `working`; `session.idle` → `idle`;
+`message.updated`/`message.part.updated` → `working`; `session.idle` → `idle`;
 `permission.asked` → `needs_permission`, `permission.replied` → back to working.
 
 Confirmed against opencode source (sst/opencode v1.17.0, commit 97e713e): the

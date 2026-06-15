@@ -55,7 +55,7 @@ import { withFileLock, escapeRegex } from './claude'
  * event is advisory ("cannot grant permissions automatically") and `BeforeTool`
  * only supports a `deny` decision, never `allow`. The shield toggle stays inert
  * for Gemini tabs (the auto-approve branch in the handler is gated on
- * `AGENT = claude` regardless).
+ * `AGENT = claude || codex`, never Gemini).
  *
  * STATUS: UNTESTED end-to-end. Written from the Gemini hooks docs + verified
  * against gemini-cli source (2026-06-10): the settings schema matches Claude's
