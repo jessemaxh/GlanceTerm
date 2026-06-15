@@ -473,6 +473,20 @@ export class HookWatcherService implements OnDestroy {
     private readonly tailOffset = new Map<string, number>()
 
     /**
+     * Last live-tab UUID set TabMonitor handed us via {@link retainOnly}.
+     * {@link coldLoad}'s periodic rescan uses it to SKIP re-reading logs for
+     * CLOSED tabs: the on-disk handler never unlinks a closed tab's log, and
+     * retainOnly drops that tab's `map`/`tailOffset` every tick — so without
+     * this gate the 30 s rescan re-ingests every closed-tab log from offset 0
+     * (full read + parse + Buffer.alloc) only to have retainOnly drop it again,
+     * an IO/CPU/GC thrash that grows with on-disk log volume (the long-runtime
+     * slowdown). `null` until the first tick, so the INITIAL cold load still
+     * reads everything to discover state. Never set to an empty set (the
+     * caller skips zero-tab scans), so it can't skip every tab.
+     */
+    private lastKnownLiveTabIds: ReadonlySet<string> | null = null
+
+    /**
      * Stamp of when this HookWatcher instance was constructed. Used to
      * distinguish "fresh" events written during this run from "stale" events
      * left in the state dir by prior runs / closed tabs. Counter mutations
@@ -709,6 +723,15 @@ export class HookWatcherService implements OnDestroy {
         let anyChanged = false
         for (const e of entries) {
             if (!e.endsWith('.log')) continue
+            // Skip periodic re-reads of CLOSED tabs. Once TabMonitor has told us
+            // the live set, a log whose tab is gone must not be re-ingested:
+            // retainOnly drops its map/offset every tick, so re-reading it from
+            // offset 0 here just to have it re-dropped is pure 30 s thrash that
+            // scales with on-disk log volume. The initial cold load (live set
+            // still unknown) reads everything to discover state. fs.watch still
+            // delivers a closed tab's appends in real time if it somehow writes.
+            const tabId = e.replace(/\.log$/, '')
+            if (this.lastKnownLiveTabIds && !this.lastKnownLiveTabIds.has(tabId)) continue
             const before = this.map.size + (this.lastTsOf(e) ?? 0)
             await this.ingest(path.join(this.runtime.stateDir, e), { skipEmit: true })
             const after = this.map.size + (this.lastTsOf(e) ?? 0)
@@ -873,6 +896,10 @@ export class HookWatcherService implements OnDestroy {
      * everything; this method does not second-guess an empty set.
      */
     retainOnly (liveTabIds: Set<string>): void {
+        // Remember the live set so coldLoad's periodic rescan can skip closed
+        // tabs (see lastKnownLiveTabIds). The caller skips zero-tab scans, so
+        // this is never an empty set.
+        this.lastKnownLiveTabIds = liveTabIds
         const keys = new Set<string>()
         for (const k of this.map.keys()) keys.add(k)
         for (const k of this.tailOffset.keys()) keys.add(k)
