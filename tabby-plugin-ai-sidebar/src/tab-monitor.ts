@@ -872,18 +872,20 @@ export class TabMonitor implements OnDestroy {
                     tabId: snap.tabId,
                 })
                 if (usage) { tokensIn = usage.inTok; tokensOut = usage.outTok; tokensCacheRead = usage.cacheReadTok ?? null }
-                // Subagent semantics: when the main agent has gone idle (Stop →
-                // raw idle) but a backgrounded Task subagent is still running, we
-                // DO NOT promote the tab to "working". The main agent is waiting
-                // for the user — that's exactly the "this tab needs you" signal
-                // the sidebar exists to surface; masking it as "working" because
-                // a detached bg agent churns is misleading. The still-running
-                // subagent is shown via the `· N agents` badge (subagentCount,
-                // set below from getSubagentInFlight) instead. A SYNCHRONOUS
-                // subagent the main agent awaits keeps raw status = working (no
-                // Stop fires until it returns), so this only changes the
-                // background-subagent case. (Was: idle+inFlight→working.)
-                const rawStatus = snap.status
+                // Subagent in-flight → working. A main-agent Stop routinely fires
+                // WHILE a launched subagent keeps working — real logs show `Stop`
+                // at HH:MM:SS immediately followed by that subagent's next
+                // PreToolUse in the SAME second. If we let the Stop surface idle,
+                // the row flaps working→idle→working as the subagent's events keep
+                // arriving. So while a subagent is in flight we hold the row at
+                // working until its SubagentStop drops the count to 0 (then a real
+                // Stop shows idle). This is safe now that the count is leak-free
+                // (orphan/late-spawn fixed) — a non-zero count means a subagent is
+                // genuinely working. (We tried idle-here; it caused the flap.)
+                let rawStatus = snap.status
+                if (rawStatus === TabStatus.Idle && tabId && this.hooks.getSubagentInFlight(tabId) > 0) {
+                    rawStatus = TabStatus.Working
+                }
                 status = this.applyIdleGate(t.inner, rawStatus, snap.eventAt)
                 lastActiveMs = Math.max(0, Date.now() - snap.eventAt)
                 this.maybeProbeTranscriptInterrupt(t.inner, tabId, snap, status)

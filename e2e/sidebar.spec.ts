@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { launchApp, freshPluginLoaded, openTerminalTab, writeHook, expectStatus, rowStatus, cleanup, AppHandle } from './helpers'
+import { launchApp, freshPluginLoaded, openTerminalTab, writeHook, expectStatus, cleanup, AppHandle } from './helpers'
 
 // Drives the real GlanceTerm sidebar via synthetic hook-log files and asserts
 // the row [data-tab-id][data-status]. Self-skips when a stale shadowing plugin
@@ -38,19 +38,21 @@ test('Stop → idle (after the idle-gate hold)', async () => {
   await expectStatus(h.page, tabId, 'idle', 10_000)
 })
 
-test('idle main + live background subagent → row stays idle, badge shows the agent', async () => {
+test('live subagent holds the row at working (no idle flap), idle when it stops', async () => {
   writeHook(tabId, cwd, 'Stop')
   await expectStatus(h.page, tabId, 'idle', 10_000)
-  // a backgrounded subagent spawns; main agent is idle (already Stopped)
+  // A subagent spawns while the main agent has already Stopped. Real logs show
+  // the main Stop landing in the same second as the subagent's next event, so
+  // leaving the row idle makes it flap working↔idle. With a leak-free count, a
+  // live subagent means real work → the row must show WORKING and hold it.
   writeHook(tabId, cwd, 'PostToolUse', { tool_name: 'Agent', spawn_agent_id: 'aE2E1' })
-  // semantic: status must NOT flip to working
-  await new Promise(r => setTimeout(r, 2500))
-  expect(await rowStatus(h.page, tabId)).toBe('idle')
-  // and the subagent surfaces as a count badge in the row
+  await expectStatus(h.page, tabId, 'working', 10_000)
+  // the subagent also surfaces as a count badge in the row
   const hasAgentBadge = await h.page.evaluate((id) => /agent/i.test(document.querySelector(`ai-sidebar .row[data-tab-id="${id}"]`)?.textContent || ''), tabId)
   expect(hasAgentBadge).toBe(true)
-  // SubagentStop clears it
+  // once the subagent stops, the count drops to 0 and the row returns to idle
   writeHook(tabId, cwd, 'SubagentStop', { agent_id: 'aE2E1' })
+  await expectStatus(h.page, tabId, 'idle', 10_000)
 })
 
 test('clicking a row activates it', async () => {
