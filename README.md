@@ -36,6 +36,9 @@ amber when it's asking permission. Click a row → jump straight to that tab.
 - 🟢 **Live status per tab** — working / done / needs-permission, driven by the
   agent's own hook events (zero polling, zero screen-scraping, zero false positives).
 - 🎯 **Click to jump** — one click takes you straight to the tab that needs you.
+- 🔄 **Restart-safe** — close & reopen GlanceTerm and your agent tabs come back,
+  each resumed into its *exact* prior session (`claude --resume`, `codex resume`,
+  `opencode --session`), not a fresh one.
 - 🤖 **Multi-agent** — Claude Code is first-class and tested; Codex / Gemini /
   opencode adapters ship too ([support matrix](docs/feature-matrix.md)).
 - 🧩 **No habit change** — keep typing `claude`; the hook wires itself up on first launch.
@@ -60,11 +63,38 @@ amber when it's asking permission. Click a row → jump straight to that tab.
 └────────────────┴──────────────────────────────────┘
 ```
 
-> **Does it work with my AI tool?** — see the
-> [feature × agent support matrix](docs/feature-matrix.md). Short answer:
-> Claude Code is first-class and tested; Codex's adapter has status
-> detection verified (auto-approve untested); Gemini and opencode ship
-> adapters that aren't yet validated end-to-end.
+## Agent & platform support
+
+How much of GlanceTerm works depends on the agent. **Claude Code is
+first-class and validated in daily use; Codex's status detection is verified;
+Gemini and opencode ship adapters that aren't tested end-to-end yet.**
+
+| Capability | Claude Code | Codex | Gemini CLI | opencode |
+|---|:---:|:---:|:---:|:---:|
+| Live status — working / done / needs-you | ✅ | ✅ \* | 🧪 | 🧪 |
+| Auto-approve permission prompts | ✅ | 🧪 | ❌ † | ❌ |
+| Resume exact session on restart | ✅ | 🧪 | ❌ ‡ | 🧪 |
+| Subagent + background-job badges | ✅ | ❌ | ❌ | ❌ |
+| Model + token-usage display | 🧪 | 🧪 | 🧪 | 🧪 |
+
+**✅ tested** on a real install · **🧪 implemented, not yet tested** with this
+agent · **❌ not available** (not built, or the agent's hooks can't express it)
+
+<sub>\* Codex working→done is verified; the *needs-you* permission state is
+implemented but untested live. † Gemini's hook can only *deny*, never
+auto-allow — auto-approve is impossible, not just unwritten. ‡ Gemini CLI has
+no launch-time resume-by-id flag, so a restored tab starts fresh.</sub>
+
+Screenshot-to-paste, split-shell, and pin-to-top are agent-agnostic and behave
+the same across all four. The full per-event breakdown (and what's
+architecturally blocked) lives in
+[docs/feature-matrix.md](docs/feature-matrix.md).
+
+**Platforms — macOS only for now.** GlanceTerm is validated on **macOS**; the
+Linux (`/proc` + POSIX `sh`) and Windows (PowerShell) code paths are written
+but have **never been run**. So **only the macOS `.dmg` is shipped — there are
+no prebuilt Linux/Windows installers yet**. Build from source on those
+platforms ([Dev / Build](#dev--build)) and please report what breaks.
 
 ## Status of this repo
 
@@ -84,8 +114,11 @@ ai-terminal/
     └── src/
         ├── hook-adapters/      pluggable per-agent hook integrations
         │   ├── adapter.ts      HookAdapter interface
-        │   └── claude.ts       Claude Code adapter (v0.2)
-        ├── hook-watcher.ts     fs.watch on ~/.glanceterm/hooks/
+        │   ├── claude.ts       Claude Code adapter (first-class)
+        │   ├── codex.ts        Codex adapter
+        │   ├── gemini.ts       Gemini CLI adapter
+        │   └── opencode.ts     opencode adapter
+        ├── hook-watcher.service.ts  fs.watch on ~/.glanceterm/hooks/
         ├── tab-monitor.ts      ties tabs ↔ hook events ↔ status
         ├── sidebar.component.ts the rendered UI
         └── index.ts            NgModule + SidebarProvider impl
@@ -153,21 +186,11 @@ goes wrong, you own it — the confirm dialog exists for exactly this reason.
 ## Install
 
 **macOS (recommended)** — grab the latest `.dmg` from the
-[releases page](../../releases). Drag GlanceTerm.app into `/Applications`.
+[releases page](../../releases), open it, and drag GlanceTerm.app into
+`/Applications`.
 
-The binary is **ad-hoc signed, not notarized** (no paid Apple Developer
-account yet), so macOS Gatekeeper will refuse to launch it on first run.
-To bypass:
-
-1. After dragging into Applications, right-click GlanceTerm → **Open** →
-   confirm the warning dialog. (Double-clicking won't show the Open
-   option — you need the right-click menu.)
-2. macOS remembers this choice; subsequent launches work normally.
-
-Alternatively, from a terminal:
-```bash
-xattr -d com.apple.quarantine /Applications/GlanceTerm.app
-```
+The build is **signed with an Apple Developer ID and notarized**, so it opens
+with a normal double-click — no Gatekeeper warning, no right-click dance.
 
 **Linux / Windows** — **no prebuilt installers are provided yet.** There's no
 CI at the moment, so only the macOS `.dmg` is built (locally) and uploaded by
@@ -215,14 +238,14 @@ for CDP-driven UI testing.
 - **Validated on macOS only.** Code paths for Linux and Windows exist —
   the hook handler ships in both POSIX `sh` and PowerShell forms — but no
   one has driven them end-to-end yet. Help wanted.
-- **No code signing.** macOS builds are ad-hoc signed (Gatekeeper
-  bypass instructions in [Install](#install) above). No Windows
-  Authenticode signature either.
+- **Windows builds are unsigned.** macOS builds are Developer ID-signed and
+  notarized (double-click to open). Windows builds carry no Authenticode
+  signature yet, so SmartScreen will warn on first run.
 - **Auto-update only on macOS / Windows.** Tabby's built-in updater is
   inherited as-is, now pointed at this repo's releases. Linux's
   electron-updater is disabled by upstream Tabby — you'll need to update
-  manually. (When you do update macOS or Windows, the same Gatekeeper /
-  SmartScreen warnings apply to the new build as to the first install.)
+  manually. (Windows updates carry the same SmartScreen warning as the first
+  install, until the Windows build is signed.)
 
 ## Credits
 
