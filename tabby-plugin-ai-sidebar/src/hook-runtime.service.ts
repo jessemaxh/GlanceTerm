@@ -199,8 +199,11 @@ MONITOR_TASK_ID=""
 # Claude fires no hook when a monitor ends naturally, so without this
 # bound a completed monitor would inflate the "M monitor" badge until the
 # next session. Number-valued, so \`extract\` (string-only) can't read it;
-# grep the digits directly. Scoped to PostToolUse(Monitor) like the id,
-# so the only place "timeout_ms" can appear is this monitor's tool_input.
+# grep the digits directly. Prefer tool_response.timeoutMs (camelCase — the
+# value the Monitor ACTUALLY uses, including its default like 3600000), and
+# fall back to tool_input.timeout_ms (snake — only what the agent passed, and
+# absent whenever the agent omits an explicit timeout). Scoped to
+# PostToolUse(Monitor). A wrong default here mis-bounds the live-monitor TTL.
 MONITOR_TIMEOUT_MS=0
 if [ "\$EVENT" = "PostToolUse" ] && [ "\$TOOL_NAME" = "Monitor" ]; then
     MONITOR_TASK_ID=$(extract taskId)
@@ -208,9 +211,15 @@ if [ "\$EVENT" = "PostToolUse" ] && [ "\$TOOL_NAME" = "Monitor" ]; then
         MONITOR_TASK_ID=$(extract task_id)
     fi
     MONITOR_TIMEOUT_MS=$(printf '%s' "\$PAYLOAD" \\
-        | grep -oE '"timeout_ms"[[:space:]]*:[[:space:]]*[0-9]+' \\
+        | grep -oE '"timeoutMs"[[:space:]]*:[[:space:]]*[0-9]+' \\
         | head -1 \\
         | grep -oE '[0-9]+$')
+    if [ -z "\$MONITOR_TIMEOUT_MS" ]; then
+        MONITOR_TIMEOUT_MS=$(printf '%s' "\$PAYLOAD" \\
+            | grep -oE '"timeout_ms"[[:space:]]*:[[:space:]]*[0-9]+' \\
+            | head -1 \\
+            | grep -oE '[0-9]+$')
+    fi
     [ -z "\$MONITOR_TIMEOUT_MS" ] && MONITOR_TIMEOUT_MS=0
 fi
 STOP_TASK_ID=""
@@ -492,11 +501,15 @@ if ([string]$json.hook_event_name -eq "PostToolUse" -and $toolName -eq "Monitor"
             $monitorTaskId = [string]$json.tool_response.task_id
         }
     }
-    if ($json.tool_input -and $json.tool_input.timeout_ms) {
-        # [long] + floor for parity with HANDLER_SH's digit-truncating
-        # grep: [int] is Int32 and THROWS on > ~24.8 days of ms (aborting
-        # the handler → the Monitor add is lost), and rounds floats where
-        # the SH path truncates. [long] floors a fractional timeout_ms.
+    # Authoritative timeout is tool_response.timeoutMs (the value the Monitor
+    # ACTUALLY uses, incl. its default); tool_input.timeout_ms is absent when
+    # the agent omits an explicit timeout. Prefer the former, fall back to it.
+    # [long] + floor for parity with HANDLER_SH's digit-truncating grep: [int]
+    # is Int32 and THROWS on > ~24.8 days of ms (aborting the handler → the
+    # Monitor add is lost), and rounds floats where the SH path truncates.
+    if ($json.tool_response -and $json.tool_response.timeoutMs) {
+        $monitorTimeoutMs = [long][math]::Floor([double]$json.tool_response.timeoutMs)
+    } elseif ($json.tool_input -and $json.tool_input.timeout_ms) {
         $monitorTimeoutMs = [long][math]::Floor([double]$json.tool_input.timeout_ms)
     }
 }
