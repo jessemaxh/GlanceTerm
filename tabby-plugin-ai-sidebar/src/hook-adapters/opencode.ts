@@ -93,6 +93,13 @@ export const GlanceTerm = async () => {
     // (event.properties.info.modelID). Included in every emitted record once
     // known so the sidebar can show it next to the opencode tag.
     let model = null
+    // opencode session id, captured best-effort from whatever event carries it
+    // (session.* events expose event.properties.sessionID; message events carry
+    // it on the Message under event.properties.info.sessionID). Emitted as
+    // session_id so GlanceTerm's auto-resume can rebuild "opencode --session
+    // <id>" for a restored tab. Stays null if the field shape differs — the
+    // resume path then safely falls back to a fresh launch.
+    let sessionId = null
     // Running token totals, built from assistant message.updated
     // event.properties.info.tokens.{input,output}. message.updated can fire
     // repeatedly for the same message as streaming progresses, so keep the
@@ -104,6 +111,7 @@ export const GlanceTerm = async () => {
     const emit = (event) => {
         const rec = { tab_id: tabId, agent: "opencode", event: event, ts: Math.floor(Date.now() / 1000) }
         if (model) rec.model = model
+        if (sessionId) rec.session_id = sessionId
         if (tokensIn || tokensOut) {
             rec.tokens_in = tokensIn
             rec.tokens_out = tokensOut
@@ -118,6 +126,9 @@ export const GlanceTerm = async () => {
             // Capture the model from an assistant message (info.modelID); the
             // event carries the full Message under event.properties.info.
             const info = event.properties && event.properties.info
+            // Best-effort session id capture (see sessionId decl above).
+            const sid = (event.properties && (event.properties.sessionID || event.properties.sessionId)) || (info && (info.sessionID || info.sessionId)) || null
+            if (sid && sid !== sessionId) sessionId = sid
             if (info && info.role === "assistant" && info.modelID && info.modelID !== model) {
                 // First time we learn the model (or it changes): surface it
                 // immediately. The "working" edge fires on the FIRST message

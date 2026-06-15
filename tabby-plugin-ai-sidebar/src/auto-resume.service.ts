@@ -21,7 +21,7 @@ import { TabMonitor, TabState, AiTool } from './tab-monitor'
  * resume issue has been diagnosed. Writes are best-effort and synchronous-
  * append only; a failed write never disturbs the feature.
  */
-const DIAG_LOG = true
+const DIAG_LOG = false
 const DIAG_PATH = path.join(os.homedir(), '.glanceterm', 'auto-resume.log')
 function diag (msg: string): void {
     if (!DIAG_LOG) {
@@ -309,6 +309,12 @@ export class AutoResumeService implements OnDestroy {
         return this.config.store?.ai?.autoResumeAgents !== false
     }
 
+    /** Sub-toggle: resume the agent's exact prior session via `--resume <id>`
+     *  rather than re-launching a fresh conversation. Default on. */
+    private get resumeSession (): boolean {
+        return this.config.store?.ai?.autoResumeSession !== false
+    }
+
     /** The pending resume command stashed on an inner terminal tab, or null
      *  if absent / not a non-empty string. */
     private getResumeCommand (inner: BaseTabComponent): string | null {
@@ -342,7 +348,18 @@ export class AutoResumeService implements OnDestroy {
             // safer. The cleanup gate STILL arms — the agent is observably
             // alive here regardless of the cmdline's shape.
             if (s.aiTool && s.aiCommandLine) {
-                const command = toRunnableCommand(s.aiCommandLine, s.aiTool)
+                let command = toRunnableCommand(s.aiCommandLine, s.aiTool)
+                // Upgrade a fresh-launch command into one that RESUMES this
+                // tab's exact prior session, when enabled and we know the
+                // session id. Per-tab id (not cwd) means two tabs in the same
+                // directory each resume their OWN conversation. Agents without
+                // resume-by-id (Gemini) or without a captured id yet return
+                // null here and keep the fresh command. The result still goes
+                // through isShellSafe below.
+                if (this.resumeSession && s.sessionId) {
+                    const resumeCmd = buildResumeCommand(s.aiTool, s.sessionId, command)
+                    if (resumeCmd) command = resumeCmd
+                }
                 if (isShellSafe(command)) {
                     this.setResumeCommand(s.innerTab, command)
                     if (this.lastCaptureLog.get(s.innerTab) !== command) {
@@ -579,4 +596,86 @@ export function toRunnableCommand (cmdline: string, tool: string): string {
         }
     }
     return tool
+}
+
+/**
+ * Session id shapes we accept before splicing one into a shell command. The id
+ * is whitelisted PER TOOL (their formats differ) so a malformed/hostile hook
+ * payload can't smuggle shell tokens through the `--resume <id>` splice:
+ *
+ *   claude / codex → UUID (8-4-4-4-12 hex). Covers Claude's UUIDv4 AND Codex's
+ *     UUIDv7-style id (`019eba31-ac54-7311-…`); both are hyphenated hex.
+ *   opencode       → `ses_<base62>` (e.g. `ses_3cf7dd8d4ffeUPfENpVxfFojZ2`):
+ *     the literal `ses_` prefix + mixed-case alphanumerics, no hyphens. A UUID
+ *     regex would (and did, pre-fix) reject every real opencode id, silently
+ *     disabling opencode resume.
+ *
+ * Both shapes are shell-safe by construction (hex+hyphen / alnum+underscore),
+ * and the caller still runs the spliced result through isShellSafe.
+ */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const OPENCODE_SESSION_RE = /^ses_[0-9a-zA-Z]+$/
+
+/** Whether `id` is a valid session id for `tool` (see the regex doc above). */
+function isValidSessionId (tool: string, id: string): boolean {
+    if (tool === 'opencode') return OPENCODE_SESSION_RE.test(id)
+    return UUID_RE.test(id)   // claude, codex
+}
+
+/**
+ * Rewrite a fresh-launch invocation into one that RESUMES a specific agent
+ * session, per that agent's CLI. Returns null when the tool can't resume by id
+ * (caller keeps the fresh command):
+ *
+ *   claude    → `claude --resume <id> [other flags]`   — drops any prior
+ *               `--resume`/`-r`/`--resume=…` and `--continue`/`-c` so we don't
+ *               double-resume; keeps the rest (`--model`, `--permission-mode`…).
+ *   codex     → `codex resume <id>`                     — `resume` is a
+ *               subcommand and the resumed session restores its own
+ *               model/config, so we don't thread the original flags through.
+ *   opencode  → `opencode --session <id> [other flags]` — drops prior
+ *               `--session`/`-s`/`--session=…` and `--continue`/`-c`.
+ *   gemini    → null                                    — the Gemini CLI has no
+ *               launch-time resume-by-id flag.
+ *
+ * `runnable` is the output of toRunnableCommand ("claude", "claude --model
+ * opus", …); its first token is always the bare tool name. The session id is
+ * validated per tool (bad id → null). The caller still runs the result through
+ * isShellSafe.
+ *
+ * Exported for unit-testability.
+ */
+export function buildResumeCommand (tool: string, sessionId: string, runnable: string): string | null {
+    if (!isValidSessionId(tool, sessionId)) return null
+
+    // Tokens after the leading tool name (toRunnableCommand always emits the
+    // bare tool first).
+    const args = runnable.split(/\s+/).filter(Boolean).slice(1)
+
+    // Drop occurrences of value-taking flags (the flag AND its following value,
+    // plus the `--flag=value` single-token form) and bare boolean flags.
+    const strip = (xs: string[], valueFlags: string[], bareFlags: string[]): string[] => {
+        const out: string[] = []
+        for (let i = 0; i < xs.length; i++) {
+            const x = xs[i]
+            if (valueFlags.includes(x)) { i++; continue }                 // flag + value
+            if (valueFlags.some(f => x.startsWith(`${f}=`))) continue      // --flag=value
+            if (bareFlags.includes(x)) continue
+            out.push(x)
+        }
+        return out
+    }
+
+    if (tool === 'claude') {
+        const rest = strip(args, ['--resume', '-r'], ['--continue', '-c'])
+        return ['claude', '--resume', sessionId, ...rest].join(' ')
+    }
+    if (tool === 'codex') {
+        return `codex resume ${sessionId}`
+    }
+    if (tool === 'opencode') {
+        const rest = strip(args, ['--session', '-s'], ['--continue', '-c'])
+        return ['opencode', '--session', sessionId, ...rest].join(' ')
+    }
+    return null   // gemini & anything unknown — no resume-by-id
 }

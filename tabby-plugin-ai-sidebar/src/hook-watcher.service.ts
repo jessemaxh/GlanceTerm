@@ -1172,7 +1172,13 @@ export class HookWatcherService implements OnDestroy {
             tool: adapter.id,
             status,
             eventAt,
-            sessionId: parsed.session_id || null,
+            // Sticky like `model` below: keep the last non-empty session id so a
+            // model-less / id-less mid-session event (e.g. some codex hooks) does
+            // not blank it and overwrite a stashed `--resume <id>` — EXCEPT on a
+            // fresh SessionStart, which begins a NEW session and must NOT inherit
+            // the prior session's id (resuming the wrong session is worse than the
+            // model case).
+            sessionId: parsed.session_id || (parsed.event === 'SessionStart' ? null : prev?.sessionId ?? null),
             cwd: parsed.cwd || null,
             transcriptPath: parsed.transcript_path || null,
             // Sticky: keep the last non-empty model so Claude's one-shot

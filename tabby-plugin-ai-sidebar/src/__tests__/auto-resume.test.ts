@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 
-import { isShellSafe, toRunnableCommand } from '../auto-resume.service'
+import { buildResumeCommand, isShellSafe, toRunnableCommand } from '../auto-resume.service'
 
 describe('toRunnableCommand', () => {
     describe('Pass 1 — exact basename match', () => {
@@ -144,6 +144,112 @@ describe('isShellSafe', () => {
 
         it('rejects strings STARTING with metacharacter', () => {
             expect(isShellSafe('; claude --resume foo')).toBe(false)
+        })
+    })
+})
+
+describe('buildResumeCommand', () => {
+    const CLAUDE_ID = 'ea59366a-a2d5-43e1-b894-aa40a8188fb6'
+    const CODEX_ID = '019eba31-ac54-7311-949e-fde38fe88a03'   // UUIDv7-style
+    const OPENCODE_ID = 'ses_3cf7dd8d4ffeUPfENpVxfFojZ2'       // ses_<base62>, NOT a UUID
+
+    describe('claude', () => {
+        it('injects --resume <id> into a bare command', () => {
+            expect(buildResumeCommand('claude', CLAUDE_ID, 'claude'))
+                .toBe(`claude --resume ${CLAUDE_ID}`)
+        })
+
+        it('preserves unrelated flags', () => {
+            expect(buildResumeCommand('claude', CLAUDE_ID, 'claude --model opus --permission-mode plan'))
+                .toBe(`claude --resume ${CLAUDE_ID} --model opus --permission-mode plan`)
+        })
+
+        it('replaces a stale --resume <old> with the current id (no double-resume)', () => {
+            expect(buildResumeCommand('claude', CLAUDE_ID, 'claude --resume old-1234 --model opus'))
+                .toBe(`claude --resume ${CLAUDE_ID} --model opus`)
+        })
+
+        it('drops -r <old> short form', () => {
+            expect(buildResumeCommand('claude', CLAUDE_ID, 'claude -r old --model opus'))
+                .toBe(`claude --resume ${CLAUDE_ID} --model opus`)
+        })
+
+        it('drops --continue / -c (would conflict with explicit resume)', () => {
+            expect(buildResumeCommand('claude', CLAUDE_ID, 'claude --continue --model opus'))
+                .toBe(`claude --resume ${CLAUDE_ID} --model opus`)
+            expect(buildResumeCommand('claude', CLAUDE_ID, 'claude -c'))
+                .toBe(`claude --resume ${CLAUDE_ID}`)
+        })
+
+        it('drops the --resume=<old> equals form', () => {
+            expect(buildResumeCommand('claude', CLAUDE_ID, 'claude --resume=old --model opus'))
+                .toBe(`claude --resume ${CLAUDE_ID} --model opus`)
+        })
+
+        it('output passes the shell-safety gate', () => {
+            const cmd = buildResumeCommand('claude', CLAUDE_ID, 'claude')!
+            expect(isShellSafe(cmd)).toBe(true)
+        })
+    })
+
+    describe('codex', () => {
+        it('uses the resume subcommand form', () => {
+            expect(buildResumeCommand('codex', CODEX_ID, 'codex'))
+                .toBe(`codex resume ${CODEX_ID}`)
+        })
+
+        it('does not thread original flags through the subcommand', () => {
+            expect(buildResumeCommand('codex', CODEX_ID, 'codex --model gpt-5'))
+                .toBe(`codex resume ${CODEX_ID}`)
+        })
+    })
+
+    describe('opencode', () => {
+        // Real opencode ids are `ses_<base62>`, NOT UUIDs — the gate must accept them.
+        it('injects --session <ses_ id>', () => {
+            expect(buildResumeCommand('opencode', OPENCODE_ID, 'opencode'))
+                .toBe(`opencode --session ${OPENCODE_ID}`)
+        })
+
+        it('drops a prior -s <old> / --continue', () => {
+            expect(buildResumeCommand('opencode', OPENCODE_ID, 'opencode -s old --continue'))
+                .toBe(`opencode --session ${OPENCODE_ID}`)
+        })
+
+        it('rejects a UUID for opencode (wrong format → fresh launch)', () => {
+            expect(buildResumeCommand('opencode', CLAUDE_ID, 'opencode')).toBeNull()
+        })
+
+        it('output passes the shell-safety gate', () => {
+            expect(isShellSafe(buildResumeCommand('opencode', OPENCODE_ID, 'opencode')!)).toBe(true)
+        })
+    })
+
+    describe('per-tool id-format validation', () => {
+        it('claude/codex reject a ses_ id (only opencode uses that shape)', () => {
+            expect(buildResumeCommand('claude', OPENCODE_ID, 'claude')).toBeNull()
+            expect(buildResumeCommand('codex', OPENCODE_ID, 'codex')).toBeNull()
+        })
+
+        it('opencode rejects a malformed ses_ id with metacharacters', () => {
+            expect(buildResumeCommand('opencode', 'ses_foo; rm -rf ~', 'opencode')).toBeNull()
+            expect(buildResumeCommand('opencode', 'ses_', 'opencode')).toBeNull()
+        })
+    })
+
+    describe('unsupported / invalid', () => {
+        it('returns null for gemini (no CLI resume-by-id)', () => {
+            expect(buildResumeCommand('gemini', CLAUDE_ID, 'gemini')).toBeNull()
+        })
+
+        it('returns null for an unknown tool', () => {
+            expect(buildResumeCommand('aider', CLAUDE_ID, 'aider')).toBeNull()
+        })
+
+        it('returns null when the session id is not a valid id (anti-injection)', () => {
+            expect(buildResumeCommand('claude', 'not-a-uuid', 'claude')).toBeNull()
+            expect(buildResumeCommand('claude', 'foo; rm -rf ~', 'claude')).toBeNull()
+            expect(buildResumeCommand('claude', '', 'claude')).toBeNull()
         })
     })
 })

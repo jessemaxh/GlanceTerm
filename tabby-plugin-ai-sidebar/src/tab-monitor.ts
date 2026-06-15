@@ -278,6 +278,16 @@ export interface TabState {
      *  report it; rendered as a dim "cache" figure beside in/out. */
     tokensCacheRead: number | null
     tokensOut: number | null
+    /**
+     * The agent's current session id for this tab, straight from the hook
+     * payload's `session_id` — a UUID for Claude/Codex, null for agents that
+     * don't report one (Gemini today) or before the first hook event. For
+     * Claude we fall back to the `<session-id>.jsonl` transcript basename when
+     * the field is absent. AutoResumeService splices it into a
+     * `--resume <id>` invocation so a restored tab continues its exact prior
+     * conversation instead of starting fresh.
+     */
+    sessionId: string | null
 }
 
 interface ChildProcessInfo { pid: number; ppid: number; command: string }
@@ -428,6 +438,18 @@ export class TabMonitor implements OnDestroy {
      * effective status actually leaves working.
      */
     private workingSince = new WeakMap<BaseTabComponent, number>()
+    /**
+     * Per inner tab: the live agent pid we currently trust the hook snapshot's
+     * `sessionId` for, plus the wall-clock ms we first saw a CHANGE to it.
+     * Guards auto-resume against capturing a stale session id when a new agent
+     * session is started in a tab that previously ran a different one (the
+     * snapshot lags one poll behind the new process). `seenAt === 0` means
+     * "trust immediately" (first sighting of this pid); a pid change stamps
+     * `seenAt = now` so snapshot events older than the new process are
+     * distrusted until its first hook fires. See the generation gate in
+     * makeState.
+     */
+    private agentGen = new WeakMap<BaseTabComponent, { pid: number; seenAt: number }>()
     /**
      * Per-tab map of `child pid → first-seen wall-clock ms` for the immediate
      * descendants of the tab's `aiPid`. Entries age in by being observed on
@@ -725,6 +747,9 @@ export class TabMonitor implements OnDestroy {
         let tokensIn: number | null = null
         let tokensCacheRead: number | null = null
         let tokensOut: number | null = null
+        // Current agent session id (for --resume on restart). Populated from
+        // the hook snapshot in the adapter-supported branch below.
+        let sessionId: string | null = null
 
         if (!aiTool) {
             status = TabStatus.NoAi
@@ -761,6 +786,41 @@ export class TabMonitor implements OnDestroy {
             const snap = tabId ? this.hooks.getStatus(tabId) : null
             if (snap) {
                 model = snap.model
+                // Session id for auto-resume. Prefer the explicit hook field;
+                // for Claude, fall back to the transcript filename
+                // (`<session-id>.jsonl`) when the field is missing. Codex's
+                // rollout filename is NOT a bare id, so no transcript fallback
+                // there — snap.sessionId is the only source.
+                sessionId = snap.sessionId
+                if (!sessionId && aiTool === 'claude' && snap.transcriptPath) {
+                    // Split on both separators so the Windows hook path
+                    // (`…\projects\…\<id>.jsonl`) yields the basename too.
+                    const base = snap.transcriptPath.split(/[\\/]/).pop() ?? ''
+                    if (base.endsWith('.jsonl')) {
+                        sessionId = base.slice(0, -'.jsonl'.length) || null
+                    }
+                }
+                // Generation gate (anti stale-id): if the live agent is a
+                // DIFFERENT process than when we last looked (pid changed → a
+                // new session was started in this same tab), the hook snapshot
+                // still describes the PREVIOUS session until that new session's
+                // first hook lands. Don't trust its session id during that
+                // window — otherwise a quit in that ~1-poll gap would capture
+                // the old conversation's id for the new one. First sighting of
+                // a pid trusts immediately (seenAt=0); only a pid CHANGE arms
+                // the gate, so a legitimately idle pre-existing session is not
+                // gated out.
+                if (sessionId && aiPid !== null) {
+                    const prev = this.agentGen.get(t.inner)
+                    if (!prev) {
+                        this.agentGen.set(t.inner, { pid: aiPid, seenAt: 0 })
+                    } else if (prev.pid !== aiPid) {
+                        this.agentGen.set(t.inner, { pid: aiPid, seenAt: Date.now() })
+                    }
+                    if (snap.eventAt < (this.agentGen.get(t.inner)!.seenAt)) {
+                        sessionId = null
+                    }
+                }
                 // Cumulative token usage. Each agent has a different source
                 // (Claude/Codex transcript path, Gemini session id, opencode
                 // hook log tab id); the tracker handles the per-agent reader.
@@ -849,6 +909,7 @@ export class TabMonitor implements OnDestroy {
             tokensIn,
             tokensCacheRead,
             tokensOut,
+            sessionId,
         }
     }
 
@@ -1182,6 +1243,7 @@ export class TabMonitor implements OnDestroy {
             tokensIn: null,
             tokensCacheRead: null,
             tokensOut: null,
+            sessionId: null,
         }
     }
 

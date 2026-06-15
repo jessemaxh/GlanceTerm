@@ -61,6 +61,7 @@ Adding a new agent means editing that file **and** adding a column here.
 | Captures the re-runnable agent command with flags | ✅ | 🧪 | 🧪 | 🧪 |
 | Replays `${command}\r` into the restored tab | ✅ | 🧪 | 🧪 | 🧪 |
 | Clears the command when the user exits the agent | ✅ | 🧪 | 🧪 | 🧪 |
+| Resume EXACT prior session (`--resume <id>`, sub-toggle `ai.autoResumeSession`) | ✅ (`claude --resume <id>`) | 🧪 (`codex resume <id>`; session id from hook) | ❌ (Gemini CLI has no launch-time resume-by-id flag → fresh session) | 🧪 (`opencode --session <ses_…>`; plugin now emits `session_id` — note opencode ids are `ses_<base62>`, not UUIDs) |
 
 ## Notes by agent
 

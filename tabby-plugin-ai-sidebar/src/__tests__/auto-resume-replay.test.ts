@@ -69,6 +69,71 @@ describe('AutoResumeService — integration', () => {
             expect(a.glancetermResumeCommand).toBe('claude --resume foo')
         })
 
+        it('upgrades to claude --resume <id> when a session id is known', async () => {
+            const h = new AutoResumeHarness()
+            h.start()
+            const a = h.addTab()
+            const sid = 'ea59366a-a2d5-43e1-b894-aa40a8188fb6'
+            h.emitTick([makeTabState(a, {
+                aiTool: 'claude',
+                cwd: '/repo',
+                aiCommandLine: 'claude --model opus',
+                sessionId: sid,
+            })])
+            expect(a.glancetermResumeCommand).toBe(`claude --resume ${sid} --model opus`)
+        })
+
+        it('uses codex resume <id> for codex tabs', async () => {
+            const h = new AutoResumeHarness()
+            h.start()
+            const a = h.addTab()
+            const sid = '019eba31-ac54-7311-949e-fde38fe88a03'
+            h.emitTick([makeTabState(a, {
+                aiTool: 'codex', cwd: '/repo', aiCommandLine: 'codex', sessionId: sid,
+            })])
+            expect(a.glancetermResumeCommand).toBe(`codex resume ${sid}`)
+        })
+
+        it('falls back to the fresh command when autoResumeSession is off', async () => {
+            const h = new AutoResumeHarness({ autoResumeSession: false })
+            h.start()
+            const a = h.addTab()
+            h.emitTick([makeTabState(a, {
+                aiTool: 'claude',
+                cwd: '/repo',
+                aiCommandLine: 'claude',
+                sessionId: 'ea59366a-a2d5-43e1-b894-aa40a8188fb6',
+            })])
+            expect(a.glancetermResumeCommand).toBe('claude')
+        })
+
+        it('falls back to the fresh command for gemini (no resume-by-id)', async () => {
+            const h = new AutoResumeHarness()
+            h.start()
+            const a = h.addTab()
+            h.emitTick([makeTabState(a, {
+                aiTool: 'gemini',
+                cwd: '/repo',
+                aiCommandLine: 'gemini',
+                sessionId: 'ea59366a-a2d5-43e1-b894-aa40a8188fb6',
+            })])
+            expect(a.glancetermResumeCommand).toBe('gemini')
+        })
+
+        it('end-to-end: a restored claude tab replays --resume <id> into the shell', async () => {
+            const sid = 'ea59366a-a2d5-43e1-b894-aa40a8188fb6'
+            // Restored, active tab that captured a session id before quit.
+            const h = new AutoResumeHarness({
+                preexistingTabs: [{ active: true, resumeCommand: `claude --resume ${sid}` }],
+            })
+            h.start()
+            const a = h.app.tabs[0]
+            // Shell comes alive: cwd known, no agent yet (the recovered bare shell).
+            h.emitTick([makeTabState(a, { aiTool: null, cwd: '/repo' })])
+            await vi.advanceTimersByTimeAsync(2_000)
+            expect(a.sentInputs).toContain(`claude --resume ${sid}\r`)
+        })
+
         it('does not stash a shell-unsafe command that survives reduction', async () => {
             // The realistic attack vector: argv[0] basename is exactly
             // `claude` with the payload in argv[1+], so it survives

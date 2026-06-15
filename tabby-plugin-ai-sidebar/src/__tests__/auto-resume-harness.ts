@@ -75,6 +75,8 @@ export interface FakeStateOverrides {
     aiTool?: AiTool | null
     aiCommandLine?: string | null
     cwd?: string | null
+    /** Agent session id — drives the `--resume <id>` capture path. */
+    sessionId?: string | null
 }
 
 /** Build a partial TabState with the fields AutoResumeService reads. Other
@@ -102,6 +104,7 @@ export function makeTabState (tab: FakeTab, overrides: FakeStateOverrides = {}):
         tokensIn: null,
         tokensCacheRead: null,
         tokensOut: null,
+        sessionId: overrides.sessionId ?? null,
     }
 }
 
@@ -124,6 +127,7 @@ export class AutoResumeHarness {
         store: {
             ai: {
                 autoResumeAgents: true as boolean,
+                autoResumeSession: true as boolean,
             },
         },
     }
@@ -143,10 +147,14 @@ export class AutoResumeHarness {
 
     constructor (opts: {
         autoResumeAgents?: boolean
+        autoResumeSession?: boolean
         preexistingTabs?: AddTabOpts[]
     } = {}) {
         if (opts.autoResumeAgents !== undefined) {
             this.config.store.ai.autoResumeAgents = opts.autoResumeAgents
+        }
+        if (opts.autoResumeSession !== undefined) {
+            this.config.store.ai.autoResumeSession = opts.autoResumeSession
         }
         // Pre-add tabs BEFORE construction so they end up in
         // `restoredOuterTabs` via the "already in app.tabs" path. The active

@@ -52,6 +52,15 @@ export class AiSidebarConfigProvider extends ConfigProvider {
             // re-type `claude` everywhere") is what users were complaining
             // about. See AutoResumeService.
             autoResumeAgents: true,
+            // Sub-switch under autoResumeAgents: when a tab is restored, resume
+            // the agent's EXACT prior session (`claude --resume <id>`,
+            // `codex resume <id>`, `opencode --session <id>`) instead of a
+            // fresh conversation. Default on — "bring my tab back where I left
+            // it" is the expected behaviour. Off → fall back to re-launching
+            // the bare captured command (a new session). No effect for agents
+            // without resume-by-id (Gemini) or before a session id is captured.
+            // See AutoResumeService.buildResumeCommand.
+            autoResumeSession: true,
             // NOTE: the re-runnable command per terminal is no longer stored
             // in config. It rides each tab's own Tabby recovery token
             // (TerminalTabComponent.glancetermResumeCommand) so two tabs
