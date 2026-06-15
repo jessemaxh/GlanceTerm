@@ -242,11 +242,11 @@ export type SubagentEvent =
  *
  * Semantics:
  *   - `spawn`: add `agentId` to the set. Idempotent — re-adding an id
- *     already present is a no-op (returns the same reference). Lets the
- *     processEvent caller pass BOTH the authoritative spawn signal
- *     (PostToolUse(Agent).tool_response.agentId) AND the passive liveness
- *     signal (any hook event with top-level agent_id set) through the
- *     same path without double-counting.
+ *     already present is a no-op (returns the same reference). The
+ *     processEvent caller emits this ONLY for the authoritative spawn
+ *     signal (PostToolUse(Agent/Task).spawn_agent_id); a bare top-level
+ *     agent_id no longer creates an id here — see processEvent for why
+ *     that "passive liveness" path leaked orphan subagents.
  *   - `stop`: remove `agentId` from the set. No-op (identity-preserving)
  *     if the id wasn't tracked — that's how we drop "phantom" SubagentStop
  *     events Claude Code fires for subagents we never observed spawning
@@ -947,26 +947,26 @@ export class HookWatcherService implements OnDestroy {
         if (eventAt >= this.startupTs && adapter.id === 'claude') {
             // Id-based live-subagent tracking. Hook events map to set ops,
             // all reduced through the pure `reduceSubagentSet`:
-            //   PostToolUse(Agent) w/ tool_response.agentId → spawn (authoritative)
-            //   ANY event with top-level agent_id          → spawn (passive liveness)
-            //   SubagentStop w/ matching agent_id          → stop
+            //   PostToolUse(Agent/Task) w/ spawn_agent_id  → spawn (authoritative)
+            //   SubagentStop / StopFailure w/ agent_id     → stop
             //   SessionStart / SessionEnd                  → reset
             //
-            // The passive-liveness spawn handles the case where we missed
-            // the authoritative PostToolUse(Agent) — stale cold-load,
-            // future CC tweaks, etc. — by treating any tool call inside
-            // the subagent's own turn (it carries top-level agent_id) as
-            // proof the subagent is running. Add-set semantics make it
-            // idempotent against the spawn-event path: same id → no-op.
+            // ADD is authoritative-only. The ONLY thing that puts an id in the
+            // set is the subagent-spawn signal on PostToolUse(Agent/Task). Claude
+            // Code reliably fires a matching SubagentStop (or StopFailure) for
+            // every such spawn, so the set drains to 0 by construction — no
+            // time-based eviction, no reconciliation pass.
             //
-            // SubagentStop with an agent_id we don't recognize is dropped
-            // on the floor — that's how we ignore the phantom SubagentStops
-            // Claude Code fires for subagents we never observed.
+            // We do NOT add on a bare top-level agent_id (the old "passive
+            // liveness" path) — see the STOP block below for why that leaked.
             //
-            // tool_name: Claude renamed the subagent-spawning tool from
-            // `Task` to `Agent`. The spawn signal here is the agent_id
-            // from tool_response, not the tool_name; tool_name only gates
-            // which event we read tool_response on.
+            // SubagentStop with an agent_id we don't recognize is dropped on the
+            // floor — that's how we ignore the phantom SubagentStops Claude Code
+            // fires for subagents we never observed spawning.
+            //
+            // tool_name: Claude renamed the subagent-spawning tool from `Task`
+            // to `Agent`; we accept both. The spawn signal is spawn_agent_id,
+            // not the tool_name (which only gates which event we read it on).
             const events: SubagentEvent[] = []
             if (
                 parsed.event === 'PostToolUse'
@@ -975,27 +975,29 @@ export class HookWatcherService implements OnDestroy {
             ) {
                 events.push({ kind: 'spawn', agentId: parsed.spawn_agent_id })
             }
-            if (parsed.agent_id) {
-                // A subagent's turn ends with EITHER `SubagentStop` (normal) or
-                // `StopFailure` (abnormal — interrupt / stream timeout / error),
-                // both carrying the subagent's agent_id. Treat BOTH as a stop.
-                //
-                // Everything else carrying an agent_id (PreToolUse/PostToolUse
-                // from inside the subagent's turn) is passive liveness — re-add
-                // the id (a no-op in the reducer if already tracked).
-                //
-                // Bug this fixes: when `StopFailure` was added (commit a4bf2448)
-                // for the MAIN agent's idle, a subagent that ended via
-                // StopFailure fell into the `else` and was re-added as a SPAWN —
-                // so it never left liveAgentIds, the in-flight counter stuck at
-                // ≥1, and TabMonitor's idle→working override pinned the row to
-                // "working · N agents" forever. Any interrupted/timed-out
-                // subagent reproduced it.
-                if (parsed.event === 'SubagentStop' || parsed.event === 'StopFailure') {
-                    events.push({ kind: 'stop', agentId: parsed.agent_id })
-                } else {
-                    events.push({ kind: 'spawn', agentId: parsed.agent_id })
-                }
+            // STOP: a subagent's turn ends with EITHER `SubagentStop` (normal) or
+            // `StopFailure` (abnormal — interrupt / stream timeout / error), both
+            // carrying the subagent's agent_id. A stop for an id we never spawned
+            // is a harmless no-op in the reducer.
+            //
+            // We deliberately do NOT treat a bare top-level agent_id on a
+            // non-terminal event (PreToolUse/PostToolUse from inside a subagent's
+            // turn) as a spawn. That "passive liveness" add used to create ids
+            // here, but Claude Code emits agent_ids on tool calls that never get
+            // a matching SubagentStop (orphan/transient ids — in the trace,
+            // af57c354… fired a single PreToolUse(Bash) and nothing else). Such
+            // an id entered liveAgentIds via the passive path and could NEVER
+            // leave, so getSubagentInFlight stayed ≥1 and TabMonitor's
+            // idle→working override pinned the tab to "working · N agents" while
+            // the main agent sat idle at the prompt. Passive-add was pure
+            // downside: a no-op for real spawns (already tracked via
+            // spawn_agent_id) and a permanent leak for orphans. Authoritative-
+            // spawn-only keeps the count exact, with no time-based cleanup.
+            if (
+                parsed.agent_id
+                && (parsed.event === 'SubagentStop' || parsed.event === 'StopFailure')
+            ) {
+                events.push({ kind: 'stop', agentId: parsed.agent_id })
             }
             if (parsed.event === 'SessionStart' || parsed.event === 'SessionEnd') {
                 events.push({ kind: 'reset' })
