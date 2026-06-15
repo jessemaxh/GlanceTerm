@@ -7,31 +7,18 @@ import * as path from 'path'
 import { AppService, ConfigService, BaseTabComponent } from 'tabby-core'
 
 import { TabMonitor, TabState, AiTool } from './tab-monitor'
+import { debugLog } from './debug-log.service'
 
 /**
- * Diagnostic trace for the auto-resume pipeline. The happy path is otherwise
- * completely silent, and renderer `console.*` is NOT forwarded to Tabby's
- * on-disk `log.txt` (only main-process logs land there) — so after an app
- * restart there is no artifact recording whether REPLAY fired or which gate
- * blocked it. This appends one timestamped line per decision to
- * `~/.glanceterm/auto-resume.log` (same dir as `auto-approve.log`), which
- * survives the restart for post-hoc inspection.
- *
- * Flip DIAG_LOG to false (or delete this block + its call sites) once a
- * resume issue has been diagnosed. Writes are best-effort and synchronous-
- * append only; a failed write never disturbs the feature.
+ * Auto-resume diagnostic trace. Routed through the unified, always-on,
+ * size-rotated debug log (`~/.glanceterm/debug.log` via {@link debugLog}) —
+ * this replaces the old toggle-gated, separate `~/.glanceterm/auto-resume.log`.
+ * Every call site stays the same; lines now land in the shared file under the
+ * `auto-resume` area, always on but capped/rotated so it's safe to leave on.
+ * The logger is best-effort and never throws.
  */
-const DIAG_LOG = false
-const DIAG_PATH = path.join(os.homedir(), '.glanceterm', 'auto-resume.log')
 function diag (msg: string): void {
-    if (!DIAG_LOG) {
-        return
-    }
-    try {
-        fsSync.appendFileSync(DIAG_PATH, `${new Date().toISOString()} ${msg}\n`)
-    } catch {
-        /* best-effort; never break auto-resume for a log write */
-    }
+    debugLog.log('info', 'auto-resume', msg)
 }
 
 /**
@@ -207,9 +194,9 @@ export class AutoResumeService implements OnDestroy {
      *  feet. */
     private readonly warmedUp = new WeakSet<BaseTabComponent>()
 
-    /** DIAG-only dedup: last CAPTUREd command logged per inner tab, and last
+    /** Diag dedup: last CAPTUREd command logged per inner tab, and last
      *  REPLAY gate-state string logged per inner tab. Prevents the per-1.5 s
-     *  poll from flooding `auto-resume.log` with identical lines — we only
+     *  poll from flooding the debug log with identical lines — we only
      *  emit when something actually changed. */
     private readonly lastCaptureLog = new WeakMap<BaseTabComponent, string>()
     private readonly lastGateLog = new WeakMap<BaseTabComponent, string>()

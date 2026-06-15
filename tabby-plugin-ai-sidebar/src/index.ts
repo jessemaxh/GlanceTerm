@@ -34,6 +34,7 @@ import { SplitShellService } from './split-shell.service'
 import { EscInterruptService } from './esc-interrupt.service'
 import { UpdateCheckService } from './update-check.service'
 import { UpdateForceModalComponent } from './update-force-modal.component'
+import { DebugLogService } from './debug-log.service'
 
 // Public exports for cross-plugin consumers (currently
 // tabby-plugin-mobile-bridge). Surface kept deliberately narrow — every
@@ -157,6 +158,10 @@ export default class AiSidebarModule {
      * fs.watch the same way.
      */
     constructor (
+        // FIRST so the unified debug log rotates a fresh file + tees the global
+        // console.warn/error before any other service can emit — see
+        // DebugLogService / ~/.glanceterm/debug.log.
+        _dbg: DebugLogService,
         _j: AttentionJumperService,
         _n: AttentionNotifierService,
         _u: UnreadService,

@@ -9,6 +9,7 @@ import { TabStatus } from './tab-monitor'
 import { HookAdapter } from './hook-adapters/adapter'
 import { HookAdapterRegistry } from './hook-adapters/registry'
 import { HookRuntimeService } from './hook-runtime.service'
+import { debugLog } from './debug-log.service'
 
 /**
  * One on-disk status file written by the handler script, after JSON decode.
@@ -1272,6 +1273,14 @@ export class HookWatcherService implements OnDestroy {
             // (same tab, reused after the prior agent exited).
             model: parsed.model || (parsed.event === 'SessionStart' ? null : prev?.model ?? null),
         })
+        // Unified debug log: one concise line per status-changing event, plus a
+        // renderer-side mirror of auto-approve grants (the handler also writes
+        // the security audit trail to ~/.glanceterm/auto-approve.log). Best-
+        // effort — debugLog never throws.
+        debugLog.log('debug', 'watcher', `${parsed.tab_id.slice(0, 8)} ${parsed.agent} ${parsed.event}${parsed.tool_name ? `(${parsed.tool_name})` : ''} → ${status}`)
+        if (parsed.auto_approved === 1) {
+            debugLog.log('info', 'auto-approve', `${parsed.tab_id.slice(0, 8)} granted ${parsed.tool_name || '?'} in ${parsed.cwd || '?'}`)
+        }
         return true
     }
 

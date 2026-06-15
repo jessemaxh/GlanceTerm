@@ -25,12 +25,12 @@ assignees: ''
 **Screenshot**:
 [Attach a screenshot of the sidebar showing the problem — the screenshot button in the sidebar's bottom toolbar grabs one.]
 
-**Logs** (these let us pin it down fast — GlanceTerm writes them automatically; nothing to enable):
-Please attach the relevant logs from `~/.glanceterm/`:
-- `~/.glanceterm/hooks/` — the per-tab event logs (the file named after the affected tab; if you're not sure which, zip the whole folder). This is the main diagnostic trail for status/badge issues.
-- `~/.glanceterm/auto-approve.log` — only if the issue is about auto-approve.
+**Logs** (this is what lets us pin it down fast — GlanceTerm writes it automatically; nothing to enable):
+**Attach `~/.glanceterm/debug.log`** — one unified file covering auto-resume, watcher events, auto-approve, and any renderer errors. A fresh one is started each launch, so reproduce the problem and then grab it. If it rotated mid-session you'll also see `debug.log.1` … `debug.log.3` (most recent first) — include the relevant one.
 
-> ⚠️ These logs contain your working-directory paths (project/folder names). Review or redact them before posting if that's sensitive.
+For deep dives we may also ask for the raw per-tab event logs in `~/.glanceterm/hooks/` (optional).
+
+> ⚠️ `debug.log` contains your working-directory paths (project/folder names). Review or redact it before posting if that's sensitive.
 
 **Environment**:
 - GlanceTerm version:
