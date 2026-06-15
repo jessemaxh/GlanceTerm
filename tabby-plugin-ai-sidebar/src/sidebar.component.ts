@@ -110,6 +110,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                 <div *ngFor="let s of visibleStates; trackBy: trackByTab"
                      class="row"
                      [attr.data-status]="effStatus(s)"
+                     [attr.data-tab-id]="s.tabId"
                      [class.active]="isActive(s)"
                      [class.subordinate]="isSubordinate(s)"
                      [class.pinned]="isPinned(s)"

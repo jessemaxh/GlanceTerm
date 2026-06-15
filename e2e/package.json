@@ -1,0 +1,12 @@
+{
+  "name": "glanceterm-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Playwright _electron E2E for the GlanceTerm sidebar (isolated from the monorepo dep graph).",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0"
+  }
+}

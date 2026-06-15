@@ -595,6 +595,16 @@ export class TabMonitor implements OnDestroy {
                     if (env) liveTabIds.add(env)
                 }
                 this.hooks.retainOnly(liveTabIds)
+                // E2E test seam — INERT unless GLANCETERM_E2E=1 (never set in
+                // production). Exposes the live tab id↔cwd map on the renderer so
+                // deterministic UI tests can pick a real open tab to drive via
+                // synthetic hook logs, without digging Angular internals.
+                if (process.env.GLANCETERM_E2E === '1') {
+                    const cwdById = new Map<string, string>()
+                    for (const s of out) if (s.tabId) cwdById.set(s.tabId, s.cwd ?? '')
+                    const live = [...liveTabIds].map(tabId => ({ tabId, cwd: cwdById.get(tabId) ?? '' }))
+                    ;(globalThis as { __glanceTermE2E?: unknown }).__glanceTermE2E = { liveTabs: () => live }
+                }
             }
         } catch (e) {
             // eslint-disable-next-line no-console
