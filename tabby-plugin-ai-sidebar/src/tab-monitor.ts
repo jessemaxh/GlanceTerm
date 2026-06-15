@@ -36,6 +36,38 @@ async function runProbe (cmd: string, args: string[], timeoutMs: number): Promis
     } catch { return '' }
 }
 
+/**
+ * Hard deadline for a single PTY-IPC await on tick()'s hot path. PTY calls
+ * (getTruePID / getChildProcesses / getWorkingDirectory) round-trip to the pty
+ * host; a wedged/zombie pty or a backed-up main process can leave the promise
+ * unsettled FOREVER. Because those awaits sit under tick()'s `busy` mutex, one
+ * hang means `busy` never clears and EVERY tab's status freezes — the observed
+ * "runs a long time, then all statuses stop updating" hang. 1s is generous for
+ * a healthy pty and safely under the 1.5s poll cadence.
+ */
+const PTY_IPC_TIMEOUT_MS = 1000
+
+/**
+ * Race `p` against `timeoutMs` so a hung await can never wedge the caller.
+ * Always settles: on timeout it resolves to `fallback` and detaches the
+ * original (its later settle is ignored; a rejection is swallowed so it can't
+ * surface as an unhandledRejection). NOTE: this bounds an I/O call — it is NOT
+ * a time-based eviction of tracked state.
+ */
+export function withTimeout<T> (p: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+    return new Promise<T>(resolve => {
+        let settled = false
+        const finish = (v: T): void => {
+            if (settled) return
+            settled = true
+            clearTimeout(timer)
+            resolve(v)
+        }
+        const timer = setTimeout(() => finish(fallback), timeoutMs)
+        p.then(v => finish(v), () => finish(fallback))
+    })
+}
+
 import { HookAdapterRegistry } from './hook-adapters/registry'
 import { HookWatcherService, HookSnapshot } from './hook-watcher.service'
 import { HookInstallerService } from './hook-installer.service'
@@ -605,7 +637,7 @@ export class TabMonitor implements OnDestroy {
         //    the AI-tool scan — see (2) below.
         let truePid: number | null = null
         try {
-            const pid = await sess.pty?.getTruePID?.()
+            const pid = await withTimeout(Promise.resolve(sess.pty?.getTruePID?.()), PTY_IPC_TIMEOUT_MS, null)
             if (typeof pid === 'number' && pid > 0) {
                 truePid = pid
                 this.shellPidCache.set(t.inner, pid)
@@ -627,7 +659,7 @@ export class TabMonitor implements OnDestroy {
         //    caffeinate). If we only inspect children we never see claude.
         let children: ChildProcessInfo[] = []
         try {
-            children = await sess.getChildProcesses() ?? []
+            children = await withTimeout(Promise.resolve(sess.getChildProcesses()), PTY_IPC_TIMEOUT_MS, []) ?? []
         } catch { /* swallow */ }
 
         // Candidates: truePID + its ANCESTORS + its DIRECT CHILDREN.
@@ -724,7 +756,7 @@ export class TabMonitor implements OnDestroy {
         let cwd: string | null = typeof sess.reportedCWD === 'string' && sess.reportedCWD
             ? sess.reportedCWD : null
         if (!cwd && typeof sess.getWorkingDirectory === 'function') {
-            try { cwd = await sess.getWorkingDirectory() } catch { /* swallow */ }
+            try { cwd = await withTimeout(Promise.resolve(sess.getWorkingDirectory()), PTY_IPC_TIMEOUT_MS, null) } catch { /* swallow */ }
         }
 
         // 4. Decide status. The new pipeline pivots on whether (a) an AI tool
@@ -1387,12 +1419,12 @@ async function buildProcessTreeSnapshot (): Promise<ProcessTreeSnapshot> {
         // budget short-circuit at the top of each file's async closure is
         // cheap enough to let already-launched reads finish to completion
         // without polluting the snapshot map. If /proc itself is wedged
-        // (NFS overlay), the readdir() awaits forever — we'd want a hard
-        // timeout there, but Node has no built-in. Acceptable: pathological
-        // NFS overlays on /proc are vanishingly rare for a desktop app.
+        // (NFS overlay), the readdir() could await forever — bounded here with
+        // withTimeout so a pathological /proc can't wedge the poll loop. The
+        // per-entry readFile loop below is additionally guarded by `deadline`.
         const deadline = Date.now() + 800
         let entries: string[] = []
-        try { entries = await fs.readdir('/proc') } catch { /* swallow */ }
+        try { entries = await withTimeout(fs.readdir('/proc'), PTY_IPC_TIMEOUT_MS, [] as string[]) } catch { /* swallow */ }
         const pidDirs = entries.filter(e => /^\d+$/.test(e))
         await Promise.all(pidDirs.map(async e => {
             if (Date.now() > deadline) return
