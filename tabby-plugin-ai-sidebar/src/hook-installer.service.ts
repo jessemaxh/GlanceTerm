@@ -91,13 +91,13 @@ export class HookInstallerService {
     }
 
     /**
-     * Remove GlanceTerm's hook entries from EVERY agent's config — backs the
-     * "Remove GlanceTerm hooks" settings button and the clean-uninstall path.
-     * Attempts ALL adapters (not just detected ones) so residue from an agent
-     * that's since been removed is cleaned too. Each adapter's uninstallHooks()
-     * strips ONLY our own entries (matched by the `glanceterm-hook` marker),
-     * leaving the user's other hooks intact. Returns the display names of the
-     * agents that actually had our hooks removed, for the confirmation toast.
+     * Remove GlanceTerm's hook entries from EVERY agent's config — the
+     * clean-uninstall path. (No UI surface currently calls this; kept as the
+     * public uninstall API.) Attempts ALL adapters (not just detected ones) so
+     * residue from an agent that's since been removed is cleaned too. Each
+     * adapter's uninstallHooks() strips ONLY our own entries (matched by the
+     * `glanceterm-hook` marker), leaving the user's other hooks intact. Returns
+     * the display names of the agents that actually had our hooks removed.
      */
     async uninstallAll (): Promise<string[]> {
         const removed: string[] = []

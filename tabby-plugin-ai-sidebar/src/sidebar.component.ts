@@ -11,7 +11,6 @@ import { ScreenshotService } from './screenshot/screenshot.service'
 import { ScreenshotPasteService } from './screenshot/paste.service'
 import { SplitShellService } from './split-shell.service'
 import { AutoApproveService } from './auto-approve.service'
-import { HookInstallerService } from './hook-installer.service'
 import { SidebarSettingsRegistry, SidebarSettingsSection } from './sidebar-settings-registry.service'
 
 /**
@@ -376,19 +375,6 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                                     [attr.aria-label]="'Open ' + s.title + ' settings'">
                                 Configure…
                             </button>
-                        </div>
-                    </div>
-
-                    <!-- Remove GlanceTerm's hook entries from every AI agent's
-                         config (the user's own hooks are kept). Handy before
-                         uninstalling; hooks re-install automatically next launch. -->
-                    <div class="gt-setting-row">
-                        <div class="gt-setting-text">
-                            <div class="gt-setting-title">Remove GlanceTerm hooks</div>
-                            <div class="gt-setting-desc">Strip GlanceTerm's hook entries from every AI agent (Claude / Codex / Gemini / opencode). Your own hooks are left untouched. Useful before uninstalling — they re-install automatically on the next launch.</div>
-                        </div>
-                        <div class="gt-section-actions">
-                            <button type="button" class="gt-section-btn" (click)="removeHooks()" aria-label="Remove GlanceTerm hooks">Remove</button>
                         </div>
                     </div>
                 </div>
@@ -1449,32 +1435,9 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         private notifications: NotificationsService,
         private zone: NgZone,
         private autoApprove: AutoApproveService,
-        private hookInstaller: HookInstallerService,
         private ngbModal: NgbModal,
         public sidebarSettingsRegistry: SidebarSettingsRegistry,
     ) {}
-
-    /**
-     * "Remove GlanceTerm hooks" settings action — strips GlanceTerm's hook
-     * entries from every AI agent's config (Claude / Codex / Gemini /
-     * opencode). The user's own hooks are left intact. Useful before
-     * uninstalling; re-added automatically on the next launch.
-     */
-    async removeHooks (): Promise<void> {
-        try {
-            const removed = await this.hookInstaller.uninstallAll()
-            if (removed.length > 0) {
-                this.notifications.info(
-                    `已移除 ${removed.join('、')} 的 GlanceTerm hook`,
-                    '你自己的 hook 配置保留；重开对应 agent 会话后生效。',
-                )
-            } else {
-                this.notifications.info('没有发现已安装的 GlanceTerm hook')
-            }
-        } catch (e: any) {
-            this.notifications.error('移除 hook 失败：' + (e?.message ?? e))
-        }
-    }
 
     /**
      * Read-through to the persisted setting. The `?.` reaches all the way
