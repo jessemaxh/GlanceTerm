@@ -862,17 +862,18 @@ export class TabMonitor implements OnDestroy {
                     tabId: snap.tabId,
                 })
                 if (usage) { tokensIn = usage.inTok; tokensOut = usage.outTok; tokensCacheRead = usage.cacheReadTok ?? null }
-                // Subagent in-flight override: when the main agent has
-                // spawned a backgrounded Task subagent, the main agent's
-                // response ends → Stop → raw status = idle. The subagent
-                // is still chewing tokens though, so we surface it as
-                // working until the matching SubagentStop arrives and
-                // drops the counter back to 0. See HookWatcher's
-                // `subagentInFlight` doc for the counter contract.
-                let rawStatus = snap.status
-                if (rawStatus === TabStatus.Idle && tabId && this.hooks.getSubagentInFlight(tabId) > 0) {
-                    rawStatus = TabStatus.Working
-                }
+                // Subagent semantics: when the main agent has gone idle (Stop →
+                // raw idle) but a backgrounded Task subagent is still running, we
+                // DO NOT promote the tab to "working". The main agent is waiting
+                // for the user — that's exactly the "this tab needs you" signal
+                // the sidebar exists to surface; masking it as "working" because
+                // a detached bg agent churns is misleading. The still-running
+                // subagent is shown via the `· N agents` badge (subagentCount,
+                // set below from getSubagentInFlight) instead. A SYNCHRONOUS
+                // subagent the main agent awaits keeps raw status = working (no
+                // Stop fires until it returns), so this only changes the
+                // background-subagent case. (Was: idle+inFlight→working.)
+                const rawStatus = snap.status
                 status = this.applyIdleGate(t.inner, rawStatus, snap.eventAt)
                 lastActiveMs = Math.max(0, Date.now() - snap.eventAt)
                 this.maybeProbeTranscriptInterrupt(t.inner, tabId, snap, status)
