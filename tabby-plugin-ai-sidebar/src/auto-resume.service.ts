@@ -480,6 +480,16 @@ export class AutoResumeService implements OnDestroy {
             return
         }
 
+        // Stale-session guard: a `claude --resume <id>` whose session Claude has
+        // pruned (too old) fails with "No conversation found" and leaves the tab
+        // dead at a shell prompt. If the transcript is gone, demote to a fresh
+        // launch (other flags kept) so the tab comes up instead of erroring.
+        const demoted = demoteStaleClaudeResume(command, os.homedir())
+        if (demoted.demoted) {
+            diag(`RESUME-DEMOTE ${this.label(s.outerTab)}: session gone → fresh launch ${JSON.stringify(demoted.command)}`)
+            command = demoted.command
+        }
+
         // Cancel any previous pending timer for the same inner tab.
         const existing = this.pendingTimers.get(s.innerTab)
         if (existing) clearTimeout(existing)
@@ -678,4 +688,58 @@ export function buildResumeCommand (tool: string, sessionId: string, runnable: s
         return ['opencode', '--session', sessionId, ...rest].join(' ')
     }
     return null   // gemini & anything unknown — no resume-by-id
+}
+
+/**
+ * Does Claude still have the transcript for `sessionId`? Claude stores each
+ * session at `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`; an old
+ * session it has pruned is gone. The id is globally unique, so a match in ANY
+ * project dir means it's resumable (and, since auto-resume restores the tab in
+ * its original cwd, that dir is the one `--resume` will look in). Synchronous
+ * + best-effort: any fs error reads as "gone" so we fall back to a fresh
+ * launch rather than risk a failing resume. Exported for tests.
+ */
+export function claudeSessionTranscriptExists (sessionId: string, home: string): boolean {
+    const base = path.join(home, '.claude', 'projects')
+    let dirs: string[]
+    try {
+        dirs = fsSync.readdirSync(base)
+    } catch {
+        return false
+    }
+    for (const d of dirs) {
+        try {
+            if (fsSync.existsSync(path.join(base, d, `${sessionId}.jsonl`))) return true
+        } catch { /* unreadable dir — keep scanning */ }
+    }
+    return false
+}
+
+/**
+ * Guard against replaying `claude --resume <id>` for a session Claude has since
+ * pruned — it fails with "No conversation found with session ID: …" and leaves
+ * the restored tab dead at a shell prompt. If the command is a Claude resume
+ * whose transcript no longer exists, demote it to the SAME command minus the
+ * resume flag (a fresh session), preserving every other flag. Everything else
+ * (non-Claude tools, non-resume commands, sessions that still exist) passes
+ * through unchanged. Codex/opencode resume store sessions elsewhere and are
+ * experimental, so we don't second-guess them. Exported for tests.
+ */
+export function demoteStaleClaudeResume (command: string, home: string): { command: string; demoted: boolean } {
+    const toks = command.split(/\s+/).filter(Boolean)
+    if (toks[0] !== 'claude') return { command, demoted: false }
+    let id: string | null = null
+    for (let i = 1; i < toks.length; i++) {
+        if ((toks[i] === '--resume' || toks[i] === '-r') && toks[i + 1]) { id = toks[i + 1]; break }
+        if (toks[i].startsWith('--resume=')) { id = toks[i].slice('--resume='.length); break }
+    }
+    if (!id || !UUID_RE.test(id)) return { command, demoted: false }
+    if (claudeSessionTranscriptExists(id, home)) return { command, demoted: false }
+    const out: string[] = [toks[0]]
+    for (let i = 1; i < toks.length; i++) {
+        if (toks[i] === '--resume' || toks[i] === '-r') { i++; continue }   // drop flag + its id
+        if (toks[i].startsWith('--resume=')) continue                        // drop --resume=<id>
+        out.push(toks[i])
+    }
+    return { command: out.join(' '), demoted: true }
 }
