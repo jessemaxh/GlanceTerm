@@ -40,10 +40,14 @@ function gitDevTag() {
     }
 }
 
-const devTag = (process.env.RELEASE || process.env.REV) ? '' : gitDevTag()
+// Explicit comparisons, not truthiness: `RELEASE=0` / `RELEASE=false` must NOT
+// be read as "this is a release". Release is strictly opt-in via RELEASE=1.
+const isRelease = process.env.RELEASE === '1'
+const rev = process.env.REV
+const devTag = (isRelease || rev) ? '' : gitDevTag()
 export let version =
-    process.env.RELEASE ? baseVersion
-        : process.env.REV ? `${baseVersion}-nightly.${process.env.REV}`
+    isRelease ? baseVersion
+        : rev ? `${baseVersion}-nightly.${rev}`
             : devTag ? `${baseVersion}-dev.${devTag}`
                 : baseVersion
 

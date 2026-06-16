@@ -7,6 +7,11 @@ It runs the build, prepackages plugins, refreshes `app/node_modules` via yarn,
 and ensures the `app/node_modules/electron → ../../node_modules/electron`
 symlink — all four steps are load-bearing.
 
+**Release vs dev version.** A plain `npm run dmg:mac` stamps a traceable dev
+version `0.1.0-dev.g<hash>[.dirty]` (into the filename AND CFBundleVersion/Short).
+For an actual release artifact with a clean `0.1.0`, set `RELEASE=1`:
+`RELEASE=1 npm run dmg:mac` (a signed build without `RELEASE=1` prints a warning).
+
 ### Do not
 
 - **Do not call `electron-builder` directly.** It silently ships an `app.asar`

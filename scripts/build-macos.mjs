@@ -232,6 +232,16 @@ process.env.APPLE_APP_SPECIFIC_PASSWORD ??= process.env.APPSTORE_PASSWORD
 // in `afterPack`, before the DMG is assembled.
 const adHocSign = !process.env.CSC_LINK
 
+// A signed build that isn't an explicit release still carries the dev version
+// (0.1.0-dev.g<hash>[.dirty]) — which also lands in CFBundleVersion. Fine for
+// test builds (and keeps the artifact filename traceable), but you almost never
+// want to hand someone a "dev"/"dirty"-tagged signed dmg as a release. Remind,
+// don't override (overriding would strip the hash that makes test builds
+// distinguishable). For a clean release artifact: RELEASE=1 npm run dmg:mac
+if (!adHocSign && process.env.RELEASE !== '1') {
+    console.warn(`  ⚠ signed build, RELEASE!=1 — version is "${vars.version}" (also CFBundleVersion). For a clean release, run: RELEASE=1 npm run dmg:mac`)
+}
+
 builder({
     dir: true,
     mac: ['dmg', 'zip'],
@@ -312,12 +322,22 @@ builder({
                     try { execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Set :CFBundleIconName AppIcon', info], { stdio: 'ignore' }) }
                     catch { execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Add :CFBundleIconName string AppIcon', info], { stdio: 'ignore' }) }
                     const inset = path.resolve('build/mac/icon-legacy.icns')
-                    if (fs.existsSync(inset)) fs.copyFileSync(inset, path.join(res, 'icon.icns'))
-                    console.log('  • Tahoe icon: bundled .icon (Assets.car + CFBundleIconName) + inset icon.icns for macOS ≤15')
+                    const insetApplied = fs.existsSync(inset)
+                    if (insetApplied) fs.copyFileSync(inset, path.join(res, 'icon.icns'))
+                    else console.warn('  ⚠ build/mac/icon-legacy.icns missing — macOS ≤15 keeps the full-bleed icon.icns (may look oversized).')
+                    console.log(`  • Tahoe icon: bundled .icon (Assets.car + CFBundleIconName)${insetApplied ? ' + inset icon.icns for macOS ≤15' : ''}`)
                 } else {
                     console.log('  • no build/mac/icon.icon — keeping full-bleed icon.icns (Tahoe-safe). Drop the Icon Composer export at build/mac/icon.icon to enable the dual-format.')
                 }
             } catch (e) {
+                // Roll back any partial catalog actool wrote before the failure
+                // so we don't ship an orphan Assets.car / AppIcon.icns that no
+                // CFBundleIconName points at (it would still get signed).
+                try {
+                    const resDir = path.join(appPath, 'Contents', 'Resources')
+                    fs.rmSync(path.join(resDir, 'Assets.car'), { force: true })
+                    fs.rmSync(path.join(resDir, 'AppIcon.icns'), { force: true })
+                } catch { /* best-effort cleanup */ }
                 console.warn('  ⚠ Tahoe .icon bundling failed — kept full-bleed icon.icns (no Tahoe regression). Verify the actool step with the real .icon:', e?.message ?? e)
             }
             // 2. Now sign bottom-up. Skip when CSC_LINK is set — electron-builder
