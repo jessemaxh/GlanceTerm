@@ -389,6 +389,20 @@ export class FeishuBackend implements MessagingBackend, OnDestroy {
         }
     }
 
+    async deleteThread (_chatId: ChatRef, threadId: ThreadRef): Promise<void> {
+        const channel = this.requireChannel()
+        try {
+            // Feishu has no forum-topic delete. The "topic" is the anchor
+            // message we sent, so recall it — that removes the topic's visible
+            // representation. An app can only recall its own messages (the
+            // anchor is one), via the im:message scope it already holds; no
+            // extra permission needed. On failure the caller degrades to close.
+            await channel.recallMessage(threadId)
+        } catch (err) {
+            throw this.translateLarkError(err, 'deleteThread')
+        }
+    }
+
     async reopenThread (chatId: ChatRef, threadId: ThreadRef, restoreTitle?: string): Promise<void> {
         const channel = this.requireChannel()
         try {

@@ -475,6 +475,13 @@ export class DiscordBackend implements MessagingBackend, OnDestroy {
         await this.rest('PATCH', `/channels/${threadId}`, { archived: true }, threadId)
     }
 
+    async deleteThread (_chatId: ChatRef, threadId: ThreadRef): Promise<void> {
+        // A Discord thread IS a channel — DELETE removes it and all its
+        // messages. Unlike archive, this needs the bot's MANAGE_THREADS
+        // permission. On failure (missing perm) the caller degrades to close.
+        await this.rest('DELETE', `/channels/${threadId}`, undefined, threadId)
+    }
+
     async reopenThread (_chatId: ChatRef, threadId: ThreadRef, _restoreTitle?: string): Promise<void> {
         await this.rest('PATCH', `/channels/${threadId}`, { archived: false }, threadId)
     }

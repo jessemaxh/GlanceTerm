@@ -208,7 +208,10 @@ type Platform = 'telegram' | 'feishu' | 'discord'
                                     <strong>权限管理</strong> → 申请 the scopes:
                                     <code>im:message</code>,
                                     <code>im:message:send_as_bot</code>,
-                                    <code>im:resource</code>. Save + publish
+                                    <code>im:resource</code>. (<code>im:message</code>
+                                    also lets the bridge recall a tab's anchor
+                                    message — i.e. delete its topic — once the tab
+                                    is gone.) Save + publish
                                     a version of the app (the panel will guide
                                     you through the review / approval flow if
                                     your tenant requires admin approval).
@@ -307,8 +310,10 @@ type Platform = 'telegram' | 'feishu' | 'discord'
                                     <code>bot</code> → permissions:
                                     <em>View Channels, Send Messages, Create Public
                                     Threads, Send Messages in Threads, Manage
-                                    Threads</em>. Open the generated URL and invite
-                                    the bot into your (private) server.
+                                    Threads</em> (Manage Threads also lets the bridge
+                                    auto-delete a tab's thread once the tab is gone,
+                                    instead of just archiving it). Open the generated
+                                    URL and invite the bot into your (private) server.
                                 </li>
                                 <li>
                                     Pick (or create) a <strong>text channel</strong>
