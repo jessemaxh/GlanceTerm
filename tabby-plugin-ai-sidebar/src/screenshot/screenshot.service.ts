@@ -46,6 +46,11 @@ export class ScreenshotService {
      * recovery path — strictly better than being stuck in our dialog).
      */
     private preflightBypassed = false
+    /** Shared in-flight permission gate. The two screenshot entry points (hotkey
+     *  + toolbar button) each have their OWN `capturing` flag, so without this a
+     *  concurrent trigger during the up-to-120s grant wait would fire a second OS
+     *  prompt + poll. Concurrent callers await this one promise instead. */
+    private screenPermissionGate: Promise<boolean> | null = null
 
     constructor (
         private notifications: NotificationsService,
@@ -210,20 +215,33 @@ export class ScreenshotService {
      */
     async ensureScreenPermission (): Promise<boolean> {
         if (process.platform !== 'darwin' || this.preflightBypassed) return true
-        let remote: any
+        // Serialize: a concurrent trigger (hotkey racing the button — separate
+        // `capturing` flags) awaits the SAME gate rather than firing a second OS
+        // prompt + 120s poll. Don't reuse capture()'s `inProgress`: capture()
+        // runs immediately after this in the same flow and would self-block.
+        if (this.screenPermissionGate) return this.screenPermissionGate
+        const gate = (async (): Promise<boolean> => {
+            let remote: any
+            try {
+                remote = require('@electron/remote')
+            } catch {
+                return true
+            }
+            try {
+                const desktopCapturer = remote.getBuiltin('desktopCapturer')
+                const ourWindow = remote.getCurrentWindow()
+                return !(await this.checkMacScreenPermission(remote, ourWindow, desktopCapturer))
+            } catch (e: any) {
+                // eslint-disable-next-line no-console
+                console.warn('[glanceterm] ensureScreenPermission failed — letting capture() handle the gate:', e?.message ?? e)
+                return true
+            }
+        })()
+        this.screenPermissionGate = gate
         try {
-            remote = require('@electron/remote')
-        } catch {
-            return true
-        }
-        try {
-            const desktopCapturer = remote.getBuiltin('desktopCapturer')
-            const ourWindow = remote.getCurrentWindow()
-            return !(await this.checkMacScreenPermission(remote, ourWindow, desktopCapturer))
-        } catch (e: any) {
-            // eslint-disable-next-line no-console
-            console.warn('[glanceterm] ensureScreenPermission failed — letting capture() handle the gate:', e?.message ?? e)
-            return true
+            return await gate
+        } finally {
+            this.screenPermissionGate = null
         }
     }
 

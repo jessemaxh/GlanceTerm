@@ -31,8 +31,10 @@ import { TabMonitor, TabStatus } from './tab-monitor'
  *     stray hotkey on a plain shell gets a friendly toast, not a silent no-op;
  *   - capture WITHOUT hiding the window (the common "snip another tab" case);
  *   - route the PNG through the per-agent paste adapter.
- * ScreenshotService.capture() carries its own `inProgress` re-entrancy guard,
- * so a hotkey fired mid-capture (or racing the button) is a safe no-op.
+ * ScreenshotService serializes both phases across entry points: capture() via
+ * its `inProgress` guard, and the permission preflight (ensureScreenPermission)
+ * via a shared in-flight promise — so a hotkey fired mid-capture or racing the
+ * button is a safe no-op and never double-prompts.
  */
 @Injectable({ providedIn: 'root' })
 export class AiHotkeyActionsService implements OnDestroy {
