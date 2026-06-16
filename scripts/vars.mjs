@@ -13,11 +13,39 @@ const electronInfo = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../node
 // Version: GlanceTerm owns it in app/package.json (single source of truth).
 // We deliberately do NOT derive it from `git describe` — this repo is a Tabby
 // fork and still carries upstream's old `v1.x` git tags, so describe would make
-// builds report 1.0.235 instead of GlanceTerm's own line. A CI/nightly build
-// stamps a prerelease suffix via REV (e.g. 0.1.0-nightly.42); a release build
-// leaves it clean (0.1.0). To bump the version, edit app/package.json.
+// builds report 1.0.235 instead of GlanceTerm's own line. To bump the marketing
+// version, edit app/package.json.
+//
+// The build version is then specialised so every artifact filename is traceable
+// (e.g. GlanceTerm-0.1.0-dev.g3a1b2c4-macos-arm64.dmg). Precedence:
+//   RELEASE=1 → clean baseVersion (the actual distributable; keeps semver/auto-update tidy)
+//   REV set   → CI nightly, 0.1.0-nightly.<REV>
+//   otherwise → local dev, 0.1.0-dev.g<shorthash>[.dirty]
+// The `g` prefix keeps the hash a valid *alphanumeric* semver prerelease id even
+// when a hash is all digits (a bare numeric id may not have a leading zero).
 const baseVersion = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../app/package.json'), 'utf-8')).version
-export let version = process.env.REV ? `${baseVersion}-nightly.${process.env.REV}` : baseVersion
+
+function gitDevTag() {
+    try {
+        const opts = { cwd: __dirname, encoding: 'utf-8', stdio: ['ignore', 'pipe', 'ignore'] }
+        const hash = String(childProcess.execFileSync('git', ['rev-parse', '--short=7', 'HEAD'], opts)).trim()
+        if (!hash) return ''
+        let dirty = ''
+        try {
+            if (String(childProcess.execFileSync('git', ['status', '--porcelain'], opts)).trim()) dirty = '.dirty'
+        } catch { /* git unavailable / not a worktree — treat as clean */ }
+        return `g${hash}${dirty}`
+    } catch {
+        return ''
+    }
+}
+
+const devTag = (process.env.RELEASE || process.env.REV) ? '' : gitDevTag()
+export let version =
+    process.env.RELEASE ? baseVersion
+        : process.env.REV ? `${baseVersion}-nightly.${process.env.REV}`
+            : devTag ? `${baseVersion}-dev.${devTag}`
+                : baseVersion
 
 export const builtinPlugins = [
     'tabby-core',
