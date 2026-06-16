@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <g id="foreground" transform="translate(512 512) scale(1.24) translate(-512 -512)" opacity="1">
+    <path d="M398 286 L282 286 Q212 286 212 356 L212 668 Q212 738 282 738 L398 738 Z" fill="#FFAA55" opacity="0.15"></path>
+    <path fill-rule="evenodd" fill="#FFAA55" d="M282,275 H742 A81,81 0 0 1 823,356 V668 A81,81 0 0 1 742,749 H282 A81,81 0 0 1 201,668 V356 A81,81 0 0 1 282,275 Z M282,297 H742 A59,59 0 0 1 801,356 V668 A59,59 0 0 1 742,727 H282 A59,59 0 0 1 223,668 V356 A59,59 0 0 1 282,297 Z"></path>
+    <rect x="394" y="302" width="8" height="420" rx="4" fill="#FFAA55" opacity="0.45"></rect>
+    <circle cx="305" cy="372" r="78" fill="#5BD068" opacity="0.16"></circle>
+    <rect x="236" y="338" width="12" height="68" rx="6" fill="#5BD068"></rect>
+    <circle cx="305" cy="372" r="27" fill="#5BD068"></circle>
+    <circle cx="305" cy="512" r="27" fill="#FFAA55"></circle>
+    <circle cx="305" cy="652" r="27" fill="#FFAA55" opacity="0.5"></circle>
+    <g fill="#FFAA55">
+      <circle cx="556" cy="450" r="15"></circle><circle cx="614" cy="512" r="15"></circle><circle cx="556" cy="574" r="15"></circle>
+      <path d="M545.05 460.25 L603.05 522.25 L624.95 501.75 L566.95 439.75 Z"></path>
+      <path d="M603.05 501.75 L545.05 563.75 L566.95 584.25 L624.95 522.25 Z"></path>
+    </g>
+    <rect x="630" y="556" width="106" height="20" rx="10" fill="#FFAA55"></rect>
+  </g>
+</svg>

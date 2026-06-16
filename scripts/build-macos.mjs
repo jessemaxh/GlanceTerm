@@ -277,9 +277,12 @@ builder({
             //     actool + the plist edit succeed, so a missing OR a failed .icon
             //     leaves the full-bleed icon.icns electron-builder already bundled
             //     (correct on Tahoe, slightly large on ≤15 — NO regression before
-            //     the .icon lands). The actool invocation follows Apple's documented
-            //     Tahoe flow but is UNVERIFIED until the first real .icon — the gate
-            //     makes a wrong invocation safe (it just falls back to full-bleed).
+            //     the .icon lands). The actool invocation is VERIFIED against
+            //     Xcode 26.3 actool (2026-06-16): the `.icon` bundle is passed to
+            //     actool DIRECTLY — wrapping it in an .xcassets silently compiles to
+            //     nothing. We also assert Assets.car was produced, so a future actool
+            //     change that no-ops falls back to full-bleed instead of shipping a
+            //     CFBundleIconName with no catalog behind it.
             //     Runs before signing so the cert covers Assets.car + the new icns.
             try {
                 const dotIcon = path.resolve('build/mac/icon.icon')
@@ -287,15 +290,25 @@ builder({
                     const res = path.join(appPath, 'Contents', 'Resources')
                     const work = path.resolve('dist/.icon-build')
                     fs.rmSync(work, { recursive: true, force: true })
-                    const cat = path.join(work, 'Assets.xcassets')
-                    fs.mkdirSync(cat, { recursive: true })
-                    fs.writeFileSync(path.join(cat, 'Contents.json'), JSON.stringify({ info: { author: 'xcode', version: 1 } }))
-                    fs.cpSync(dotIcon, path.join(cat, 'AppIcon.icon'), { recursive: true })
+                    fs.mkdirSync(work, { recursive: true })
+                    // actool consumes the .icon bundle directly. Stage it as
+                    // AppIcon.icon so the emitted asset/plist key is the
+                    // conventional "AppIcon".
+                    const stagedIcon = path.join(work, 'AppIcon.icon')
+                    fs.cpSync(dotIcon, stagedIcon, { recursive: true })
                     const partial = path.join(work, 'icon-partial.plist')
-                    execFileSync('xcrun', ['actool', cat, '--compile', res, '--app-icon', 'AppIcon',
-                        '--platform', 'macosx', '--minimum-deployment-target', '26.0',
+                    // → Assets.car (Liquid Glass; Tahoe reads it via CFBundleIconName)
+                    //   + AppIcon.icns, both written into Contents/Resources.
+                    execFileSync('xcrun', ['actool', stagedIcon, '--compile', res, '--app-icon', 'AppIcon',
+                        '--platform', 'macosx', '--minimum-deployment-target', '26.0', '--target-device', 'mac',
                         '--output-partial-info-plist', partial], { stdio: 'inherit' })
+                    if (!fs.existsSync(path.join(res, 'Assets.car'))) {
+                        throw new Error('actool produced no Assets.car — refusing to set CFBundleIconName')
+                    }
                     const info = path.join(appPath, 'Contents', 'Info.plist')
+                    // Tahoe reads CFBundleIconName → Assets.car. Leave CFBundleIconFile
+                    // (=icon) pointing at icon.icns, which we swap to the inset legacy
+                    // art so macOS ≤15 (which ignores the Tahoe catalog) sizes correctly.
                     try { execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Set :CFBundleIconName AppIcon', info], { stdio: 'ignore' }) }
                     catch { execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Add :CFBundleIconName string AppIcon', info], { stdio: 'ignore' }) }
                     const inset = path.resolve('build/mac/icon-legacy.icns')
