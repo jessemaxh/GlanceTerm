@@ -67,7 +67,9 @@ export class TokenStatsService {
     /** path → cached per-file aggregation. Loaded from disk once, persisted after scans. */
     private cache = new Map<string, FileEntry>()
     private loaded = false
-    private scanning = false
+    /** Shared in-flight scan: concurrent callers (e.g. reopening the modal mid-scan)
+     *  await the SAME scan and get the full result, not a partial snapshot. */
+    private scanInFlight: Promise<SessionStat[]> | null = null
 
     /** Load the persisted cache (idempotent). */
     private async load (): Promise<void> {
@@ -89,36 +91,45 @@ export class TokenStatsService {
         for (const [k, v] of this.cache) files[k] = v
         try {
             await fs.mkdir(glanceDir(), { recursive: true })
-            await fs.writeFile(path.join(glanceDir(), CACHE_FILE), JSON.stringify({ version: CACHE_VERSION, files }))
+            // Atomic: write a temp then rename over the target, so a crash mid-write
+            // can't truncate token-stats.json (which load() would discard → full re-scan).
+            const target = path.join(glanceDir(), CACHE_FILE)
+            const tmp = `${target}.tmp`
+            await fs.writeFile(tmp, JSON.stringify({ version: CACHE_VERSION, files }))
+            await fs.rename(tmp, target)
         } catch { /* best-effort */ }
     }
 
     /**
      * Scan all sources and return one SessionStat per transcript file. Re-uses
      * the persistent cache so only changed/active files are re-read. `onProgress`
-     * fires as (done, total) so the UI can show first-scan progress.
-     * Concurrency-guarded: a second call while scanning returns the current cache.
+     * fires as (done, total) for first-scan progress. Concurrency-safe: a second
+     * call while a scan is running awaits the SAME scan.
      */
     async scan (onProgress?: (done: number, total: number) => void): Promise<SessionStat[]> {
         await this.load()
-        if (this.scanning) return this.snapshot()
-        this.scanning = true
-        try {
-            const files = await this.enumerate()
-            const seen = new Set<string>()
-            let done = 0
-            for (const f of files) {
-                seen.add(f.path)
-                try { await this.ingestFile(f.agent, f.path) } catch { /* skip unreadable file */ }
-                onProgress?.(++done, files.length)
-            }
-            // Drop cache rows for files that no longer exist (deleted transcripts).
-            for (const k of [...this.cache.keys()]) if (!seen.has(k)) this.cache.delete(k)
-            await this.persist()
-            return this.snapshot()
-        } finally {
-            this.scanning = false
+        if (this.scanInFlight) return this.scanInFlight
+        this.scanInFlight = this.doScan(onProgress)
+        try { return await this.scanInFlight } finally { this.scanInFlight = null }
+    }
+
+    private async doScan (onProgress?: (done: number, total: number) => void): Promise<SessionStat[]> {
+        const files = await this.enumerate()
+        const seen = new Set<string>()
+        let done = 0
+        let changed = false
+        for (const f of files) {
+            seen.add(f.path)
+            try { if (await this.ingestFile(f.agent, f.path)) changed = true } catch { /* skip unreadable file */ }
+            onProgress?.(++done, files.length)
+            // Yield to the event loop periodically so a big first scan doesn't
+            // freeze the renderer between progress repaints.
+            if (done % 25 === 0) await new Promise<void>(r => setTimeout(r, 0))
         }
+        // Drop cache rows for files that no longer exist (deleted transcripts).
+        for (const k of [...this.cache.keys()]) if (!seen.has(k)) { this.cache.delete(k); changed = true }
+        if (changed) await this.persist()
+        return this.snapshot()
     }
 
     /** Current cached sessions without re-scanning. */
@@ -166,13 +177,14 @@ export class TokenStatsService {
         return out
     }
 
-    /** Read (incrementally where possible) one file into the cache. */
-    private async ingestFile (agent: AiTool, p: string): Promise<void> {
+    /** Read (incrementally where possible) one file into the cache. Returns true
+     *  if the cache entry was created/updated, so the caller persists only on change. */
+    private async ingestFile (agent: AiTool, p: string): Promise<boolean> {
         let stat: Awaited<ReturnType<typeof fs.stat>>
-        try { stat = await fs.stat(p) } catch { return }
+        try { stat = await fs.stat(p) } catch { return false }
         const prev = this.cache.get(p)
         // Unchanged since last scan → keep cached row.
-        if (prev && prev.mtimeMs === stat.mtimeMs && prev.size === stat.size) return
+        if (prev && prev.mtimeMs === stat.mtimeMs && prev.size === stat.size) return false
 
         if (agent === 'gemini') {
             // Whole-file JSON; re-parse on any change.
@@ -183,7 +195,7 @@ export class TokenStatsService {
                 mtimeMs: stat.mtimeMs, size: stat.size, offset: stat.size,
                 perDay: r.perDay, turns: r.turns, lastActive: r.lastTs, cumul: null,
             })
-            return
+            return true
         }
 
         // NDJSON (Claude/Codex/opencode) — incremental from prev.offset.
@@ -192,8 +204,9 @@ export class TokenStatsService {
             perDay: {}, turns: 0, lastActive: 0,
             cumul: agent === 'codex' || agent === 'opencode' ? { inTok: 0, cacheTok: 0, outTok: 0 } : null,
         }
-        // File shrank/replaced → start over.
-        if (stat.size < entry.offset) {
+        // File shrank, or was rewritten in place (mtime changed but size didn't
+        // grow past our offset) → start over so the new content is re-read.
+        if (stat.size < entry.offset || (prev && prev.mtimeMs !== stat.mtimeMs && stat.size <= entry.offset)) {
             entry = { ...entry, offset: 0, perDay: {}, turns: 0, lastActive: 0, cumul: entry.cumul ? { inTok: 0, cacheTok: 0, outTok: 0 } : null }
         }
         if (stat.size > entry.offset) {
@@ -228,6 +241,7 @@ export class TokenStatsService {
         entry.size = stat.size
         if (!entry.sessionId) entry.sessionId = path.basename(p).replace(/\.(jsonl|log)$/, '')
         this.cache.set(p, entry)
+        return true
     }
 }
 
@@ -294,9 +308,9 @@ export function parseCodexChunk (text: string, prev: Totals): { perDay: PerDay; 
         const cumIn = Math.max(0, num(u.input_tokens) - cumCache) // fresh (non-cached) input
         const cumOut = num(u.output_tokens) + num(u.reasoning_output_tokens)
         addToDay(perDay, dayKey(ts),
-            Math.max(0, cumIn - cumul.inTok),
-            Math.max(0, cumCache - cumul.cacheTok),
-            Math.max(0, cumOut - cumul.outTok))
+            delta(cumIn, cumul.inTok),
+            delta(cumCache, cumul.cacheTok),
+            delta(cumOut, cumul.outTok))
         cumul.inTok = cumIn; cumul.cacheTok = cumCache; cumul.outTok = cumOut
         turns++
         if (ts > lastTs) lastTs = ts
@@ -314,7 +328,14 @@ export function parseGeminiFull (text: string): { perDay: PerDay; turns: number;
         const t = m?.tokens
         if (!t) continue
         const ts = Date.parse(m?.timestamp ?? '')
-        addToDay(perDay, dayKey(ts), num(t.input), num(t.cached), num(t.output))
+        // Gemini's `input` INCLUDES `cached` (verified: input+output+thoughts==total),
+        // unlike Claude (input excludes cache). Subtract so cache isn't double-counted.
+        // `thoughts` (reasoning) is generated output — fold it into out (mirrors
+        // Codex's reasoning_output_tokens), else output is badly undercounted.
+        addToDay(perDay, dayKey(ts),
+            Math.max(0, num(t.input) - num(t.cached)),
+            num(t.cached),
+            num(t.output) + num(t.thoughts))
         turns++
         if (ts > lastTs) lastTs = ts
     }
@@ -332,8 +353,12 @@ export function parseOpencodeChunk (text: string, prev: Totals): { perDay: PerDa
         if (rec?.agent !== 'opencode') continue
         const cumIn = typeof rec.tokens_in === 'number' ? rec.tokens_in : cumul.inTok
         const cumOut = typeof rec.tokens_out === 'number' ? rec.tokens_out : cumul.outTok
-        const ts = Date.parse(rec.ts ?? rec.timestamp ?? rec.time ?? '')
-        addToDay(perDay, dayKey(ts), Math.max(0, cumIn - cumul.inTok), 0, Math.max(0, cumOut - cumul.outTok))
+        // The opencode adapter writes `ts` as Unix SECONDS (a number), not an ISO
+        // string — Date.parse(number) is NaN, which would dump all usage into the
+        // undated bucket (excluded from every dated window). Handle the epoch.
+        const ts = typeof rec.ts === 'number' ? rec.ts * 1000
+            : Date.parse(rec.ts ?? rec.timestamp ?? rec.time ?? '')
+        addToDay(perDay, dayKey(ts), delta(cumIn, cumul.inTok), 0, delta(cumOut, cumul.outTok))
         cumul.inTok = cumIn; cumul.outTok = cumOut
         turns++
         if (ts > lastTs) lastTs = ts
@@ -403,6 +428,11 @@ function applyChunk (
 }
 
 function num (v: unknown): number { return typeof v === 'number' && Number.isFinite(v) ? v : 0 }
+
+/** Running-total delta. A drop (cur < prev) means the cumulative reset (a new
+ *  sub-conversation / context reset) — attribute the new value as the delta
+ *  rather than clamping to 0 (which would silently drop all post-reset usage). */
+function delta (cur: number, prev: number): number { return cur >= prev ? cur - prev : cur }
 
 function homeDir (): string { return process.env.HOME ?? process.env.USERPROFILE ?? os.homedir() }
 function glanceDir (): string { return path.join(homeDir(), '.glanceterm') }

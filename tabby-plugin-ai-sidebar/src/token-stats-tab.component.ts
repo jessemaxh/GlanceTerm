@@ -1,4 +1,4 @@
-import { Component, NgZone } from '@angular/core'
+import { Component, NgZone, OnDestroy } from '@angular/core'
 import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap'
 
 import {
@@ -40,7 +40,7 @@ const AGENT_LABEL: Record<string, string> = {
           <div class="btn-group">
             <button *ngFor="let r of ranges" class="btn btn-sm"
                     [class.btn-primary]="range===r.k" [class.btn-outline-secondary]="range!==r.k"
-                    (click)="range=r.k">{{ r.label }}</button>
+                    (click)="setRange(r.k)">{{ r.label }}</button>
           </div>
           <button class="btn btn-sm btn-outline-secondary" (click)="refresh()" [disabled]="loading">
             {{ loading ? 'Scanning…' : '↻ Refresh' }}
@@ -65,7 +65,7 @@ const AGENT_LABEL: Record<string, string> = {
       <div class="btn-group gt-ts-views">
         <button *ngFor="let v of views" class="btn btn-sm"
                 [class.btn-primary]="view===v.k" [class.btn-outline-secondary]="view!==v.k"
-                (click)="view=v.k">{{ v.label }}</button>
+                (click)="setView(v.k)">{{ v.label }}</button>
       </div>
 
       <table class="gt-ts-table">
@@ -80,7 +80,7 @@ const AGENT_LABEL: Record<string, string> = {
           </tr>
         </thead>
         <tbody>
-          <tr *ngFor="let row of rows">
+          <tr *ngFor="let row of rows; trackBy: trackRow">
             <td class="name">
               <span class="agent" *ngIf="row.agent">{{ agentLabel(row.agent) }}</span>
               <span class="primary">{{ row.name }}</span>
@@ -92,7 +92,7 @@ const AGENT_LABEL: Record<string, string> = {
             <td class="num">{{ row.turns || '' }}</td>
             <td class="num" *ngIf="view!=='agent'">{{ ago(row.lastActive) }}</td>
           </tr>
-          <tr *ngIf="rows.length===0"><td colspan="6" class="empty">{{ loading ? 'Scanning…' : 'No usage in this window.' }}</td></tr>
+          <tr *ngIf="rows.length===0"><td [attr.colspan]="view==='agent' ? 5 : 6" class="empty">{{ loading ? 'Scanning…' : 'No usage in this window.' }}</td></tr>
         </tbody>
       </table>
       <p class="gt-ts-note">opencode history is partial (only what's still in the hook logs). Totals survive <code>/clear</code> — each cleared session is summed back per project. No cost estimate (subscription/price changes).</p>
@@ -125,7 +125,7 @@ const AGENT_LABEL: Record<string, string> = {
       .gt-ts-note { margin-top:12px; opacity:.45; font-size:11px; line-height:1.5; }
     `],
 })
-export class TokenStatsTabComponent {
+export class TokenStatsTabComponent implements OnDestroy {
     ranges: { k: Range; label: string }[] = [
         { k: 'today', label: 'Today' }, { k: '7d', label: '7d' }, { k: '30d', label: '30d' }, { k: 'all', label: 'All-time' },
     ]
@@ -142,22 +142,41 @@ export class TokenStatsTabComponent {
     scanDone = 0
     scanTotal = 0
 
+    // Memoised view model — recomputed only when sessions/range/view/sort change,
+    // NOT on every change-detection tick (grandTotal/groupBy/sort are O(sessions)
+    // and the template would otherwise re-run them several times per CD pass).
+    total: Totals = { inTok: 0, cacheTok: 0, outTok: 0 }
+    rows: Row[] = []
+
+    private alive = true
+
     constructor (private stats: TokenStatsService, private zone: NgZone, public modal: NgbActiveModal) {}
 
     async ngOnInit (): Promise<void> {
         this.sessions = this.stats.snapshot()   // instant from cache
+        this.recompute()
         await this.refresh()                     // then rescan for fresh/active sessions
     }
+
+    ngOnDestroy (): void { this.alive = false }
 
     async refresh (): Promise<void> {
         if (this.loading) return
         this.loading = true; this.scanDone = 0; this.scanTotal = 0
         try {
-            this.sessions = await this.stats.scan((d, t) => this.zone.run(() => { this.scanDone = d; this.scanTotal = t }))
+            const result = await this.stats.scan((d, t) => this.zone.run(() => { this.scanDone = d; this.scanTotal = t }))
+            if (!this.alive) return              // modal dismissed mid-scan — don't touch a dead instance
+            this.sessions = result
+            this.recompute()
         } finally {
             this.loading = false
         }
     }
+
+    setRange (k: Range): void { this.range = k; this.recompute() }
+    setView (k: View): void { this.view = k; this.recompute() }
+
+    trackRow = (_: number, r: Row): string => `${r.agent}|${r.name}|${r.sub ?? ''}`
 
     private get bounds (): { from: string; to: string } {
         const off = (n: number): string => { const d = new Date(); d.setDate(d.getDate() - n); return dayKey(d.getTime()) }
@@ -173,13 +192,10 @@ export class TokenStatsTabComponent {
         return this.range === 'all' ? 'all-time' : this.range === 'today' ? 'today' : `last ${this.range}`
     }
 
-    get total (): Totals {
+    /** Rebuild the memoised `total` + `rows` for the current sessions/range/view/sort. */
+    private recompute (): void {
         const { from, to } = this.bounds
-        return grandTotal(this.sessions, from, to)
-    }
-
-    get rows (): Row[] {
-        const { from, to } = this.bounds
+        this.total = grandTotal(this.sessions, from, to)
         let rows: Row[]
         if (this.view === 'session') {
             rows = this.sessions.map(s => ({
@@ -201,7 +217,7 @@ export class TokenStatsTabComponent {
                 lastActive: g.lastActive,
             }))
         }
-        return this.sortRows(rows)
+        this.rows = this.sortRows(rows)
     }
 
     private sortRows (rows: Row[]): Row[] {
@@ -219,6 +235,7 @@ export class TokenStatsTabComponent {
     sortBy (k: SortKey): void {
         if (this.sortKey === k) this.sortDir = (this.sortDir === 1 ? -1 : 1) as 1 | -1
         else { this.sortKey = k; this.sortDir = k === 'name' ? 1 : -1 }
+        this.recompute()
     }
 
     agentLabel (a: AiTool | ''): string { return a ? agentLabelOf(a) : '' }

@@ -10,6 +10,8 @@ import {
 // when read back locally).
 const iso = (y: number, mo1: number, d: number, h = 12): string => new Date(y, mo1 - 1, d, h, 0, 0).toISOString()
 const day = (y: number, mo1: number, d: number): string => dayKey(new Date(y, mo1 - 1, d, 12, 0, 0).getTime())
+// Unix epoch SECONDS — what the opencode adapter actually writes for `ts`.
+const sec = (y: number, mo1: number, d: number): number => Math.floor(new Date(y, mo1 - 1, d, 12, 0, 0).getTime() / 1000)
 
 describe('dayKey', () => {
     it('formats a valid epoch as local YYYY-MM-DD', () => {
@@ -74,7 +76,7 @@ describe('parseGeminiFull', () => {
         const text = JSON.stringify({
             sessionId: 'g1', projectHash: 'abc123',
             messages: [
-                { timestamp: iso(2026, 6, 16), tokens: { input: 100, output: 20, cached: 50 } },
+                { timestamp: iso(2026, 6, 16), tokens: { input: 100, output: 20, cached: 50, thoughts: 10 } },
                 { timestamp: iso(2026, 6, 16), tokens: { input: 10, output: 5, cached: 5 } },
                 { timestamp: iso(2026, 6, 16) },   // no tokens → skipped
             ],
@@ -83,7 +85,9 @@ describe('parseGeminiFull', () => {
         expect(r.project).toBe('abc123')
         expect(r.sessionId).toBe('g1')
         expect(r.turns).toBe(2)
-        expect(r.perDay[day(2026, 6, 16)]).toEqual({ inTok: 110, cacheTok: 55, outTok: 25 })
+        // Gemini `input` INCLUDES cache → in = input - cached; out folds in `thoughts`.
+        // m1: in=50 cache=50 out=30 ; m2: in=5 cache=5 out=5
+        expect(r.perDay[day(2026, 6, 16)]).toEqual({ inTok: 55, cacheTok: 55, outTok: 35 })
     })
     it('returns empty on malformed JSON', () => {
         expect(parseGeminiFull('{oops').turns).toBe(0)
@@ -93,13 +97,25 @@ describe('parseGeminiFull', () => {
 describe('parseOpencodeChunk (running totals, in/out only)', () => {
     it('attributes deltas and ignores non-opencode lines', () => {
         const lines = [
-            JSON.stringify({ agent: 'opencode', ts: iso(2026, 6, 16), tokens_in: 500, tokens_out: 100 }),
-            JSON.stringify({ agent: 'claude', ts: iso(2026, 6, 16), tokens_in: 9, tokens_out: 9 }), // ignored
-            JSON.stringify({ agent: 'opencode', ts: iso(2026, 6, 16), tokens_in: 800, tokens_out: 250 }),
+            JSON.stringify({ agent: 'opencode', ts: sec(2026, 6, 16), tokens_in: 500, tokens_out: 100 }),
+            JSON.stringify({ agent: 'claude', ts: sec(2026, 6, 16), tokens_in: 9, tokens_out: 9 }), // ignored
+            JSON.stringify({ agent: 'opencode', ts: sec(2026, 6, 16), tokens_in: 800, tokens_out: 250 }),
         ].join('\n')
         const r = parseOpencodeChunk(lines, { inTok: 0, cacheTok: 0, outTok: 0 })
+        // `ts` is numeric epoch-SECONDS (as the adapter writes) → must still bucket
+        // to the real day, not the undated bucket.
         expect(r.perDay[day(2026, 6, 16)]).toEqual({ inTok: 800, cacheTok: 0, outTok: 250 })
+        expect(r.perDay['']).toBeUndefined()
         expect(r.cumul.inTok).toBe(800)
+    })
+})
+
+describe('running-total reset handling', () => {
+    it('parseCodexChunk: a cumulative DROP is treated as the new value, not clamped to 0', () => {
+        const lines = JSON.stringify({ type: 'event_msg', timestamp: iso(2026, 6, 16), payload: { type: 'token_count', info: { total_token_usage: { input_tokens: 200, cached_input_tokens: 0, output_tokens: 50 } } } })
+        // prev cumulative was higher (500/300) → a reset; delta = the new value (200 in, 50 out), not 0.
+        const r = parseCodexChunk(lines, { inTok: 500, cacheTok: 0, outTok: 300 })
+        expect(r.perDay[day(2026, 6, 16)]).toEqual({ inTok: 200, cacheTok: 0, outTok: 50 })
     })
 })
 

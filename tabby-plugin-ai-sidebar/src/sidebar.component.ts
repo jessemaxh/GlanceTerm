@@ -1583,11 +1583,17 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         this.ngbModal.open(section.component, { centered: true, size: 'lg' })
     }
 
+    private tokenStatsOpen = false
+
     /** Open the Token Usage dashboard as a modal from the gear menu (same
      *  NgbModal path the plugin "Configure…" sections use). Lives in our sidebar
-     *  settings, not Tabby's global Settings. `xl` + scrollable for the tables. */
+     *  settings, not Tabby's global Settings. `xl` + scrollable for the tables.
+     *  Guarded so a rapid double-click doesn't stack two modals. */
     openTokenStats (): void {
-        this.ngbModal.open(TokenStatsTabComponent, { size: 'xl', scrollable: true })
+        if (this.tokenStatsOpen) return
+        this.tokenStatsOpen = true
+        const ref = this.ngbModal.open(TokenStatsTabComponent, { size: 'xl', scrollable: true })
+        ref.result.finally(() => { this.tokenStatsOpen = false })
     }
 
     /**
