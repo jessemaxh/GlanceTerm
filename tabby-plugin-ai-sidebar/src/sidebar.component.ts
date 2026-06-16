@@ -12,6 +12,7 @@ import { ScreenshotPasteService } from './screenshot/paste.service'
 import { SplitShellService } from './split-shell.service'
 import { AutoApproveService } from './auto-approve.service'
 import { SidebarSettingsRegistry, SidebarSettingsSection } from './sidebar-settings-registry.service'
+import { TokenStatsTabComponent } from './token-stats-tab.component'
 
 /**
  * Pill filter ids — a strict subset of TabStatus (`'no_ai'` is excluded
@@ -345,6 +346,13 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                         </div>
                         <input type="checkbox" class="gt-switch" [checked]="autoResumeAgents" (change)="toggleAutoResumeAgents()" aria-label="Resume agent sessions on restart"/>
                     </label>
+                    <div class="gt-setting-row gt-setting-row-action" (click)="openTokenStats()">
+                        <div class="gt-setting-text">
+                            <div class="gt-setting-title">Token usage</div>
+                            <div class="gt-setting-desc">Total in / cache / out across all sessions — by agent / session / project, with time windows and CSV export.</div>
+                        </div>
+                        <button type="button" class="gt-section-btn" (click)="openTokenStats(); $event.stopPropagation()" aria-label="Open Token usage">Open…</button>
+                    </div>
 
                     <!-- Plugin-contributed sections (currently:
                          tabby-plugin-mobile-bridge). Rendered as a row with
@@ -1573,6 +1581,13 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      */
     openSidebarSettingsSection (section: SidebarSettingsSection): void {
         this.ngbModal.open(section.component, { centered: true, size: 'lg' })
+    }
+
+    /** Open the Token Usage dashboard as a modal from the gear menu (same
+     *  NgbModal path the plugin "Configure…" sections use). Lives in our sidebar
+     *  settings, not Tabby's global Settings. `xl` + scrollable for the tables. */
+    openTokenStats (): void {
+        this.ngbModal.open(TokenStatsTabComponent, { size: 'xl', scrollable: true })
     }
 
     /**

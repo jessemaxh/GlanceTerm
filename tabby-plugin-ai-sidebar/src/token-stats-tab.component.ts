@@ -1,4 +1,5 @@
 import { Component, NgZone } from '@angular/core'
+import { NgbActiveModal } from '@ng-bootstrap/ng-bootstrap'
 
 import {
     TokenStatsService, SessionStat, Totals,
@@ -45,6 +46,7 @@ const AGENT_LABEL: Record<string, string> = {
             {{ loading ? 'Scanning…' : '↻ Refresh' }}
           </button>
           <button class="btn btn-sm btn-outline-secondary" (click)="exportCsv()">⤓ CSV</button>
+          <button class="btn btn-sm btn-outline-secondary" (click)="modal.dismiss()" aria-label="Close">✕</button>
         </div>
       </div>
 
@@ -140,7 +142,7 @@ export class TokenStatsTabComponent {
     scanDone = 0
     scanTotal = 0
 
-    constructor (private stats: TokenStatsService, private zone: NgZone) {}
+    constructor (private stats: TokenStatsService, private zone: NgZone, public modal: NgbActiveModal) {}
 
     async ngOnInit (): Promise<void> {
         this.sessions = this.stats.snapshot()   // instant from cache
