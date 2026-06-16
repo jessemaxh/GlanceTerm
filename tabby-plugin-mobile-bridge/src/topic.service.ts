@@ -24,7 +24,7 @@ function folderName (p: string | undefined): string | undefined {
 /** Short machine name baked into topic titles ("<folder>@<machine>") so a
  *  phone bridged to several hosts can tell which machine a topic belongs to.
  *  os.hostname() often returns "Name.local" / an FQDN — take the first label. */
-const MACHINE_NAME = os.hostname().split('.')[0] || os.hostname()
+const MACHINE_NAME = os.hostname().split('.')[0] || os.hostname() || 'local'
 
 /** Local-time HH:MM. Used in archive notices that surface in the mobile
  *  topic-list preview row — full timestamp would line-wrap on iPhone. */
@@ -74,15 +74,16 @@ export interface TopicEntry {
  * backend implementation, not here.
  *
  * Title format:
- *     #<displayIndex> · <label> · <uuid-suffix>
+ *     <label>@<machine>
  * where `<label>` mirrors the sidebar primary text (folder name from cwd
- * when available, falling back to the tab title) so a phone glance lines
- * up with what the user sees in GlanceTerm; `<uuid-suffix>` is the last
- * 4 chars of the UUID. Closed topics get a leading `✓ ` prefix so the
- * archive state is legible in Telegram's mobile topic list (the native
- * lock badge alone is too subtle on iPhone). We rebuild on every sync —
- * reorder/title/cwd changes all drift `displayIndex` or `<label>` and
- * trigger a re-edit.
+ * when available, falling back to the tab title) and `<machine>` is the
+ * first label of os.hostname(), so a phone bridged to several hosts can
+ * tell topics apart at a glance. The label is clipped to keep the title
+ * within Telegram's 128-char limit. Closed topics get a leading `✓ `
+ * prefix so the archive state is legible in Telegram's mobile topic list
+ * (the native lock badge alone is too subtle on iPhone). The title no
+ * longer encodes tab order or a uuid suffix, so reordering tabs no longer
+ * triggers a retitle; only a folder (cwd) change does.
  */
 @Injectable()
 export class TopicService {
@@ -298,9 +299,18 @@ export class TopicService {
      * Permanently delete a topic and drop its cache entry. Used by the
      * launch-time orphan purge (TopicSyncService): every tab gets a fresh
      * in-memory uuid each app run, so last session's cached topics can never
-     * be re-matched — left alone they pile up as one dead (closed) topic per
-     * tab per restart. Backends without a native delete (Feishu / Discord)
-     * degrade to closeThread so the topic at least goes quiet.
+     * be re-matched — left alone they pile up as one dead topic per tab per
+     * restart.
+     *
+     * Robustness: native delete can FAIL even when the method exists — Telegram
+     * `deleteForumTopic` needs the bot's `can_delete_messages` admin right, which
+     * the default "Manage Topics"-only setup lacks (→ permission_denied, not
+     * thread_not_found). Backends without a native delete at all (Feishu /
+     * Discord) likewise can't delete. In every such case we degrade to
+     * closeThread so the topic at least goes quiet — and ALWAYS drop the cache
+     * entry afterwards: the orphan uuid can never re-match, so keeping the
+     * threadId mapping would only make the next launch retry (delete-spam /
+     * redundant closes). One pass per orphan, then forget it.
      */
     async syncDeleteTopic (binding: ChannelBinding, tabUuid: string): Promise<void> {
         await this.load()
@@ -312,22 +322,18 @@ export class TopicService {
             if (backend.deleteThread) {
                 await backend.deleteThread(binding.chatId, entry.threadId)
             } else {
-                // No native delete — degrade to close and keep the cache entry
-                // (status closed) so we don't lose the threadId mapping.
                 await backend.closeThread(binding.chatId, entry.threadId, entry.lastTitle)
-                entry.status = 'closed'
-                entry.closedAt = Date.now()
-                this.scheduleSave()
-                return
             }
         } catch (err: unknown) {
-            // Already gone on the platform — converge by dropping the entry.
-            if (err instanceof MessagingError && err.kind === 'thread_not_found') {
-                this.cache.delete(key)
-                this.scheduleSave()
-                return
+            const gone = err instanceof MessagingError && err.kind === 'thread_not_found'
+            // If the failed op was the DELETE (not the close), fall back to a
+            // single close so the orphan goes quiet. thread_not_found needs no
+            // action (already gone). A close failure here is swallowed — we drop
+            // the entry regardless so we never retry-spam on every launch.
+            if (!gone && backend.deleteThread) {
+                try { await backend.closeThread(binding.chatId, entry.threadId, entry.lastTitle) }
+                catch { /* best effort — entry is dropped below either way */ }
             }
-            throw err
         }
         this.cache.delete(key)
         this.scheduleSave()
@@ -446,12 +452,18 @@ export class TopicService {
     /**
      * Public so TopicSyncService can diff against entry.lastTitle.
      * `status` defaults to 'open'; pass 'closed' to bake in the leading
-     * ✓ marker so a subsequent retitle (e.g. user reorders tabs while
-     * the topic is closed) doesn't strip it.
+     * ✓ marker so a subsequent retitle (e.g. a cwd/folder change while the
+     * topic is closed) doesn't strip it.
      */
     formatTitle (identity: TabIdentity, status: 'open' | 'closed' = 'open'): string {
-        const label = folderName(identity.cwd) ?? identity.name
-        const base = `${label}@${MACHINE_NAME}`
+        // Telegram forum-topic names cap at 128 chars. Keep the "@<machine>"
+        // suffix intact and clip the (user-controlled, unbounded) folder label;
+        // 120 leaves room for the leading "✓ " closed marker.
+        const machine = MACHINE_NAME.slice(0, 40)
+        const labelMax = 120 - machine.length - 1 // -1 for the '@'
+        let label = folderName(identity.cwd) ?? identity.name
+        if (label.length > labelMax) label = `${label.slice(0, labelMax - 1)}…`
+        const base = `${label}@${machine}`
         return status === 'closed' ? `✓ ${base}` : base
     }
 

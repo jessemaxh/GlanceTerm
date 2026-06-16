@@ -138,8 +138,11 @@ type Platform = 'telegram' | 'feishu' | 'discord'
                                 </li>
                                 <li>
                                     Add your bot to the group + promote to
-                                    <strong>admin</strong> with at least the
-                                    <em>Manage Topics</em> permission.
+                                    <strong>admin</strong> with the
+                                    <em>Manage Topics</em> permission — and also
+                                    <em>Delete Messages</em> if you want closed
+                                    topics auto-removed on restart (without it
+                                    they're just closed, not deleted).
                                 </li>
                                 <li>
                                     Paste the bot token below and click

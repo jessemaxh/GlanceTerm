@@ -164,9 +164,9 @@ export class TopicSyncService implements OnDestroy {
             // Compare against the status the entry is in NOW; reopen
             // above is enqueued separately and updates lastTitle itself.
             // Using entry.status here keeps a closed entry's drift check
-            // honest (lastTitle is "✓ #N · …", expected must also be
-            // "✓ #N · …" or every reconcile would queue a redundant
-            // retitle that strips the marker).
+            // honest (lastTitle is "✓ <label>@<machine>", expected must also
+            // carry the ✓ or every reconcile would queue a redundant retitle
+            // that strips the marker).
             const expected = this.topics.formatTitle(identity, entry.status)
             if (entry.lastTitle !== expected) {
                 this.enqueue(binding.id, `retitle:${identity.uuid}`, () =>
@@ -244,7 +244,11 @@ export class TopicSyncService implements OnDestroy {
             if (ops!.size === 0 && this.redoNeeded.has(bindingId)) {
                 this.redoNeeded.delete(bindingId)
                 const binding = this.store.current.find(b => b.id === bindingId)
-                if (binding && binding.enabled) {
+                // reconcileBinding is now destructive (deletes orphan topics on
+                // a binding's first pass), so mirror reconcile()'s primary-only
+                // guard here too — a secondary instance must never mutate the
+                // shared topic state, even on this redo path.
+                if (binding && binding.enabled && await this.lock.isPrimary()) {
                     try {
                         await this.reconcileBinding(binding, this.identity.current)
                     } catch (err) {

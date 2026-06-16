@@ -8,7 +8,7 @@ import {
 } from '../topic.service'
 import { ChannelBinding } from '../binding/types'
 import { TabIdentity } from '../tab-identity.service'
-import { MessagingBackend } from '../backends/types'
+import { MessagingBackend, MessagingError } from '../backends/types'
 
 /**
  * Minimal MessagingBackend stub. Records every method call as a tuple
@@ -94,8 +94,9 @@ const KEY = (tabUuid: string) => `${BINDING.id}|${tabUuid}`
 
 describe('TopicService.formatTitle', () => {
     // Machine name is baked from os.hostname() at module load; mirror the
-    // source's first-label extraction so the assertion is host-independent.
-    const MACHINE = os.hostname().split('.')[0] || os.hostname()
+    // source's first-label extraction + 40-char clip so the assertion is
+    // host-independent.
+    const MACHINE = (os.hostname().split('.')[0] || os.hostname() || 'local').slice(0, 40)
 
     it('open: no marker, "<cwd folder>@<machine>"', () => {
         const svc = new TopicService(makeRegistry(makeBackendStub().backend))
@@ -230,7 +231,7 @@ describe('TopicService.syncDeleteTopic', () => {
         expect((svc as any).cache.has(KEY(IDENTITY.uuid))).toBe(false)
     })
 
-    it('no native delete: degrades to closeThread and keeps the entry (closed)', async () => {
+    it('no native delete: degrades to closeThread and drops the entry', async () => {
         const { backend, calls } = makeBackendStub() // stub has no deleteThread
         const svc = new TopicService(makeRegistry(backend))
         bypassLoad(svc)
@@ -241,7 +242,46 @@ describe('TopicService.syncDeleteTopic', () => {
         const methods = calls.map(c => c.method)
         expect(methods).toContain('closeThread')
         expect(methods).not.toContain('deleteThread')
-        expect((svc as any).cache.get(KEY(IDENTITY.uuid))?.status).toBe('closed')
+        // Dropped, not kept-closed: the orphan uuid can't re-match, so keeping
+        // it would only retry-spam on the next launch.
+        expect((svc as any).cache.has(KEY(IDENTITY.uuid))).toBe(false)
+    })
+
+    it('native delete FAILS (e.g. bot lacks can_delete_messages): degrades to close + drops entry', async () => {
+        const { backend, calls } = makeBackendStub()
+        ;(backend as any).deleteThread = (...args: unknown[]) => {
+            calls.push({ method: 'deleteThread', args })
+            return Promise.reject(new MessagingError('permission_denied', 'not enough rights'))
+        }
+        const svc = new TopicService(makeRegistry(backend))
+        bypassLoad(svc)
+        seedOpen(svc)
+
+        await svc.syncDeleteTopic(BINDING, IDENTITY.uuid)
+
+        const methods = calls.map(c => c.method)
+        expect(methods).toContain('deleteThread') // attempted
+        expect(methods).toContain('closeThread')  // degraded after the failure
+        // Dropped regardless, so we don't retry the doomed delete every launch.
+        expect((svc as any).cache.has(KEY(IDENTITY.uuid))).toBe(false)
+    })
+
+    it('native delete throws thread_not_found: drops entry without a redundant close', async () => {
+        const { backend, calls } = makeBackendStub()
+        ;(backend as any).deleteThread = (...args: unknown[]) => {
+            calls.push({ method: 'deleteThread', args })
+            return Promise.reject(new MessagingError('thread_not_found', 'gone'))
+        }
+        const svc = new TopicService(makeRegistry(backend))
+        bypassLoad(svc)
+        seedOpen(svc)
+
+        await svc.syncDeleteTopic(BINDING, IDENTITY.uuid)
+
+        const methods = calls.map(c => c.method)
+        expect(methods).toContain('deleteThread')
+        expect(methods).not.toContain('closeThread') // already gone — no point closing
+        expect((svc as any).cache.has(KEY(IDENTITY.uuid))).toBe(false)
     })
 
     it('no-op when the tab has no cached topic', async () => {
