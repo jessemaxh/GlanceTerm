@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import * as os from 'os'
 
 import {
     TopicService,
@@ -92,22 +93,24 @@ const KEY = (tabUuid: string) => `${BINDING.id}|${tabUuid}`
  */
 
 describe('TopicService.formatTitle', () => {
-    it('open: no marker, with cwd-derived label and uuid suffix', () => {
+    // Machine name is baked from os.hostname() at module load; mirror the
+    // source's first-label extraction so the assertion is host-independent.
+    const MACHINE = os.hostname().split('.')[0] || os.hostname()
+
+    it('open: no marker, "<cwd folder>@<machine>"', () => {
         const svc = new TopicService(makeRegistry(makeBackendStub().backend))
-        expect(svc.formatTitle(IDENTITY))
-            .toBe('#3 · repo · 1234')
+        expect(svc.formatTitle(IDENTITY)).toBe(`repo@${MACHINE}`)
     })
 
     it('closed: ✓ prefix on the open form', () => {
         const svc = new TopicService(makeRegistry(makeBackendStub().backend))
-        expect(svc.formatTitle(IDENTITY, 'closed'))
-            .toBe('✓ #3 · repo · 1234')
+        expect(svc.formatTitle(IDENTITY, 'closed')).toBe(`✓ repo@${MACHINE}`)
     })
 
     it('falls back to identity.name when cwd is missing', () => {
         const svc = new TopicService(makeRegistry(makeBackendStub().backend))
         const noCwd: TabIdentity = { ...IDENTITY, cwd: undefined }
-        expect(svc.formatTitle(noCwd)).toBe('#3 · my-tab · 1234')
+        expect(svc.formatTitle(noCwd)).toBe(`my-tab@${MACHINE}`)
     })
 })
 
@@ -195,5 +198,59 @@ describe('TopicService.syncCloseTopic — cooldown', () => {
 
         expect(calls).toHaveLength(0)
         vi.restoreAllMocks()
+    })
+})
+
+/**
+ * syncDeleteTopic powers the launch-time orphan purge (TopicSyncService):
+ * native delete when the backend supports it, degrade-to-close otherwise.
+ */
+describe('TopicService.syncDeleteTopic', () => {
+    const seedOpen = (svc: TopicService) => {
+        ;(svc as any).cache.set(KEY(IDENTITY.uuid), {
+            threadId: 't1', lastTitle: 'repo@host', status: 'open',
+        } as TopicEntry)
+    }
+
+    it('native deleteThread: deletes and drops the cache entry', async () => {
+        const { backend, calls } = makeBackendStub()
+        ;(backend as any).deleteThread = (...args: unknown[]) => {
+            calls.push({ method: 'deleteThread', args })
+            return Promise.resolve()
+        }
+        const svc = new TopicService(makeRegistry(backend))
+        bypassLoad(svc)
+        seedOpen(svc)
+
+        await svc.syncDeleteTopic(BINDING, IDENTITY.uuid)
+
+        const methods = calls.map(c => c.method)
+        expect(methods).toContain('deleteThread')
+        expect(methods).not.toContain('closeThread')
+        expect((svc as any).cache.has(KEY(IDENTITY.uuid))).toBe(false)
+    })
+
+    it('no native delete: degrades to closeThread and keeps the entry (closed)', async () => {
+        const { backend, calls } = makeBackendStub() // stub has no deleteThread
+        const svc = new TopicService(makeRegistry(backend))
+        bypassLoad(svc)
+        seedOpen(svc)
+
+        await svc.syncDeleteTopic(BINDING, IDENTITY.uuid)
+
+        const methods = calls.map(c => c.method)
+        expect(methods).toContain('closeThread')
+        expect(methods).not.toContain('deleteThread')
+        expect((svc as any).cache.get(KEY(IDENTITY.uuid))?.status).toBe('closed')
+    })
+
+    it('no-op when the tab has no cached topic', async () => {
+        const { backend, calls } = makeBackendStub()
+        const svc = new TopicService(makeRegistry(backend))
+        bypassLoad(svc)
+
+        await svc.syncDeleteTopic(BINDING, IDENTITY.uuid)
+
+        expect(calls).toHaveLength(0)
     })
 })

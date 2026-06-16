@@ -262,6 +262,13 @@ export interface MessagingBackend {
      *  back to the original title. */
     reopenThread (chatId: ChatRef, threadId: ThreadRef, restoreTitle?: string): Promise<void>
     renameThread (chatId: ChatRef, threadId: ThreadRef, title: string): Promise<void>
+    /** Permanently delete a thread and all its messages (Telegram
+     *  `deleteForumTopic`). OPTIONAL — backends without a native delete
+     *  (Feishu / Discord today) omit it and the caller falls back to
+     *  `closeThread`. Used by the launch-time purge of orphaned topics
+     *  (see TopicSyncService) so the mobile topic list doesn't accumulate a
+     *  closed topic per tab per app restart. */
+    deleteThread? (chatId: ChatRef, threadId: ThreadRef): Promise<void>
 
     sendText (
         chatId: ChatRef,

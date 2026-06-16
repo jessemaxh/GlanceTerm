@@ -21,6 +21,11 @@ function folderName (p: string | undefined): string | undefined {
     return m ? m[0] : undefined
 }
 
+/** Short machine name baked into topic titles ("<folder>@<machine>") so a
+ *  phone bridged to several hosts can tell which machine a topic belongs to.
+ *  os.hostname() often returns "Name.local" / an FQDN — take the first label. */
+const MACHINE_NAME = os.hostname().split('.')[0] || os.hostname()
+
 /** Local-time HH:MM. Used in archive notices that surface in the mobile
  *  topic-list preview row — full timestamp would line-wrap on iPhone. */
 function formatHHMM (d: Date): string {
@@ -289,6 +294,45 @@ export class TopicService {
         this.scheduleSave()
     }
 
+    /**
+     * Permanently delete a topic and drop its cache entry. Used by the
+     * launch-time orphan purge (TopicSyncService): every tab gets a fresh
+     * in-memory uuid each app run, so last session's cached topics can never
+     * be re-matched — left alone they pile up as one dead (closed) topic per
+     * tab per restart. Backends without a native delete (Feishu / Discord)
+     * degrade to closeThread so the topic at least goes quiet.
+     */
+    async syncDeleteTopic (binding: ChannelBinding, tabUuid: string): Promise<void> {
+        await this.load()
+        const key = this.key(binding.id, tabUuid)
+        const entry = this.cache.get(key)
+        if (!entry) return
+        const backend = this.backends.forPlatform(binding.platform)
+        try {
+            if (backend.deleteThread) {
+                await backend.deleteThread(binding.chatId, entry.threadId)
+            } else {
+                // No native delete — degrade to close and keep the cache entry
+                // (status closed) so we don't lose the threadId mapping.
+                await backend.closeThread(binding.chatId, entry.threadId, entry.lastTitle)
+                entry.status = 'closed'
+                entry.closedAt = Date.now()
+                this.scheduleSave()
+                return
+            }
+        } catch (err: unknown) {
+            // Already gone on the platform — converge by dropping the entry.
+            if (err instanceof MessagingError && err.kind === 'thread_not_found') {
+                this.cache.delete(key)
+                this.scheduleSave()
+                return
+            }
+            throw err
+        }
+        this.cache.delete(key)
+        this.scheduleSave()
+    }
+
     async syncReopenTopic (binding: ChannelBinding, tabUuid: string, identity?: TabIdentity): Promise<void> {
         await this.load()
         const key = this.key(binding.id, tabUuid)
@@ -406,9 +450,8 @@ export class TopicService {
      * the topic is closed) doesn't strip it.
      */
     formatTitle (identity: TabIdentity, status: 'open' | 'closed' = 'open'): string {
-        const suffix = identity.uuid.slice(-4)
         const label = folderName(identity.cwd) ?? identity.name
-        const base = `#${identity.displayIndex} · ${label} · ${suffix}`
+        const base = `${label}@${MACHINE_NAME}`
         return status === 'closed' ? `✓ ${base}` : base
     }
 

@@ -73,6 +73,14 @@ export class TopicSyncService implements OnDestroy {
      *  stuck on title A. The redo bit makes the dedup latest-wins
      *  rather than first-wins. */
     private redoNeeded = new Set<string>()
+    /** Bindings whose launch-time orphan purge has run this session. Tabs get
+     *  a fresh in-memory uuid every app run, so on the FIRST reconcile after
+     *  launch every cached topic whose uuid isn't in the live tab list is an
+     *  un-rematchable orphan from a prior session — we delete those instead of
+     *  closing them, so the mobile topic list doesn't grow a dead topic per tab
+     *  per restart. Per-binding (not global) so a binding paired after launch
+     *  still gets its one-time purge. Steady-state closes stay closes. */
+    private purgedBindings = new Set<string>()
 
     constructor (
         private identity: TabIdentityService,
@@ -166,17 +174,30 @@ export class TopicSyncService implements OnDestroy {
             }
         }
 
-        // 2. Close topics whose tabs are gone. Already-closed entries are
-        //    no-ops inside syncCloseTopic but we filter here too so they
-        //    don't burn queue slots / throttle gaps.
-        //    The tab is gone, so no TabIdentity to pass — syncCloseTopic
-        //    falls back to prefixing the existing lastTitle with ✓.
+        // 2. Tabs gone from the live list. On this binding's FIRST reconcile
+        //    after launch every such cached topic is an un-rematchable orphan
+        //    (tab uuids are minted per app run) → DELETE it, so the mobile
+        //    topic list doesn't accumulate one dead topic per tab per restart.
+        //    Steady-state (later reconciles) we CLOSE instead, retaining
+        //    history until the next launch purge. Already-closed entries are
+        //    skipped so they don't burn queue slots. The tab is gone, so no
+        //    TabIdentity to pass — syncCloseTopic falls back to prefixing the
+        //    existing lastTitle with ✓.
+        const firstReconcileForBinding = !this.purgedBindings.has(binding.id)
         for (const { tabUuid, entry } of cached) {
             if (desiredByUuid.has(tabUuid)) continue
+            if (firstReconcileForBinding) {
+                this.enqueue(binding.id, `delete:${tabUuid}`, () =>
+                    this.topics.syncDeleteTopic(binding, tabUuid))
+                continue
+            }
             if (entry.status === 'closed') continue
             this.enqueue(binding.id, `close:${tabUuid}`, () =>
                 this.topics.syncCloseTopic(binding, tabUuid))
         }
+        // Mark the one-time purge done only after walking the full cache for
+        // this binding, so a mid-walk throw retries the purge on the next tick.
+        this.purgedBindings.add(binding.id)
     }
 
     private enqueue (bindingId: string, opKey: string, fn: () => Promise<void>): void {

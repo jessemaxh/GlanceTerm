@@ -227,6 +227,15 @@ export class TelegramBackend implements MessagingBackend, OnDestroy {
         })
     }
 
+    async deleteThread (chatId: ChatRef, threadId: ThreadRef): Promise<void> {
+        // Native deleteForumTopic removes the topic AND all its messages.
+        // Used by the launch-time orphan purge so the topic list stays clean.
+        await this.call<true>('deleteForumTopic', {
+            chat_id: Number(chatId),
+            message_thread_id: Number(threadId),
+        })
+    }
+
     async sendText (
         chatId: ChatRef,
         threadId: ThreadRef,
