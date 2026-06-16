@@ -269,6 +269,44 @@ builder({
                 [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
                 [FuseV1Options.EnableNodeCliInspectArguments]: false,
             })
+            // 1.5 macOS 26 (Tahoe) icon. If a compiled Icon Composer `.icon` is
+            //     present at build/mac/icon.icon, bundle it (actool → Assets.car +
+            //     CFBundleIconName) AND swap the bundled legacy icon.icns to the
+            //     inset version (build/mac/icon-legacy.icns) so macOS ≤15 sizes
+            //     correctly too. ATOMIC + gated: the .icns swap happens only AFTER
+            //     actool + the plist edit succeed, so a missing OR a failed .icon
+            //     leaves the full-bleed icon.icns electron-builder already bundled
+            //     (correct on Tahoe, slightly large on ≤15 — NO regression before
+            //     the .icon lands). The actool invocation follows Apple's documented
+            //     Tahoe flow but is UNVERIFIED until the first real .icon — the gate
+            //     makes a wrong invocation safe (it just falls back to full-bleed).
+            //     Runs before signing so the cert covers Assets.car + the new icns.
+            try {
+                const dotIcon = path.resolve('build/mac/icon.icon')
+                if (fs.existsSync(dotIcon)) {
+                    const res = path.join(appPath, 'Contents', 'Resources')
+                    const work = path.resolve('dist/.icon-build')
+                    fs.rmSync(work, { recursive: true, force: true })
+                    const cat = path.join(work, 'Assets.xcassets')
+                    fs.mkdirSync(cat, { recursive: true })
+                    fs.writeFileSync(path.join(cat, 'Contents.json'), JSON.stringify({ info: { author: 'xcode', version: 1 } }))
+                    fs.cpSync(dotIcon, path.join(cat, 'AppIcon.icon'), { recursive: true })
+                    const partial = path.join(work, 'icon-partial.plist')
+                    execFileSync('xcrun', ['actool', cat, '--compile', res, '--app-icon', 'AppIcon',
+                        '--platform', 'macosx', '--minimum-deployment-target', '26.0',
+                        '--output-partial-info-plist', partial], { stdio: 'inherit' })
+                    const info = path.join(appPath, 'Contents', 'Info.plist')
+                    try { execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Set :CFBundleIconName AppIcon', info], { stdio: 'ignore' }) }
+                    catch { execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Add :CFBundleIconName string AppIcon', info], { stdio: 'ignore' }) }
+                    const inset = path.resolve('build/mac/icon-legacy.icns')
+                    if (fs.existsSync(inset)) fs.copyFileSync(inset, path.join(res, 'icon.icns'))
+                    console.log('  • Tahoe icon: bundled .icon (Assets.car + CFBundleIconName) + inset icon.icns for macOS ≤15')
+                } else {
+                    console.log('  • no build/mac/icon.icon — keeping full-bleed icon.icns (Tahoe-safe). Drop the Icon Composer export at build/mac/icon.icon to enable the dual-format.')
+                }
+            } catch (e) {
+                console.warn('  ⚠ Tahoe .icon bundling failed — kept full-bleed icon.icns (no Tahoe regression). Verify the actool step with the real .icon:', e?.message ?? e)
+            }
             // 2. Now sign bottom-up. Skip when CSC_LINK is set — electron-builder
             //    handles that case with the real cert.
             if (!adHocSign) return
