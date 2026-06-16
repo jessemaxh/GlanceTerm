@@ -335,7 +335,7 @@ export function parseGeminiFull (text: string): { perDay: PerDay; turns: number;
         addToDay(perDay, dayKey(ts),
             Math.max(0, num(t.input) - num(t.cached)),
             num(t.cached),
-            num(t.output) + num(t.thoughts))
+            num(t.output) + num(t.thoughts) + num(t.tool))
         turns++
         if (ts > lastTs) lastTs = ts
     }

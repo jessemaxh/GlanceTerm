@@ -1591,9 +1591,16 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      *  Guarded so a rapid double-click doesn't stack two modals. */
     openTokenStats (): void {
         if (this.tokenStatsOpen) return
+        let ref
+        try {
+            ref = this.ngbModal.open(TokenStatsTabComponent, { size: 'xl', scrollable: true })
+        } catch {
+            return   // open failed — leave the flag untouched so reopening still works
+        }
         this.tokenStatsOpen = true
-        const ref = this.ngbModal.open(TokenStatsTabComponent, { size: 'xl', scrollable: true })
-        ref.result.finally(() => { this.tokenStatsOpen = false })
+        // result rejects on dismiss (✕ / backdrop / Escape); handle BOTH arms so
+        // there's no unhandled rejection on a normal close, and the flag always clears.
+        ref.result.then(() => { this.tokenStatsOpen = false }, () => { this.tokenStatsOpen = false })
     }
 
     /**

@@ -12,6 +12,7 @@ type View = 'agent' | 'session' | 'project'
 type SortKey = 'in' | 'cache' | 'out' | 'turns' | 'recent' | 'name'
 
 interface Row {
+    id: string            // stable, unique trackBy key (full session id / agent / full project key)
     name: string          // agent / project / session label
     agent: AiTool | ''     // '' for project rows (mixed)
     sub?: string           // secondary label (project for session rows)
@@ -164,7 +165,9 @@ export class TokenStatsTabComponent implements OnDestroy {
         if (this.loading) return
         this.loading = true; this.scanDone = 0; this.scanTotal = 0
         try {
-            const result = await this.stats.scan((d, t) => this.zone.run(() => { this.scanDone = d; this.scanTotal = t }))
+            const result = await this.stats.scan((d, t) => {
+                if (this.alive) this.zone.run(() => { this.scanDone = d; this.scanTotal = t })
+            })
             if (!this.alive) return              // modal dismissed mid-scan — don't touch a dead instance
             this.sessions = result
             this.recompute()
@@ -176,7 +179,7 @@ export class TokenStatsTabComponent implements OnDestroy {
     setRange (k: Range): void { this.range = k; this.recompute() }
     setView (k: View): void { this.view = k; this.recompute() }
 
-    trackRow = (_: number, r: Row): string => `${r.agent}|${r.name}|${r.sub ?? ''}`
+    trackRow = (_: number, r: Row): string => r.id
 
     private get bounds (): { from: string; to: string } {
         const off = (n: number): string => { const d = new Date(); d.setDate(d.getDate() - n); return dayKey(d.getTime()) }
@@ -198,7 +201,8 @@ export class TokenStatsTabComponent implements OnDestroy {
         this.total = grandTotal(this.sessions, from, to)
         let rows: Row[]
         if (this.view === 'session') {
-            rows = this.sessions.map(s => ({
+            rows = this.sessions.map((s, i) => ({
+                id: `${s.agent}:${s.sessionId || i}`,   // full id → unique trackBy key
                 name: s.sessionId.slice(0, 8),
                 agent: s.agent,
                 sub: this.projectLabel(s.project),
@@ -209,6 +213,7 @@ export class TokenStatsTabComponent implements OnDestroy {
             })).filter(r => r.totals.inTok || r.totals.cacheTok || r.totals.outTok)
         } else {
             rows = groupBy(this.sessions, this.view, from, to).map(g => ({
+                id: g.key,                              // full agent / project key → unique
                 name: this.view === 'project' ? this.projectLabel(g.key) : agentLabelOf(g.key),
                 agent: this.view === 'agent' ? (g.key as AiTool) : '',
                 totals: g.totals,
