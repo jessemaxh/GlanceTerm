@@ -338,6 +338,13 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                         </div>
                         <input type="checkbox" class="gt-switch" [checked]="hideTabsWithoutAgent" (change)="toggleHideTabsWithoutAgent()" aria-label="Hide tabs without an AI agent"/>
                     </label>
+                    <label class="gt-setting-row">
+                        <div class="gt-setting-text">
+                            <div class="gt-setting-title">Resume agent sessions on restart</div>
+                            <div class="gt-setting-desc">When a tab comes back after you quit and reopen GlanceTerm, automatically relaunch the AI agent that was running in it and continue its previous session — instead of leaving you a bare shell to re-type the command into. On by default.</div>
+                        </div>
+                        <input type="checkbox" class="gt-switch" [checked]="autoResumeAgents" (change)="toggleAutoResumeAgents()" aria-label="Resume agent sessions on restart"/>
+                    </label>
 
                     <!-- Plugin-contributed sections (currently:
                          tabby-plugin-mobile-bridge). Rendered as a row with
@@ -1491,6 +1498,26 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      */
     toggleHideTabsWithoutAgent (): void {
         this.config.store.ai.hideTabsWithoutAgent = !this.hideTabsWithoutAgent
+        void this.config.save()
+    }
+
+    /**
+     * Read-through to the auto-resume master switch. Default true (matches
+     * AiSidebarConfigProvider) so the gear menu's checkmark starts checked
+     * during the config-load window. AutoResumeService.enabled reads the same
+     * key live, so a flip takes effect on the next quit/restore — no restart.
+     */
+    get autoResumeAgents (): boolean {
+        return this.config.store?.ai?.autoResumeAgents !== false
+    }
+
+    /**
+     * Flip the auto-resume setting and persist. No re-plumbing needed —
+     * AutoResumeService reads config.store.ai.autoResumeAgents at capture and
+     * restore time, so the new value applies the next time a tab is restored.
+     */
+    toggleAutoResumeAgents (): void {
+        this.config.store.ai.autoResumeAgents = !this.autoResumeAgents
         void this.config.save()
     }
 
