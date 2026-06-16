@@ -391,15 +391,27 @@ export class FeishuBackend implements MessagingBackend, OnDestroy {
 
     async deleteThread (_chatId: ChatRef, threadId: ThreadRef): Promise<void> {
         const channel = this.requireChannel()
+        // The "topic" is the anchor message we sent; deleting it = Feishu message
+        // recall (im:message scope, the app's own message — no extra permission).
+        //
+        // We deliberately do NOT use LarkChannel.recallMessage(): it discards the
+        // response, and Feishu signals "recall refused" (e.g. the message is too
+        // old to recall — common for the launch purge's prior-session anchors) as
+        // HTTP 200 with a NON-ZERO business `code`, not an axios error. Call the
+        // raw client so we can read that code and surface a failure; otherwise
+        // syncDeleteTopic would drop the cache entry believing the topic was
+        // deleted and never degrade to close — silently leaking the topic.
+        let resp: any
         try {
-            // Feishu has no forum-topic delete. The "topic" is the anchor
-            // message we sent, so recall it — that removes the topic's visible
-            // representation. An app can only recall its own messages (the
-            // anchor is one), via the im:message scope it already holds; no
-            // extra permission needed. On failure the caller degrades to close.
-            await channel.recallMessage(threadId)
+            resp = await (channel.rawClient as any).im.v1.message.delete({ path: { message_id: threadId } })
         } catch (err) {
             throw this.translateLarkError(err, 'deleteThread')
+        }
+        if (resp && typeof resp.code === 'number' && resp.code !== 0) {
+            // Non-zero business code = recall refused/failed → not deleted.
+            // Surface as a non-thread_not_found error so syncDeleteTopic degrades
+            // to close (mark the anchor 📕) instead of silently dropping it.
+            throw new MessagingError('unknown', `Feishu message recall refused (code ${resp.code})`)
         }
     }
 
