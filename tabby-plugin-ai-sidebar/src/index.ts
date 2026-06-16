@@ -12,6 +12,7 @@ import {
     ToolbarButton,
 } from 'tabby-core'
 import { IMAGE_PASTE_HOOK } from 'tabby-terminal'
+import { SettingsTabProvider } from 'tabby-settings'
 
 import { AiSidebarComponent } from './sidebar.component'
 import { AiSidebarConfigProvider } from './ai-config-provider'
@@ -35,6 +36,8 @@ import { EscInterruptService } from './esc-interrupt.service'
 import { UpdateCheckService } from './update-check.service'
 import { UpdateForceModalComponent } from './update-force-modal.component'
 import { DebugLogService } from './debug-log.service'
+import { TokenStatsTabComponent } from './token-stats-tab.component'
+import { TokenStatsSettingsTabProvider } from './token-stats-settings'
 
 // Public exports for cross-plugin consumers (currently
 // tabby-plugin-mobile-bridge). Surface kept deliberately narrow — every
@@ -119,7 +122,7 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
 
 @NgModule({
     imports: [CommonModule, NgbTooltipModule],
-    declarations: [AiSidebarComponent, UpdateForceModalComponent],
+    declarations: [AiSidebarComponent, UpdateForceModalComponent, TokenStatsTabComponent],
     providers: [
         HookAdapterRegistry,
         HookRuntimeService,
@@ -142,6 +145,7 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
         { provide: ToolbarButtonProvider, useClass: ToggleAiSidebarButtonProvider, multi: true },
         { provide: HotkeyProvider,        useClass: AiSidebarHotkeyProvider,       multi: true },
         { provide: ConfigProvider,        useClass: AiSidebarConfigProvider,       multi: true },
+        { provide: SettingsTabProvider,   useClass: TokenStatsSettingsTabProvider,  multi: true },
         // Hook into BaseTerminalTabComponent.paste() so a PNG on the system
         // clipboard turns into a temp-file path typed into the focused terminal.
         // Hook lives in our plugin; the vendored conditional in
