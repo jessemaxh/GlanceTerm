@@ -71,12 +71,16 @@ export class AiHotkeyActionsService implements OnDestroy {
 
     private async screenshotActiveTab (): Promise<void> {
         if (this.capturing) return
-        if (!this.activeTabIsAi()) {
-            this.notifications.info('Focus an AI agent tab (Claude, Codex, …) to use screenshot paste.')
-            return
-        }
         this.capturing = true
         try {
+            // Permission first, then the agent-tab gate: surface the Screen
+            // Recording prompt regardless of which tab is focused, so a missing
+            // permission isn't hidden behind "focus an AI agent tab".
+            if (!await this.screenshot.ensureScreenPermission()) return
+            if (!this.activeTabIsAi()) {
+                this.notifications.info('Focus an AI agent tab (Claude, Codex, …) to use screenshot paste.')
+                return
+            }
             const result = await this.screenshot.capture({ hideWindow: false })
             if (!result) return   // user cancelled or capture failed
             await this.screenshotPaste.paste(result.buffer)

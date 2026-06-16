@@ -199,6 +199,35 @@ export class ScreenshotService {
     }
 
     /**
+     * Run the macOS Screen Recording permission gate on its own, so callers can
+     * verify/prompt permission BEFORE their own "is this an AI agent tab" check
+     * — a missing permission then surfaces regardless of which tab is focused,
+     * instead of being hidden behind the agent gate. Returns true if it's OK to
+     * proceed (granted, or the user chose "try anyway"), false if blocked. On
+     * non-darwin or a missing Electron API it returns true (nothing to gate);
+     * capture()'s own internal gate then no-ops (status granted, or
+     * preflightBypassed was just set by the "try anyway" path).
+     */
+    async ensureScreenPermission (): Promise<boolean> {
+        if (process.platform !== 'darwin' || this.preflightBypassed) return true
+        let remote: any
+        try {
+            remote = require('@electron/remote')
+        } catch {
+            return true
+        }
+        try {
+            const desktopCapturer = remote.getBuiltin('desktopCapturer')
+            const ourWindow = remote.getCurrentWindow()
+            return !(await this.checkMacScreenPermission(remote, ourWindow, desktopCapturer))
+        } catch (e: any) {
+            // eslint-disable-next-line no-console
+            console.warn('[glanceterm] ensureScreenPermission failed — letting capture() handle the gate:', e?.message ?? e)
+            return true
+        }
+    }
+
+    /**
      * macOS Screen Recording permission gate.
      *
      * Returns `true` when capture should be aborted, `false` when it can

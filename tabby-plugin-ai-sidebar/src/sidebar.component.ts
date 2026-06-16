@@ -1661,15 +1661,19 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      */
     private async runCapture (hideWindow: boolean): Promise<void> {
         if (this.capturing) return
-        // Non-AI tab: the paste step has no target. Tell the user instead of
-        // silently dropping the click — disabling the button leaves users
-        // wondering whether it's broken.
-        if (!this.activeIsAi) {
-            this.notifications.info('Focus an AI agent tab (Claude, Codex, …) to use screenshot paste.')
-            return
-        }
         this.capturing = true
         try {
+            // Permission first, then the agent-tab gate: surface the Screen
+            // Recording prompt regardless of which tab is focused, so a missing
+            // permission isn't hidden behind "focus an AI agent tab".
+            if (!await this.screenshot.ensureScreenPermission()) return
+            // Non-AI tab: the paste step has no target. Tell the user instead of
+            // silently dropping the click — disabling the button leaves users
+            // wondering whether it's broken.
+            if (!this.activeIsAi) {
+                this.notifications.info('Focus an AI agent tab (Claude, Codex, …) to use screenshot paste.')
+                return
+            }
             const result = await this.screenshot.capture({ hideWindow })
             if (!result) return   // user cancelled or capture failed
             await this.screenshotPaste.paste(result.buffer)
