@@ -10,18 +10,14 @@ const __dirname = url.fileURLToPath(new URL('.', import.meta.url))
 
 const electronInfo = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../node_modules/electron/package.json')))
 
-// `--match 'v*'` restricts the lookup to semver-shaped tags. Without
-// it, project-local checkpoint tags like `pre-mobile-bridge` get picked
-// when they're closer than the most recent `v*` release, producing a
-// non-semver string that `semver.inc` returns null for and crashes the
-// build at line 18 with "Cannot read properties of null".
-export let version = childProcess.execSync('git describe --tags --match "v*"', { encoding:'utf-8' })
-version = version.substring(1).trim()
-version = version.replace('-', '-c')
-
-if (version.includes('-c')) {
-    version = semver.inc(version, 'prepatch').replace('-0', `-nightly.${process.env.REV ?? 0}`)
-}
+// Version: GlanceTerm owns it in app/package.json (single source of truth).
+// We deliberately do NOT derive it from `git describe` — this repo is a Tabby
+// fork and still carries upstream's old `v1.x` git tags, so describe would make
+// builds report 1.0.235 instead of GlanceTerm's own line. A CI/nightly build
+// stamps a prerelease suffix via REV (e.g. 0.1.0-nightly.42); a release build
+// leaves it clean (0.1.0). To bump the version, edit app/package.json.
+const baseVersion = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../app/package.json'), 'utf-8')).version
+export let version = process.env.REV ? `${baseVersion}-nightly.${process.env.REV}` : baseVersion
 
 export const builtinPlugins = [
     'tabby-core',
