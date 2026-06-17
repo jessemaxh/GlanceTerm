@@ -61,6 +61,12 @@ export class TabIdentityService {
      * triggered a recompute. Keyed on uuid.
      */
     private cwdSubs = new Map<string, Subscription>()
+    /** Lazily-resolved native process cwd, used when the shell never emitted an
+     *  OSC-7 cwd (common for agent tabs). Mirrors the sidebar TabMonitor's
+     *  getWorkingDirectory() fallback so the topic title is "<folder>@<machine>"
+     *  rather than falling back to the tab title ("<title>@<machine>"). */
+    private cwdFallback = new WeakMap<BaseTabComponent, string>()
+    private cwdResolving = new WeakSet<BaseTabComponent>()
 
     constructor (private app: AppService) {
         for (const tab of app.tabs) this.assign(tab)
@@ -180,7 +186,35 @@ export class TabIdentityService {
             const cwd = (leaf as unknown as { session?: { reportedCWD?: string } }).session?.reportedCWD
             if (cwd) return cwd
         }
+        // No OSC-7 cwd (agents frequently don't emit it) → fall back to the
+        // native process cwd, resolved lazily + cached so recompute() stays sync.
+        const cached = this.cwdFallback.get(tab)
+        if (cached) return cached
+        this.resolveNativeCwd(tab)
         return undefined
+    }
+
+    /** Resolve the leaf session's native working directory (async) and cache it,
+     *  then recompute so the title picks up the folder. Best-effort: failures
+     *  leave the title falling back to the tab name. */
+    private resolveNativeCwd (tab: BaseTabComponent): void {
+        if (this.cwdResolving.has(tab)) return
+        this.cwdResolving.add(tab)
+        void (async () => {
+            try {
+                for (const leaf of this.leavesOf(tab)) {
+                    const session = (leaf as unknown as { session?: { getWorkingDirectory?: () => Promise<string | null> } }).session
+                    const cwd = await session?.getWorkingDirectory?.()
+                    if (cwd) {
+                        this.cwdFallback.set(tab, cwd)
+                        this.recompute()
+                        return
+                    }
+                }
+            } catch { /* native cwd unavailable — keep falling back to the tab name */ } finally {
+                this.cwdResolving.delete(tab)
+            }
+        })()
     }
 
     private leavesOf (tab: BaseTabComponent): BaseTabComponent[] {
