@@ -114,9 +114,9 @@ export interface UsageSource {
 }
 
 /** Minimum gap between transcript reads per tab. Usage changes at most once
- *  per turn (seconds-to-minutes apart); 4 s keeps the sidebar fresh without
- *  re-statting a multi-MB file every 1.5 s poll. */
-const USAGE_READ_INTERVAL_MS = 4_000
+ *  per turn (seconds-to-minutes apart); 6 s keeps the sidebar fresh without
+ *  re-statting (and, for Gemini, re-parsing) the transcript every poll. */
+const USAGE_READ_INTERVAL_MS = 6_000
 
 @Injectable({ providedIn: 'root' })
 export class UsageTrackerService {

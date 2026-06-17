@@ -74,20 +74,27 @@ import { HookInstallerService } from './hook-installer.service'
 import { UsageTrackerService } from './usage-tracker.service'
 
 /** Poll cadence for process-tree scans. Hooks deliver state pushes; the poll
- * is only here to discover when an AI tool starts/stops in a tab. */
-const POLL_MS = 1500
+ * is only here to discover when an AI tool starts/stops in a tab. Status
+ * transitions are event-driven (HookWatcher.snapshots$ re-ticks immediately),
+ * so this cadence governs only process discovery / bg-child counting — neither
+ * sub-second-critical. Raised 1500→2500 to cut process-tree subprocess churn
+ * (~`ps -A` + per-tab `ps -p`/`pgrep -P`) by ~40% in every state; the ~1s
+ * slower brand-new-agent discovery is imperceptible because hook events drive
+ * the visible status. */
+const POLL_MS = 2500
 
 /** Max consecutive ticks the AI-tool detection hysteresis will hold a tab's
  *  last-known tool open while the process probe is in a total outage (can't
- *  confirm OR deny the agent's pid). ~3 ticks ≈ 4.5 s — long enough to ride
- *  out a transient `ps` storm, short enough that a genuinely-exited agent
- *  doesn't linger as "alive" for more than a few seconds. When the snapshot
+ *  confirm OR deny the agent's pid). ~3 ticks ≈ 7.5 s (at POLL_MS=2500) —
+ *  long enough to ride out a transient `ps` storm, short enough that a
+ *  genuinely-exited agent doesn't linger as "alive" for more than a few
+ *  seconds (and only on the rare total-`ps`-outage path). When the snapshot
  *  IS usable, liveness is checked directly and this grace doesn't apply. */
 const AI_DETECT_GRACE_MISSES = 3
 
 /** A direct child of the AI agent process is counted as a "background job"
  *  once it has survived at least this many ms — i.e. been observed across
- *  ≥ 2 polls (POLL_MS = 1500). Short-lived synchronous Bash invocations
+ *  ≥ 2 polls (POLL_MS = 2500). Short-lived synchronous Bash invocations
  *  (Claude calling `ls`, ripgrep, etc.) typically finish well under 1 s, so
  *  the persistence filter drops them while keeping long-running
  *  backgrounded shells (Claude's `run_in_background: true`, Codex equivalents).
@@ -429,9 +436,9 @@ export class TabMonitor implements OnDestroy {
      */
     private idleGateArmed = new WeakMap<BaseTabComponent, boolean>()
     /**
-     * Per-tab "re-tick at gate release" timer. POLL_MS is 1.5 s, so without
+     * Per-tab "re-tick at gate release" timer. POLL_MS is 2.5 s, so without
      * an explicit timer the user would see the rail dot stay on "working"
-     * for up to (3 s gate + 1.5 s poll = 4.5 s) instead of 3 s flat. The
+     * for up to (3 s gate + 2.5 s poll = 5.5 s) instead of 3 s flat. The
      * timer fires a single tick at the moment the gate is due to release;
      * the tick re-reads snap.eventAt and exposes idle if still stable.
      * Always reset, never accumulated — each new gate engagement replaces
@@ -459,7 +466,7 @@ export class TabMonitor implements OnDestroy {
      *
      * Why anchor to NOW and not snap.eventAt: the working-triggering hook
      * has already fired, so NOW under-reports by at most one poll interval
-     * (POLL_MS = 1.5 s) while snap.eventAt would over-report after a
+     * (POLL_MS = 2.5 s) while snap.eventAt would over-report after a
      * SessionStart-style event whose timestamp lives in the past. A
      * one-poll undercount is the gentler error.
      *
@@ -542,7 +549,7 @@ export class TabMonitor implements OnDestroy {
         // through AppService.tabsChanged$ (see app.service.ts addTabRaw + the
         // SplitTabComponent hookup). Without this the sidebar list only
         // refreshes on the next POLL_MS tick, so a fresh ⌘T sits invisible
-        // for up to 1.5 s and a closed tab lingers as a ghost row just as
+        // for up to 2.5 s and a closed tab lingers as a ghost row just as
         // long. One extra tick per tab event is cheap compared to that lag.
         this.app.tabsChanged$.subscribe(() => { void this.tick() })
     }

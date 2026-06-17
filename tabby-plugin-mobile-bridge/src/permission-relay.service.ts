@@ -1,4 +1,6 @@
 import { Injectable, OnDestroy } from '@angular/core'
+import { Subscription } from 'rxjs'
+import { distinctUntilChanged, map } from 'rxjs/operators'
 import * as fs from 'fs/promises'
 import * as fsSync from 'fs'
 import * as os from 'os'
@@ -71,6 +73,7 @@ export class PermissionRelayService implements OnDestroy {
 
     private watcher: fsSync.FSWatcher | null = null
     private pollHandle: ReturnType<typeof setInterval> | null = null
+    private bindingSub: Subscription | null = null
 
     // No in-memory `seen` Set — claim semantics live in the filesystem
     // via the `.req` → `.req.sent` rename in scanOnce(). Lost across
@@ -90,6 +93,7 @@ export class PermissionRelayService implements OnDestroy {
 
     ngOnDestroy (): void {
         this.watcher?.close()
+        this.bindingSub?.unsubscribe()
         if (this.pollHandle) clearInterval(this.pollHandle)
         for (const t of this.outboundTtls.values()) clearTimeout(t)
         this.outboundTtls.clear()
@@ -110,11 +114,11 @@ export class PermissionRelayService implements OnDestroy {
         await this.sweepStale()
         await this.scanOnce()  // pick up any .req that arrived BETWEEN sweep and watch attach
 
-        // fs.watch + 2 s safety-net poll. fs.watch is best-effort (drops
-        // events on NFS/SMB and occasionally on Linux per HookWatcher's
-        // own comments); the poll guarantees no .req sits unhandled
-        // longer than 2 s even when watch misses it. Cost is one readdir
-        // per 2 s — negligible.
+        // fs.watch is the primary, event-driven detector — always on, near-zero
+        // idle cost, no periodic change-detection wakeups. It's best-effort
+        // (drops events on NFS/SMB and occasionally on Linux per HookWatcher's
+        // own comments), so a 2 s safety-net poll guarantees no .req sits
+        // unhandled longer than 2 s even when watch misses it.
         try {
             this.watcher = fsSync.watch(PermissionRelayService.PERM_DIR, () => {
                 void this.scanOnce()
@@ -126,7 +130,30 @@ export class PermissionRelayService implements OnDestroy {
                 err instanceof Error ? err.message : String(err),
             )
         }
-        this.pollHandle = setInterval(() => void this.scanOnce(), 2_000)
+
+        // Gate the 2 s safety-net poll on there being ≥1 enabled binding.
+        // With no enabled binding there is nobody to relay a prompt to, so a
+        // perpetual 2 s timer is pure waste — and because every setInterval
+        // tick runs inside Angular's zone, it forces a full sidebar change
+        // detection every 2 s for nothing. fs.watch stays on regardless, so
+        // correctness (catching a .req the instant it lands once a binding IS
+        // enabled) is unaffected; this only removes the idle backstop churn.
+        this.bindingSub = this.store.bindings$
+            .pipe(
+                map(bindings => bindings.some(b => b.enabled)),
+                distinctUntilChanged(),
+            )
+            .subscribe(hasEnabled => this.setBackstopPoll(hasEnabled))
+    }
+
+    /** Start/stop the 2 s fs.watch safety-net poll. Idempotent. */
+    private setBackstopPoll (enabled: boolean): void {
+        if (enabled && !this.pollHandle) {
+            this.pollHandle = setInterval(() => void this.scanOnce(), 2_000)
+        } else if (!enabled && this.pollHandle) {
+            clearInterval(this.pollHandle)
+            this.pollHandle = null
+        }
     }
 
     /**

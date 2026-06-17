@@ -181,7 +181,7 @@ describe('UsageTrackerService.compute (Claude transcript)', () => {
 
         // Append a second turn; advance past the throttle so the next call reads.
         fs.appendFileSync(tx, asst(200, 75) + '\n')
-        vi.advanceTimersByTime(5_000)
+        vi.advanceTimersByTime(7_000)   // > USAGE_READ_INTERVAL_MS (6 s)
         // Only the NEW bytes are parsed and added — not a re-sum of the whole file.
         expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 125 })
     })
@@ -245,7 +245,7 @@ describe('UsageTrackerService.compute (Codex transcript)', () => {
         expect(await svc.compute(key, 'codex', tx)).toEqual({ inTok: 60, cacheReadTok: 40, outTok: 57 })
 
         fs.appendFileSync(tx, codexTokenCount(300, 75) + '\n')
-        vi.advanceTimersByTime(5_000)
+        vi.advanceTimersByTime(7_000)   // > USAGE_READ_INTERVAL_MS (6 s)
         expect(await svc.compute(key, 'codex', tx)).toEqual({ inTok: 260, cacheReadTok: 40, outTok: 82 })
     })
 
@@ -338,7 +338,7 @@ describe('UsageTrackerService.compute (opencode hook log)', () => {
         expect(await svc.compute(key, 'opencode', { tabId })).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50 })
 
         fs.appendFileSync(log, opencodeRecord(300, 75) + '\n')
-        vi.advanceTimersByTime(5_000)
+        vi.advanceTimersByTime(7_000)   // > USAGE_READ_INTERVAL_MS (6 s)
         expect(await svc.compute(key, 'opencode', { tabId })).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 75 })
     })
 })

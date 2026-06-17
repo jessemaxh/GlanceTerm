@@ -765,12 +765,28 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             box-shadow: 0 0 0 3px var(--gt-surface-1);
             transition: background-color 0.25s ease, box-shadow 0.25s ease;
         }
-        .dot[data-status="working"] {
-            background: var(--gt-working);
+        .dot[data-status="working"] { background: var(--gt-working); }
+        .dot[data-status="needs_permission"] { background: var(--gt-needsyou); }
+        /* The animated ripple/breathe lives on a ::after ring that animates
+           ONLY transform + opacity — compositor-only, no per-frame repaint
+           (animating box-shadow on the dot itself repainted every frame). The
+           dot keeps its static surface-1 box-shadow ring (the rail-line gap);
+           the ::after's own ring box-shadow is painted once and merely scaled,
+           so z-order vs the rail is unchanged. */
+        .dot[data-status="working"]::after,
+        .dot[data-status="needs_permission"]::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            border-radius: 99px;
+            pointer-events: none;
+        }
+        .dot[data-status="working"]::after {
+            box-shadow: 0 0 0 2px color-mix(in srgb, var(--gt-working) 55%, transparent);
             animation: ht-pulse 1.8s ease-out infinite;
         }
-        .dot[data-status="needs_permission"] {
-            background: var(--gt-needsyou);
+        .dot[data-status="needs_permission"]::after {
+            box-shadow: 0 0 0 2px color-mix(in srgb, var(--gt-needsyou) 55%, transparent);
             animation: ht-breathe 1.5s ease-in-out infinite;
         }
         .dot[data-status="done"] {
@@ -787,13 +803,13 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
            (ring / breathe); only working + needs-you animate so the list reads
            calm, not busy. */
         @keyframes ht-pulse {
-            0%   { box-shadow: 0 0 0 3px var(--gt-surface-1), 0 0 0 3px color-mix(in srgb, var(--gt-working) 55%, transparent); }
-            70%  { box-shadow: 0 0 0 3px var(--gt-surface-1), 0 0 0 8px rgba(76, 175, 80, 0); }
-            100% { box-shadow: 0 0 0 3px var(--gt-surface-1), 0 0 0 8px rgba(76, 175, 80, 0); }
+            0%   { transform: scale(1);   opacity: 0.85; }
+            70%  { transform: scale(2.6); opacity: 0; }
+            100% { transform: scale(2.6); opacity: 0; }
         }
         @keyframes ht-breathe {
-            0%, 100% { box-shadow: 0 0 0 3px var(--gt-surface-1), 0 0 0 2px color-mix(in srgb, var(--gt-needsyou) 60%, transparent); }
-            50%      { box-shadow: 0 0 0 3px var(--gt-surface-1), 0 0 0 5px color-mix(in srgb, var(--gt-needsyou) 22%, transparent); }
+            0%, 100% { transform: scale(1);   opacity: 0.9; }
+            50%      { transform: scale(1.6); opacity: 0.3; }
         }
 
         /* ---- body ---- */
@@ -1378,7 +1394,8 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
         }
 
         @media (prefers-reduced-motion: reduce) {
-            .dot[data-status="working"],
+            .dot[data-status="working"]::after,
+            .dot[data-status="needs_permission"]::after,
             .attn { animation: none !important; }
             .gt-switch, .gt-switch::after { transition: none !important; }
         }
@@ -1514,6 +1531,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     toggleHideTabsWithoutAgent (): void {
         this.config.store.ai.hideTabsWithoutAgent = !this.hideTabsWithoutAgent
         void this.config.save()
+        this.recomputeView()
     }
 
     /**
@@ -1775,6 +1793,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
                 this.recomputeSubordinates(s)
                 this.dropStalePins(s)
                 this.recomputeActiveIsAi()
+                this.recomputeView()
             })
         })
         // Tab switches don't change `states`, but they do change which row is
@@ -1783,6 +1802,11 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         // paths (focus restoration), so re-enter the zone to keep the
         // bindings reactive.
         this.activeTabSub = this.app.activeTabChange$.subscribe(() => {
+            // Only the toolbar's activeIsAi depends on the active tab. The
+            // memoized view-model does NOT: effStatus reads s.status + unread,
+            // and tab focus does NOT clear unread (clearing is engagement-based
+            // — input/scroll/click — and arrives via unread.count$). The
+            // per-row [class.active] highlight re-evaluates on this CD pass.
             this.zone.run(() => this.recomputeActiveIsAi())
         })
         // tabOpened$ fires for every restored tab during boot. Each event is
@@ -1802,13 +1826,16 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
             this.watchSplitTab(tab)
         }
         // Unread set membership is what derives the `done` display status from
-        // a raw `idle`. The monitor's 1.5 s poll would eventually re-render
-        // anyway, but a focus-clear should flip done → ready instantly — so
-        // we subscribe to unread.count$ and bounce a CD pass through the zone.
-        // The subject also fires when `markReady` adds a tab, giving us a
-        // working → done flip with no perceived lag.
+        // a raw `idle`. The monitor's poll would eventually re-render anyway,
+        // but a focus-clear should flip done → ready instantly — so we
+        // subscribe to unread.count$ and rebuild the memoized view-model (which
+        // also bounces a CD pass through the zone). The subject also fires when
+        // `markReady` adds a tab, giving us a working → done flip with no
+        // perceived lag. This is the dedicated unread-change channel, so it's
+        // the load-bearing recomputeView() trigger for effStatus's Done/Idle
+        // derivation — independent of states$ and activeTabChange$.
         this.unreadSub = this.unread.count$.subscribe(() => {
-            this.zone.run(() => { /* trigger CD */ })
+            this.zone.run(() => this.recomputeView())
         })
         this.recomputeActiveIsAi()
     }
@@ -1906,7 +1933,11 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      * the monitor. The monitor never produces `'done'` — it's derived from
      * raw `idle + isUnread`.
      */
-    get visibleStates (): TabState[] {
+    get visibleStates (): TabState[] { return this.vmVisibleStates }
+
+    /** Heavy computation behind {@link visibleStates}; invoked only from
+     *  {@link recomputeView}, never per change-detection pass. */
+    private computeVisibleStates (): TabState[] {
         // Slack-mode sort: rows always follow Tabby's tab-bar order. Status
         // (needs_permission, done, working) is conveyed by dot colour and
         // the per-row `data-status` attribute, never by position — spatial
@@ -2011,6 +2042,55 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      */
     private readonly subordinateInnerTabs = new Set<BaseTabComponent>()
 
+    /**
+     * Memoized view-model. The `visibleStates` / `countFor` / `count*` getters
+     * read THESE fields (O(1)) instead of recomputing O(N) work on every
+     * change-detection pass. This component is default CD (CheckAlways) in a
+     * zone-based app, so a full CD fires on every async event app-wide —
+     * including every IPC chunk of background-agent terminal output and every
+     * mobile-bridge callback. Re-running the un-memoized getters (visibleStates
+     * sorts + groups; four count filters; countFor ×10/pass) on each of those
+     * was a real renderer hot spot. Rebuilt once per inputs change via
+     * {@link recomputeView} — the same precompute-in-subscription pattern the
+     * engineering review already applied to {@link subordinateInnerTabs}.
+     * Inputs: states, filterMode, hideTabsWithoutAgent, pinnedInnerTabs, unread.
+     */
+    private vmVisibleStates: TabState[] = []
+    private vmCountAll = 0
+    private vmCountWorking = 0
+    private vmCountIdle = 0
+    private vmCountAttn = 0
+    private vmCountDone = 0
+
+    /**
+     * Rebuild the memoized view-model. Cheap; safe to over-call. Must run after
+     * `this.states` is assigned and after any pin/filter/unread input changes;
+     * wired into the states$ + activeTabChange$ subscriptions and the
+     * setFilter / toggleHideTabsWithoutAgent / togglePin handlers. A missed
+     * trigger self-heals on the next states$ emission (≤ POLL_MS), so the
+     * failure mode is a transiently-stale count, never a hard desync.
+     */
+    private recomputeView (): void {
+        this.vmVisibleStates = this.computeVisibleStates()
+        // Single pass for the status buckets — replaces four separate O(N)
+        // `states.filter(...)` getters that each ran per CD pass.
+        let working = 0, idle = 0, attn = 0, done = 0
+        for (const s of this.states) {
+            switch (this.effStatus(s)) {
+                case TabStatus.Working:         working++; break
+                case TabStatus.Idle:            idle++; break
+                case TabStatus.NeedsPermission: attn++; break
+                case TabStatus.Done:            done++; break
+                default: break
+            }
+        }
+        this.vmCountWorking = working
+        this.vmCountIdle = idle
+        this.vmCountAttn = attn
+        this.vmCountDone = done
+        this.vmCountAll = this.computeCountAll()
+    }
+
     private recomputeSubordinates (states: TabState[]): void {
         this.subordinateInnerTabs.clear()
         // Group by outer tab once.
@@ -2073,6 +2153,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     /** Set or toggle the filter. Clicking the active pill resets to All. */
     setFilter (id: FilterId): void {
         this.filterMode = this.filterMode === id && id !== FilterId.All ? FilterId.All : id
+        this.recomputeView()
     }
 
     /** Pill counter — `All` matches `visibleStates.length` exactly (every leaf
@@ -2086,26 +2167,35 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      *  that the pill number and the rendered row count never disagree, even
      *  when a passing SplitTab contributes a primary plus N subordinate rows. */
     countFor (id: FilterId): number {
-        if (id === FilterId.All) {
-            if (!this.hideTabsWithoutAgent) return this.states.length
-            // Single pass: group by outer tab, sum group.length for every
-            // group that passes the no_ai filter. Counting group.length
-            // (not 1) is what makes the pill match the actual visible leaf
-            // count when SplitTabs are involved.
-            const groups = new Map<BaseTabComponent, TabState[]>()
-            for (const s of this.states) {
-                const arr = groups.get(s.outerTab) ?? []
-                arr.push(s)
-                groups.set(s.outerTab, arr)
-            }
-            let n = 0
-            for (const group of groups.values()) {
-                const primary = this.pickPrimary(group)
-                if (this.groupPassesNoAiFilter(group, primary)) n += group.length
-            }
-            return n
+        switch (id) {
+            case FilterId.All:             return this.vmCountAll
+            case FilterId.Working:         return this.vmCountWorking
+            case FilterId.Idle:            return this.vmCountIdle
+            case FilterId.NeedsPermission: return this.vmCountAttn
+            case FilterId.Done:            return this.vmCountDone
+            default:                       return 0
         }
-        return this.states.filter(s => this.effStatus(s) === id).length
+    }
+
+    /** Heavy `All`-pill count (no_ai-filter aware); invoked only from
+     *  {@link recomputeView}. `All` matches the rendered leaf count exactly
+     *  (group.length per passing group, so a SplitTab's primary + N
+     *  subordinate rows are all counted) via the shared groupPassesNoAiFilter
+     *  predicate — same invariant as computeVisibleStates. */
+    private computeCountAll (): number {
+        if (!this.hideTabsWithoutAgent) return this.states.length
+        const groups = new Map<BaseTabComponent, TabState[]>()
+        for (const s of this.states) {
+            const arr = groups.get(s.outerTab) ?? []
+            arr.push(s)
+            groups.set(s.outerTab, arr)
+        }
+        let n = 0
+        for (const group of groups.values()) {
+            const primary = this.pickPrimary(group)
+            if (this.groupPassesNoAiFilter(group, primary)) n += group.length
+        }
+        return n
     }
 
     filterLabel (): string {
@@ -2118,21 +2208,10 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         }
     }
 
-    get countWorking (): number {
-        return this.states.filter(s => this.effStatus(s) === TabStatus.Working).length
-    }
-
-    get countIdle (): number {
-        return this.states.filter(s => this.effStatus(s) === TabStatus.Idle).length
-    }
-
-    get countAttn (): number {
-        return this.states.filter(s => this.effStatus(s) === TabStatus.NeedsPermission).length
-    }
-
-    get countDone (): number {
-        return this.states.filter(s => this.effStatus(s) === TabStatus.Done).length
-    }
+    get countWorking (): number { return this.vmCountWorking }
+    get countIdle (): number { return this.vmCountIdle }
+    get countAttn (): number { return this.vmCountAttn }
+    get countDone (): number { return this.vmCountDone }
 
     trackByTab = (_: number, s: TabState): any => s.innerTab
 
@@ -2393,6 +2472,9 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         } else {
             this.pinnedInnerTabs.add(s.innerTab)
         }
+        // Pin status feeds groupPassesNoAiFilter → the All-pill count and the
+        // visible list under "hide tabs without agent". Rebuild the view-model.
+        this.recomputeView()
     }
 
     async onContextMenu (s: TabState, ev: MouseEvent): Promise<void> {
