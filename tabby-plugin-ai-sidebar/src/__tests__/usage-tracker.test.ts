@@ -24,14 +24,14 @@ const codexTokenCount = (inT: number, outT: number) => JSON.stringify({
         info: {
             total_token_usage: {
                 input_tokens: inT,
-                cached_input_tokens: 9000,
+                cached_input_tokens: 40,
                 output_tokens: outT,
                 reasoning_output_tokens: 7,
                 total_tokens: inT + outT,
             },
             last_token_usage: {
                 input_tokens: inT,
-                cached_input_tokens: 9000,
+                cached_input_tokens: 40,
                 output_tokens: outT,
                 reasoning_output_tokens: 7,
                 total_tokens: inT + outT,
@@ -99,7 +99,8 @@ describe('latestCodexTokenUsage', () => {
             codexTokenCount(100, 50),
             codexTokenCount(300, 75),
         ].join('\n')
-        expect(latestCodexTokenUsage(text)).toEqual({ inTok: 300, outTok: 75 })
+        // in = input - cached (40); cache = cached; out = output + reasoning (7)
+        expect(latestCodexTokenUsage(text)).toEqual({ inTok: 260, cacheReadTok: 40, outTok: 82 })
     })
 
     it('skips malformed and non-token records', () => {
@@ -233,28 +234,28 @@ describe('UsageTrackerService.compute (Codex transcript)', () => {
     it('reads the latest token_count running total on first read', async () => {
         fs.writeFileSync(tx, [codexTokenCount(100, 50), codexTokenCount(300, 75)].join('\n') + '\n')
         const u = await new UsageTrackerService().compute({}, 'codex', tx)
-        expect(u).toEqual({ inTok: 300, outTok: 75 })
+        expect(u).toEqual({ inTok: 260, cacheReadTok: 40, outTok: 82 })
     })
 
     it('updates incrementally as the transcript grows', async () => {
         const svc = new UsageTrackerService()
         const key = {}
         fs.writeFileSync(tx, codexTokenCount(100, 50) + '\n')
-        expect(await svc.compute(key, 'codex', tx)).toEqual({ inTok: 100, outTok: 50 })
+        expect(await svc.compute(key, 'codex', tx)).toEqual({ inTok: 60, cacheReadTok: 40, outTok: 57 })
 
         fs.appendFileSync(tx, codexTokenCount(300, 75) + '\n')
         vi.advanceTimersByTime(5_000)
-        expect(await svc.compute(key, 'codex', tx)).toEqual({ inTok: 300, outTok: 75 })
+        expect(await svc.compute(key, 'codex', tx)).toEqual({ inTok: 260, cacheReadTok: 40, outTok: 82 })
     })
 
     it('does not re-read within the throttle window (returns the cached value)', async () => {
         const svc = new UsageTrackerService()
         const key = {}
         fs.writeFileSync(tx, codexTokenCount(100, 50) + '\n')
-        expect(await svc.compute(key, 'codex', tx)).toEqual({ inTok: 100, outTok: 50 })
+        expect(await svc.compute(key, 'codex', tx)).toEqual({ inTok: 60, cacheReadTok: 40, outTok: 57 })
 
         fs.appendFileSync(tx, codexTokenCount(999, 999) + '\n')
-        expect(await svc.compute(key, 'codex', tx)).toEqual({ inTok: 100, outTok: 50 })
+        expect(await svc.compute(key, 'codex', tx)).toEqual({ inTok: 60, cacheReadTok: 40, outTok: 57 })
     })
 })
 

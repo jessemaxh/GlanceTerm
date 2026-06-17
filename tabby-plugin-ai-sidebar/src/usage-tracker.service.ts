@@ -67,6 +67,10 @@ interface CodexUsageState {
     /** Next unread byte offset (advances only past complete lines). */
     offset: number
     inTok: number
+    /** Cumulative cached-input tokens (Codex's cache-read equivalent), tracked
+     *  apart from inTok like Claude's cacheReadTok so the sidebar shows it as its
+     *  own "cache" figure. */
+    cacheReadTok: number
     outTok: number
     /** Whether at least one token_count record has been observed. */
     seen: boolean
@@ -214,19 +218,19 @@ export class UsageTrackerService {
     private async computeCodex (
         key: object,
         path: string,
-    ): Promise<{ inTok: number; outTok: number } | null> {
+    ): Promise<{ inTok: number; cacheReadTok: number; outTok: number } | null> {
         let st = this.codex.get(key)
         const now = Date.now()
 
         // New tab, or the session's transcript changed → start fresh.
         if (!st || st.path !== path) {
-            st = { path, offset: 0, inTok: 0, outTok: 0, seen: false, lastReadAt: 0 }
+            st = { path, offset: 0, inTok: 0, cacheReadTok: 0, outTok: 0, seen: false, lastReadAt: 0 }
             this.codex.set(key, st)
         }
 
         // Throttle: return the last computed value between reads.
         if (now - st.lastReadAt < USAGE_READ_INTERVAL_MS) {
-            return st.seen ? { inTok: st.inTok, outTok: st.outTok } : null
+            return st.seen ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok } : null
         }
         st.lastReadAt = now
 
@@ -239,7 +243,7 @@ export class UsageTrackerService {
 
         // File shrank (truncated / replaced) → re-read from the top.
         if (size < st.offset) {
-            st.offset = 0; st.inTok = 0; st.outTok = 0; st.seen = false
+            st.offset = 0; st.inTok = 0; st.cacheReadTok = 0; st.outTok = 0; st.seen = false
         }
         if (size > st.offset) {
             try {
@@ -257,6 +261,7 @@ export class UsageTrackerService {
                         const latest = latestCodexTokenUsage(complete)
                         if (latest) {
                             st.inTok = latest.inTok
+                            st.cacheReadTok = latest.cacheReadTok
                             st.outTok = latest.outTok
                             st.seen = true
                         }
@@ -269,7 +274,7 @@ export class UsageTrackerService {
                 /* transient read error — keep prior totals, retry next interval */
             }
         }
-        return st.seen ? { inTok: st.inTok, outTok: st.outTok } : null
+        return st.seen ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok } : null
     }
 
     private async computeGemini (
@@ -419,8 +424,8 @@ export function sumClaudeAssistantUsage (text: string): { inTok: number; cacheRe
  * JSONL. Pure; exported for tests. Malformed lines and partial/non-token
  * records are skipped.
  */
-export function latestCodexTokenUsage (text: string): { inTok: number; outTok: number } | null {
-    let latest: { inTok: number; outTok: number } | null = null
+export function latestCodexTokenUsage (text: string): { inTok: number; cacheReadTok: number; outTok: number } | null {
+    let latest: { inTok: number; cacheReadTok: number; outTok: number } | null = null
     for (const line of text.split('\n')) {
         if (!line) continue
         if (!line.includes('"token_count"')) continue
@@ -431,7 +436,16 @@ export function latestCodexTokenUsage (text: string): { inTok: number; outTok: n
         const u = rec?.payload?.info?.total_token_usage
         if (!u) continue
         if (typeof u.input_tokens !== 'number' || typeof u.output_tokens !== 'number') continue
-        latest = { inTok: u.input_tokens, outTok: u.output_tokens }
+        // `input_tokens` INCLUDES the cached portion; split it out so `in` is the
+        // fresh input and `cache` is the cache-read (matches Claude + the Token
+        // Usage page). `output_tokens` excludes reasoning — fold it into `out`.
+        const cache = typeof u.cached_input_tokens === 'number' ? u.cached_input_tokens : 0
+        const reasoning = typeof u.reasoning_output_tokens === 'number' ? u.reasoning_output_tokens : 0
+        latest = {
+            inTok: Math.max(0, u.input_tokens - cache),
+            cacheReadTok: cache,
+            outTok: u.output_tokens + reasoning,
+        }
     }
     return latest
 }
