@@ -42,7 +42,7 @@ Adding a new agent means editing that file **and** adding a column here.
 | `idle` / "ready" state | ✅ | ✅ (Stop — verified e2e) | 🧪 (`AfterAgent`) | 🧪 (`session.idle`) |
 | `needs_permission` state | ✅ | 🧪 (PermissionRequest — fires only in interactive codex, not `exec`; untested e2e) | ❌ deferred (`Notification`/`ToolPermission` — matcher filtering unverified) | 🧪 (`permission.asked`) |
 | `done` (working → idle → unfocused) | ✅ | ✅ (derives from Stop — verified e2e) | 🧪 (depends on `AfterAgent`) | 🧪 (depends on `session.idle`) |
-| Subagent in-flight `· N agents` badge | ✅ | ❌ (side-channel is Claude-only by construction; Codex's hook payload carries no subagent id — see note) | ❌ adapter (not subscribed) | ❌ adapter (not surfaced) |
+| Subagent in-flight `· N agents` badge | ✅ (Task/Agent subagents only — Workflow-tool agents excluded, see note) | ❌ (side-channel is Claude-only by construction; Codex's hook payload carries no subagent id — see note) | ❌ adapter (not subscribed) | ❌ adapter (not surfaced) |
 | **Auto-approve** |||||
 | Shield button toggle (UI present) | ✅ | 🧪 (now active — auto-approves) | 🧪 (inert — auto-approve not possible) | 🧪 (inert — observe-only) |
 | Actually responds `allow` to permission prompts | ✅ | 🧪 (Codex added it in PR #17563 — same decision JSON as Claude, source-confirmed; untested e2e) | 🚫 (`Notification` is advisory — "cannot grant permissions automatically"; `BeforeTool` can only `deny`) | ❌ (observe-only; `permission.ask` interceptor exists but unused — flaky) |
@@ -123,6 +123,29 @@ field-name collision could have pinned a Codex row to a phantom
 `StopFailure` nor `SessionEnd`). The Codex `SubagentStop` subscription is inert
 dead weight as a result. When Codex's real subagent/bg signal is verified e2e,
 promote the gate to a per-adapter capability flag.
+
+**The `· N agents` badge counts `Task`/`Agent` subagents only — NOT
+Workflow-tool agents (known, by-design limitation).** The badge is driven by
+the authoritative spawn signal `PostToolUse(Agent/Task).spawn_agent_id` (add)
+paired with `SubagentStop`/`StopFailure` (remove). Agents spawned by the
+harness **`Workflow` tool** (the `agent()` calls inside a workflow script, the
+ones `/workflows` shows as `N/M agents done`) run **out-of-band in the workflow
+runtime**, not as Task subagents of the tab's Claude session. In the tab's hook
+log each workflow agent surfaces as **exactly one `SubagentStop`** — no
+`spawn_agent_id`, and none of its own in-flight `Pre/PostToolUse` events reach
+the tab (verified 2026-06-17: 117 of 131 stopped subagents in one workflow run
+had no spawn; a sampled workflow agent_id appeared once, only as `SubagentStop`).
+The `Workflow` tool's own `Pre/PostToolUse` both fire at launch (it returns a
+background task id immediately) and carry no agent count or run id. So the hook
+stream exposes **neither a start signal nor a total** for workflow agents — an
+accurate live count is not derivable from hooks, and re-enabling the old
+"passive liveness" add (bare `agent_id`) would not help, because no in-flight
+event with that id ever lands in the log. The only on-disk source of the real
+`N/M` is the harness-internal workflow journal under
+`~/.claude/projects/<proj>/<session>/workflows/`, which is uncontracted and
+version-fragile; deliberately NOT read. A workflow-running tab still shows
+`working` from the parent agent's own activity — only the per-agent count is
+absent.
 
 ### Gemini CLI — adapter shipped (`gemini.ts`), UNTESTED
 

@@ -1046,6 +1046,23 @@ export class HookWatcherService implements OnDestroy {
             // floor — that's how we ignore the phantom SubagentStops Claude Code
             // fires for subagents we never observed spawning.
             //
+            // KNOWN LIMITATION — harness `Workflow`-tool agents are NOT counted
+            // here, by design. The `agent()` calls inside a workflow script (the
+            // ones `/workflows` reports as `N/M agents done`) run out-of-band in
+            // the workflow runtime, not as Task subagents of this tab's session.
+            // In this tab's hook log each workflow agent surfaces as EXACTLY ONE
+            // `SubagentStop` — no `spawn_agent_id`, and none of its own in-flight
+            // Pre/PostToolUse events reach the log (verified 2026-06-17). The
+            // `Workflow` tool's own Pre/PostToolUse both fire at launch (it
+            // returns a background task id immediately) and carry no count/runId.
+            // So the hook stream has neither a start signal nor a total for them:
+            // an accurate live count is not derivable here, and re-enabling
+            // passive-add would NOT help (no in-flight event with that id ever
+            // arrives — only the terminal stop). Do not "fix" this by reading the
+            // harness-internal workflow journal; it's uncontracted and
+            // version-fragile. See docs/feature-matrix.md ("`· N agents` badge
+            // counts Task/Agent subagents only").
+            //
             // tool_name: Claude renamed the subagent-spawning tool from `Task`
             // to `Agent`; we accept both. The spawn signal is spawn_agent_id,
             // not the tool_name (which only gates which event we read it on).
