@@ -294,3 +294,48 @@ describe('TopicService.syncDeleteTopic', () => {
         expect(calls).toHaveLength(0)
     })
 })
+
+/**
+ * Dead-binding cleanup: topics stranded by a removed/re-paired binding are
+ * found via deadKeys() and deleted through a CURRENT binding (deleteDeadEntry)
+ * or just forgotten.
+ */
+describe('TopicService dead-binding cleanup', () => {
+    it('deadKeys returns only entries whose binding id is not live', async () => {
+        const svc = new TopicService(makeRegistry(makeBackendStub().backend))
+        bypassLoad(svc)
+        ;(svc as any).cache.set('deadbind-xyz|t1', { threadId: 'x', lastTitle: 'a', status: 'open' } as TopicEntry)
+        ;(svc as any).cache.set(KEY(IDENTITY.uuid), { threadId: 'y', lastTitle: 'b', status: 'open' } as TopicEntry)
+
+        const dead = await svc.deadKeys(new Set([BINDING.id]))
+
+        expect(dead.map(d => d.key)).toEqual(['deadbind-xyz|t1'])
+    })
+
+    it('deleteDeadEntry deletes via the target binding then drops the key', async () => {
+        const { backend, calls } = makeBackendStub()
+        ;(backend as any).deleteThread = (...args: unknown[]) => { calls.push({ method: 'deleteThread', args }); return Promise.resolve() }
+        const svc = new TopicService(makeRegistry(backend))
+        bypassLoad(svc)
+        ;(svc as any).cache.set('deadbind-xyz|t1', { threadId: 'x', lastTitle: 'a', status: 'open' } as TopicEntry)
+
+        await svc.deleteDeadEntry(BINDING, 'deadbind-xyz|t1')
+
+        const args = calls.find(c => c.method === 'deleteThread')?.args
+        expect(args?.[0]).toBe(BINDING.chatId)   // deletes via the TARGET binding's chat
+        expect(args?.[1]).toBe('x')              // the stranded topic's threadId
+        expect((svc as any).cache.has('deadbind-xyz|t1')).toBe(false)
+    })
+
+    it('forgetEntry drops the key without any platform call', async () => {
+        const { backend, calls } = makeBackendStub()
+        const svc = new TopicService(makeRegistry(backend))
+        bypassLoad(svc)
+        ;(svc as any).cache.set('deadbind-xyz|t1', { threadId: 'x', lastTitle: 'a', status: 'open' } as TopicEntry)
+
+        await svc.forgetEntry('deadbind-xyz|t1')
+
+        expect(calls).toHaveLength(0)
+        expect((svc as any).cache.has('deadbind-xyz|t1')).toBe(false)
+    })
+})

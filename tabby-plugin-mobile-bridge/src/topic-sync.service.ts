@@ -142,6 +142,42 @@ export class TopicSyncService implements OnDestroy {
                 console.warn(`[mobile-bridge:topic-sync] reconcile failed for ${binding.id}:`, err)
             }
         }
+        try {
+            await this.purgeDeadBindings(bindings)
+        } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn('[mobile-bridge:topic-sync] dead-binding purge failed:', err)
+        }
+    }
+
+    /**
+     * Clean up topics whose owning binding no longer exists — e.g. the bot was
+     * re-paired, minting a NEW binding id and stranding the old binding's topics
+     * (never reconciled again → they pile up in the chat). For each stranded
+     * entry pick a CURRENT binding to delete it through: prefer one with the same
+     * stored chatId (precise, safe across re-pairs into a different chat); else,
+     * when there is exactly ONE enabled binding, adopt into it (the unambiguous
+     * re-pair-in-place target — covers legacy entries that predate chatId). If
+     * neither holds we can't safely target the delete, so we just forget the
+     * entry (stop tracking) rather than risk deleting another chat's topic.
+     */
+    private async purgeDeadBindings (bindings: ChannelBinding[]): Promise<void> {
+        const enabled = bindings.filter(b => b.enabled)
+        const liveIds = new Set(bindings.map(b => b.id))
+        const dead = await this.topics.deadKeys(liveIds)
+        if (!dead.length) return
+        const sole = enabled.length === 1 ? enabled[0] : null
+        for (const { key, entry } of dead) {
+            const matchByChat = entry.chatId
+                ? enabled.find(b => b.platform === entry.platform && String(b.chatId) === String(entry.chatId))
+                : undefined
+            const target = matchByChat ?? sole
+            if (target) {
+                this.enqueue(target.id, `dead-delete:${key}`, () => this.topics.deleteDeadEntry(target, key))
+            } else {
+                this.enqueue(bindings[0]?.id ?? 'dead-purge', `dead-forget:${key}`, () => this.topics.forgetEntry(key))
+            }
+        }
     }
 
     private async reconcileBinding (binding: ChannelBinding, identities: TabIdentity[]): Promise<void> {

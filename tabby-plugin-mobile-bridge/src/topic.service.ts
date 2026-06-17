@@ -53,6 +53,13 @@ export interface TopicEntry {
     lastTitle: string
     status: 'open' | 'closed'
     closedAt?: number
+    /** Platform + chat this topic lives in. Recorded on create so that when the
+     *  owning binding is later removed (e.g. the bot is re-paired → new binding
+     *  id), the orphaned topic can be deleted through a CURRENT binding that
+     *  reaches the SAME chat — without this we can't safely target the delete.
+     *  Absent on entries created before this field existed (legacy). */
+    chatId?: string
+    platform?: string
 }
 
 /**
@@ -130,6 +137,8 @@ export class TopicService {
                     threadId,
                     lastTitle: name,
                     status: 'open',
+                    chatId: binding.chatId,
+                    platform: binding.platform,
                 })
                 this.scheduleSave()
                 return threadId
@@ -191,6 +200,48 @@ export class TopicService {
         return out
     }
 
+    /** Cache entries whose owning binding id is not in `liveBindingIds` — i.e.
+     *  topics stranded by a removed/re-paired binding. The caller decides how to
+     *  dispose of each (delete via a current binding, or just forget). */
+    async deadKeys (liveBindingIds: Set<string>): Promise<Array<{ key: string; entry: TopicEntry }>> {
+        await this.load()
+        const out: Array<{ key: string; entry: TopicEntry }> = []
+        for (const [k, v] of this.cache) {
+            if (!liveBindingIds.has(k.split('|')[0])) out.push({ key: k, entry: { ...v } })
+        }
+        return out
+    }
+
+    /** Delete a stranded topic through a CURRENT binding that reaches its chat,
+     *  then drop the cache entry. Mirrors syncDeleteTopic's degrade-to-close +
+     *  always-drop contract. The caller is responsible for only passing a target
+     *  that genuinely reaches this entry's chat (same chatId, or the sole binding). */
+    async deleteDeadEntry (target: ChannelBinding, key: string): Promise<void> {
+        await this.load()
+        const entry = this.cache.get(key)
+        if (!entry) return
+        const backend = this.backends.forPlatform(target.platform)
+        try {
+            if (backend.deleteThread) await backend.deleteThread(target.chatId, entry.threadId)
+            else await backend.closeThread(target.chatId, entry.threadId, entry.lastTitle)
+        } catch (err: unknown) {
+            const gone = err instanceof MessagingError && err.kind === 'thread_not_found'
+            if (!gone && backend.deleteThread) {
+                try { await backend.closeThread(target.chatId, entry.threadId, entry.lastTitle) } catch { /* best effort */ }
+            }
+        }
+        this.cache.delete(key)
+        this.scheduleSave()
+    }
+
+    /** Drop a cache entry without any platform call (used when no current binding
+     *  can safely reach a stranded topic — we stop tracking it; the platform-side
+     *  topic is left as-is rather than risk deleting the wrong chat's topic). */
+    async forgetEntry (key: string): Promise<void> {
+        await this.load()
+        if (this.cache.delete(key)) this.scheduleSave()
+    }
+
     async syncCreateTopic (binding: ChannelBinding, identity: TabIdentity): Promise<ThreadRef> {
         await this.load()
         const key = this.key(binding.id, identity.uuid)
@@ -208,6 +259,8 @@ export class TopicService {
                     threadId,
                     lastTitle: name,
                     status: 'open',
+                    chatId: binding.chatId,
+                    platform: binding.platform,
                 })
                 this.scheduleSave()
                 return threadId
