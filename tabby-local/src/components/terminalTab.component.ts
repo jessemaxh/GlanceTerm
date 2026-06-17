@@ -122,6 +122,13 @@ export class TerminalTabComponent extends BaseTerminalTabComponent<LocalProfile>
     }
 
     async canClose (): Promise<boolean> {
+        // GlanceTerm: an AI-agent tab almost always has a running child (the
+        // agent), so Tabby's per-tab "X is still running. Close?" fires on every
+        // quit and bombards the user (one dialog per tab). Default OFF; re-enable
+        // via the sidebar gear menu (ai.warnOnCloseRunning). See AiSidebarConfigProvider.
+        if (!this.config.store?.ai?.warnOnCloseRunning) {
+            return true
+        }
         const children = await this.session?.getChildProcesses()
         if (!children?.length) {
             return true

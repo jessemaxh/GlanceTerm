@@ -61,6 +61,13 @@ export class AiSidebarConfigProvider extends ConfigProvider {
             // without resume-by-id (Gemini) or before a session id is captured.
             // See AutoResumeService.buildResumeCommand.
             autoResumeSession: true,
+            // Warn ("X is still running. Close?") when closing a tab/quitting
+            // while a child process is running. Tabby defaults this ON, but a
+            // GlanceTerm tab almost always has a running child (the AI agent), so
+            // on quit it bombards the user with one dialog per tab. Default OFF
+            // here; flip ON in the gear menu to restore Tabby's per-tab warning.
+            // Read by the vendored tabby-local TerminalTabComponent.canClose().
+            warnOnCloseRunning: false,
             // NOTE: the re-runnable command per terminal is no longer stored
             // in config. It rides each tab's own Tabby recovery token
             // (TerminalTabComponent.glancetermResumeCommand) so two tabs

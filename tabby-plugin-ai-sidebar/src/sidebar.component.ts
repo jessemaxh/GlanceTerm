@@ -346,6 +346,13 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                         </div>
                         <input type="checkbox" class="gt-switch" [checked]="autoResumeAgents" (change)="toggleAutoResumeAgents()" aria-label="Resume agent sessions on restart"/>
                     </label>
+                    <label class="gt-setting-row">
+                        <div class="gt-setting-text">
+                            <div class="gt-setting-title">Warn when closing a tab with a running process</div>
+                            <div class="gt-setting-desc">Show the "… is still running. Close?" prompt on quit. Off by default — an AI-agent tab almost always has a process running, so it would otherwise prompt once per tab every time you quit. Turn on to restore the safety check.</div>
+                        </div>
+                        <input type="checkbox" class="gt-switch" [checked]="warnOnCloseRunning" (change)="toggleWarnOnCloseRunning()" aria-label="Warn when closing a tab with a running process"/>
+                    </label>
                     <div class="gt-setting-row gt-setting-row-action" (click)="openTokenStats()">
                         <div class="gt-setting-text">
                             <div class="gt-setting-title">Token usage</div>
@@ -1526,6 +1533,18 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      */
     toggleAutoResumeAgents (): void {
         this.config.store.ai.autoResumeAgents = !this.autoResumeAgents
+        void this.config.save()
+    }
+
+    /** Whether to show Tabby's "X is still running. Close?" prompt on quit.
+     *  Default false (read as `=== true`) — see AiSidebarConfigProvider and the
+     *  vendored TerminalTabComponent.canClose() that honours it. */
+    get warnOnCloseRunning (): boolean {
+        return this.config.store?.ai?.warnOnCloseRunning === true
+    }
+
+    toggleWarnOnCloseRunning (): void {
+        this.config.store.ai.warnOnCloseRunning = !this.warnOnCloseRunning
         void this.config.save()
     }
 
