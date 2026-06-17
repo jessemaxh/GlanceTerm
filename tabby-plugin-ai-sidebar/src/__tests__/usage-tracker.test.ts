@@ -116,16 +116,17 @@ describe('latestCodexTokenUsage', () => {
 describe('sumGeminiMessageUsage', () => {
     it('sums explicit Gemini input/output token fields', () => {
         const text = geminiChat('600336a0-b038-4cb7-8322-a418ebdc2ab5', [
-            geminiMessage(100, 50, 9000, 7),
+            geminiMessage(100, 50, 40, 7),   // input INCLUDES cached(40); thoughts(7) → out
             { type: 'user', content: 'hi' },
             geminiMessage(200, 75),
         ])
-        expect(sumGeminiMessageUsage(text)).toEqual({ inTok: 300, outTok: 125 })
+        // m1: in=100-40=60 cache=40 out=50+7=57 ; m2: in=200 cache=0 out=75
+        expect(sumGeminiMessageUsage(text)).toEqual({ inTok: 260, cacheReadTok: 40, outTok: 132 })
     })
 
     it('returns zero for malformed or token-less saved chats', () => {
-        expect(sumGeminiMessageUsage('{ not json')).toEqual({ inTok: 0, outTok: 0 })
-        expect(sumGeminiMessageUsage(JSON.stringify({ messages: [{ type: 'user' }] }))).toEqual({ inTok: 0, outTok: 0 })
+        expect(sumGeminiMessageUsage('{ not json')).toEqual({ inTok: 0, cacheReadTok: 0, outTok: 0 })
+        expect(sumGeminiMessageUsage(JSON.stringify({ messages: [{ type: 'user' }] }))).toEqual({ inTok: 0, cacheReadTok: 0, outTok: 0 })
     })
 })
 
@@ -136,7 +137,7 @@ describe('latestOpencodeTokenUsage', () => {
             opencodeRecord(100, 50),
             opencodeRecord(300, 75),
         ].join('\n')
-        expect(latestOpencodeTokenUsage(text)).toEqual({ inTok: 300, outTok: 75 })
+        expect(latestOpencodeTokenUsage(text)).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 75 })
     })
 
     it('skips malformed and non-opencode records', () => {
@@ -286,17 +287,17 @@ describe('UsageTrackerService.compute (Gemini saved chat)', () => {
     it('locates the saved chat by session id and sums message tokens', async () => {
         fs.writeFileSync(tx, geminiChat(sessionId, [geminiMessage(100, 50), geminiMessage(200, 75)]))
         const u = await new UsageTrackerService().compute({}, 'gemini', { sessionId })
-        expect(u).toEqual({ inTok: 300, outTok: 125 })
+        expect(u).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 125 })
     })
 
     it('returns cached Gemini usage inside the throttle window', async () => {
         const svc = new UsageTrackerService()
         const key = {}
         fs.writeFileSync(tx, geminiChat(sessionId, [geminiMessage(100, 50)]))
-        expect(await svc.compute(key, 'gemini', { sessionId })).toEqual({ inTok: 100, outTok: 50 })
+        expect(await svc.compute(key, 'gemini', { sessionId })).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50 })
 
         fs.writeFileSync(tx, geminiChat(sessionId, [geminiMessage(999, 999)]))
-        expect(await svc.compute(key, 'gemini', { sessionId })).toEqual({ inTok: 100, outTok: 50 })
+        expect(await svc.compute(key, 'gemini', { sessionId })).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50 })
     })
 })
 
@@ -327,17 +328,17 @@ describe('UsageTrackerService.compute (opencode hook log)', () => {
     it('reads the latest opencode token total from the hook log', async () => {
         fs.writeFileSync(log, [opencodeRecord(100, 50), opencodeRecord(300, 75)].join('\n') + '\n')
         const u = await new UsageTrackerService().compute({}, 'opencode', { tabId })
-        expect(u).toEqual({ inTok: 300, outTok: 75 })
+        expect(u).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 75 })
     })
 
     it('updates incrementally as the hook log grows', async () => {
         const svc = new UsageTrackerService()
         const key = {}
         fs.writeFileSync(log, opencodeRecord(100, 50) + '\n')
-        expect(await svc.compute(key, 'opencode', { tabId })).toEqual({ inTok: 100, outTok: 50 })
+        expect(await svc.compute(key, 'opencode', { tabId })).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50 })
 
         fs.appendFileSync(log, opencodeRecord(300, 75) + '\n')
         vi.advanceTimersByTime(5_000)
-        expect(await svc.compute(key, 'opencode', { tabId })).toEqual({ inTok: 300, outTok: 75 })
+        expect(await svc.compute(key, 'opencode', { tabId })).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 75 })
     })
 })

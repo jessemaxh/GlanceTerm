@@ -81,6 +81,9 @@ interface CodexUsageState {
 interface JsonUsageState {
     path: string
     inTok: number
+    /** Gemini cached-input tokens, tracked apart from inTok (Gemini's `input`
+     *  INCLUDES the cached portion) so the sidebar shows it as its own figure. */
+    cacheReadTok: number
     outTok: number
     seen: boolean
     size: number
@@ -96,6 +99,9 @@ interface LogUsageState {
     path: string
     offset: number
     inTok: number
+    /** opencode cache-read tokens (info.tokens.cache.read), when the adapter
+     *  reports them — its own figure like Claude/Codex. */
+    cacheReadTok: number
     outTok: number
     seen: boolean
     lastReadAt: number
@@ -280,19 +286,19 @@ export class UsageTrackerService {
     private async computeGemini (
         key: object,
         sessionId: string,
-    ): Promise<{ inTok: number; outTok: number } | null> {
+    ): Promise<{ inTok: number; cacheReadTok: number; outTok: number } | null> {
         let st = this.gemini.get(key)
         const now = Date.now()
 
         if (!st || st.sessionId !== sessionId) {
             const chatPath = await findGeminiChatPath(sessionId)
             if (!chatPath) return null
-            st = { sessionId, path: chatPath, inTok: 0, outTok: 0, seen: false, size: -1, mtimeMs: -1, lastReadAt: 0 }
+            st = { sessionId, path: chatPath, inTok: 0, cacheReadTok: 0, outTok: 0, seen: false, size: -1, mtimeMs: -1, lastReadAt: 0 }
             this.gemini.set(key, st)
         }
 
         if (now - st.lastReadAt < USAGE_READ_INTERVAL_MS) {
-            return st.seen ? { inTok: st.inTok, outTok: st.outTok } : null
+            return st.seen ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok } : null
         }
         st.lastReadAt = now
 
@@ -305,39 +311,40 @@ export class UsageTrackerService {
         }
 
         if (stat.size === st.size && stat.mtimeMs === st.mtimeMs) {
-            return st.seen ? { inTok: st.inTok, outTok: st.outTok } : null
+            return st.seen ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok } : null
         }
 
         try {
             const raw = await fs.readFile(st.path, 'utf8')
             const usage = sumGeminiMessageUsage(raw)
             st.inTok = usage.inTok
+            st.cacheReadTok = usage.cacheReadTok
             st.outTok = usage.outTok
-            st.seen = usage.inTok > 0 || usage.outTok > 0
+            st.seen = usage.inTok > 0 || usage.cacheReadTok > 0 || usage.outTok > 0
             st.size = stat.size
             st.mtimeMs = stat.mtimeMs
         } catch {
             /* Gemini may be rewriting the JSON; keep prior totals, retry later. */
         }
 
-        return st.seen ? { inTok: st.inTok, outTok: st.outTok } : null
+        return st.seen ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok } : null
     }
 
     private async computeOpencode (
         key: object,
         tabId: string,
-    ): Promise<{ inTok: number; outTok: number } | null> {
+    ): Promise<{ inTok: number; cacheReadTok: number; outTok: number } | null> {
         const logPath = path.join(homeDir(), '.glanceterm', 'hooks', `${tabId}.log`)
         let st = this.opencode.get(key)
         const now = Date.now()
 
         if (!st || st.path !== logPath) {
-            st = { path: logPath, offset: 0, inTok: 0, outTok: 0, seen: false, lastReadAt: 0 }
+            st = { path: logPath, offset: 0, inTok: 0, cacheReadTok: 0, outTok: 0, seen: false, lastReadAt: 0 }
             this.opencode.set(key, st)
         }
 
         if (now - st.lastReadAt < USAGE_READ_INTERVAL_MS) {
-            return st.seen ? { inTok: st.inTok, outTok: st.outTok } : null
+            return st.seen ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok } : null
         }
         st.lastReadAt = now
 
@@ -349,7 +356,7 @@ export class UsageTrackerService {
         }
 
         if (size < st.offset) {
-            st.offset = 0; st.inTok = 0; st.outTok = 0; st.seen = false
+            st.offset = 0; st.inTok = 0; st.cacheReadTok = 0; st.outTok = 0; st.seen = false
         }
         if (size > st.offset) {
             try {
@@ -365,6 +372,7 @@ export class UsageTrackerService {
                         const latest = latestOpencodeTokenUsage(complete)
                         if (latest) {
                             st.inTok = latest.inTok
+                            st.cacheReadTok = latest.cacheReadTok
                             st.outTok = latest.outTok
                             st.seen = true
                         }
@@ -378,7 +386,7 @@ export class UsageTrackerService {
             }
         }
 
-        return st.seen ? { inTok: st.inTok, outTok: st.outTok } : null
+        return st.seen ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok } : null
     }
 }
 
@@ -455,19 +463,25 @@ export function latestCodexTokenUsage (text: string): { inTok: number; cacheRead
  * saved JSON also carries `cached` and `thoughts`; those are kept separate by
  * Gemini, so the sidebar's in/out display follows the explicit in/out fields.
  */
-export function sumGeminiMessageUsage (text: string): { inTok: number; outTok: number } {
+export function sumGeminiMessageUsage (text: string): { inTok: number; cacheReadTok: number; outTok: number } {
     let parsed: any
-    try { parsed = JSON.parse(text) } catch { return { inTok: 0, outTok: 0 } }
+    try { parsed = JSON.parse(text) } catch { return { inTok: 0, cacheReadTok: 0, outTok: 0 } }
     const messages = Array.isArray(parsed?.messages) ? parsed.messages : []
-    let inTok = 0
-    let outTok = 0
+    let inTok = 0, cacheReadTok = 0, outTok = 0
     for (const msg of messages) {
         const t = msg?.tokens
         if (!t) continue
-        if (typeof t.input === 'number') inTok += t.input
+        // Gemini's `input` INCLUDES `cached` → split it out so `in` is fresh and
+        // `cache` is the cache-read (matches Claude/Codex + the Token Usage page);
+        // `thoughts` (reasoning) and `tool` are generated output → fold into `out`.
+        const cached = typeof t.cached === 'number' ? t.cached : 0
+        if (typeof t.input === 'number') inTok += Math.max(0, t.input - cached)
+        cacheReadTok += cached
         if (typeof t.output === 'number') outTok += t.output
+        if (typeof t.thoughts === 'number') outTok += t.thoughts
+        if (typeof t.tool === 'number') outTok += t.tool
     }
-    return { inTok, outTok }
+    return { inTok, cacheReadTok, outTok }
 }
 
 /**
@@ -475,8 +489,8 @@ export function sumGeminiMessageUsage (text: string): { inTok: number; outTok: n
  * hook log. The plugin writes running totals, so the latest complete record is
  * authoritative.
  */
-export function latestOpencodeTokenUsage (text: string): { inTok: number; outTok: number } | null {
-    let latest: { inTok: number; outTok: number } | null = null
+export function latestOpencodeTokenUsage (text: string): { inTok: number; cacheReadTok: number; outTok: number } | null {
+    let latest: { inTok: number; cacheReadTok: number; outTok: number } | null = null
     for (const line of text.split('\n')) {
         if (!line) continue
         if (!line.includes('"tokens_in"') && !line.includes('"tokens_out"')) continue
@@ -486,9 +500,11 @@ export function latestOpencodeTokenUsage (text: string): { inTok: number; outTok
         const inTok = typeof rec.tokens_in === 'number' ? rec.tokens_in : null
         const outTok = typeof rec.tokens_out === 'number' ? rec.tokens_out : null
         if (inTok === null && outTok === null) continue
+        const cacheTok = typeof rec.tokens_cache === 'number' ? rec.tokens_cache : null
         const prev = latest
         latest = {
             inTok: inTok !== null ? inTok : (prev ? prev.inTok : 0),
+            cacheReadTok: cacheTok !== null ? cacheTok : (prev ? prev.cacheReadTok : 0),
             outTok: outTok !== null ? outTok : (prev ? prev.outTok : 0),
         }
     }

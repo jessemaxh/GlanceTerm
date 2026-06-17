@@ -352,14 +352,15 @@ export function parseOpencodeChunk (text: string, prev: Totals): { perDay: PerDa
         try { rec = JSON.parse(line) } catch { continue }
         if (rec?.agent !== 'opencode') continue
         const cumIn = typeof rec.tokens_in === 'number' ? rec.tokens_in : cumul.inTok
+        const cumCache = typeof rec.tokens_cache === 'number' ? rec.tokens_cache : cumul.cacheTok
         const cumOut = typeof rec.tokens_out === 'number' ? rec.tokens_out : cumul.outTok
         // The opencode adapter writes `ts` as Unix SECONDS (a number), not an ISO
         // string — Date.parse(number) is NaN, which would dump all usage into the
         // undated bucket (excluded from every dated window). Handle the epoch.
         const ts = typeof rec.ts === 'number' ? rec.ts * 1000
             : Date.parse(rec.ts ?? rec.timestamp ?? rec.time ?? '')
-        addToDay(perDay, dayKey(ts), delta(cumIn, cumul.inTok), 0, delta(cumOut, cumul.outTok))
-        cumul.inTok = cumIn; cumul.outTok = cumOut
+        addToDay(perDay, dayKey(ts), delta(cumIn, cumul.inTok), delta(cumCache, cumul.cacheTok), delta(cumOut, cumul.outTok))
+        cumul.inTok = cumIn; cumul.cacheTok = cumCache; cumul.outTok = cumOut
         turns++
         if (ts > lastTs) lastTs = ts
     }

@@ -108,13 +108,15 @@ export const GlanceTerm = async () => {
     const messageTokens = new Map()
     let tokensIn = 0
     let tokensOut = 0
+    let tokensCache = 0
     const emit = (event) => {
         const rec = { tab_id: tabId, agent: "opencode", event: event, ts: Math.floor(Date.now() / 1000) }
         if (model) rec.model = model
         if (sessionId) rec.session_id = sessionId
-        if (tokensIn || tokensOut) {
+        if (tokensIn || tokensOut || tokensCache) {
             rec.tokens_in = tokensIn
             rec.tokens_out = tokensOut
+            if (tokensCache) rec.tokens_cache = tokensCache
         }
         try { appendFileSync(logPath, JSON.stringify(rec) + "\\n") } catch (e) {}
     }
@@ -144,13 +146,20 @@ export const GlanceTerm = async () => {
             if (info && info.role === "assistant" && info.tokens) {
                 const input = typeof info.tokens.input === "number" ? info.tokens.input : 0
                 const output = typeof info.tokens.output === "number" ? info.tokens.output : 0
+                // opencode also reports reasoning (generated → fold into out) and
+                // cache read (info.tokens.cache.read → its own figure, like Claude/
+                // Codex). Defensive: missing fields stay 0.
+                const reasoning = typeof info.tokens.reasoning === "number" ? info.tokens.reasoning : 0
+                const cacheRead = info.tokens.cache && typeof info.tokens.cache.read === "number" ? info.tokens.cache.read : 0
                 const messageId = info.id || info.messageID || info.messageId || "__latest__"
-                messageTokens.set(messageId, { input, output })
+                messageTokens.set(messageId, { input, output, reasoning, cacheRead })
                 tokensIn = 0
                 tokensOut = 0
+                tokensCache = 0
                 for (const usage of messageTokens.values()) {
                     tokensIn += usage.input || 0
-                    tokensOut += usage.output || 0
+                    tokensOut += (usage.output || 0) + (usage.reasoning || 0)
+                    tokensCache += usage.cacheRead || 0
                 }
                 if (working) emit("working")
             }
