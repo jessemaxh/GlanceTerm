@@ -69,6 +69,7 @@ const AGENT_LABEL: Record<string, string> = {
                 (click)="setView(v.k)">{{ v.label }}</button>
       </div>
 
+      <div class="gt-ts-scroll">
       <table class="gt-ts-table">
         <thead>
           <tr>
@@ -96,6 +97,7 @@ const AGENT_LABEL: Record<string, string> = {
           <tr *ngIf="rows.length===0"><td [attr.colspan]="view==='agent' ? 5 : 6" class="empty">{{ loading ? 'Scanning…' : 'No usage in this window.' }}</td></tr>
         </tbody>
       </table>
+      </div>
       <p class="gt-ts-note">opencode history is partial (only what's still in the hook logs). Totals survive <code>/clear</code> — each cleared session is summed back per project. No cost estimate (subscription/price changes).</p>
     </div>
     `,
@@ -114,8 +116,12 @@ const AGENT_LABEL: Record<string, string> = {
       .gt-ts-total .cache .v { color:#FFAA55; }
       .gt-ts-total .scope { margin-left:auto; opacity:.5; font-size:11px; }
       .gt-ts-views { margin:8px 0; }
+      /* Bounded, scrollable body so a long By-session list doesn't overflow the
+         modal (the component is the whole modal content, so ng-bootstrap's
+         scrollable option has no .modal-body to act on). */
+      .gt-ts-scroll { max-height: 55vh; overflow-y: auto; overflow-x: hidden; }
       .gt-ts-table { width:100%; border-collapse:collapse; font-family:ui-monospace,monospace; }
-      .gt-ts-table th { text-align:left; opacity:.55; font-weight:500; font-size:11px; padding:6px 8px; cursor:pointer; user-select:none; border-bottom:1px solid rgba(255,255,255,.08); }
+      .gt-ts-table th { text-align:left; opacity:.55; font-weight:500; font-size:11px; padding:6px 8px; cursor:pointer; user-select:none; border-bottom:1px solid rgba(255,255,255,.08); position:sticky; top:0; background:#1c1f23; z-index:1; }
       .gt-ts-table th.num, .gt-ts-table td.num { text-align:right; }
       .gt-ts-table td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.04); }
       .gt-ts-table td.cache { color:#FFAA55; }
