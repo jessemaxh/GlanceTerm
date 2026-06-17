@@ -14,8 +14,9 @@ import { ReplayHarness, TraceEvent } from './harness'
  *        own ENOENT cleanup never fires).
  *   M1 — clearSideChannel() drops the session-scoped counters for one tab while
  *        keeping its snapshot/offset, for the no_ai (crashed-but-open) case.
- *   M2 — a fresh SessionStart must not inherit the previous session's sticky
- *        model slug.
+ *   M2 — the sticky model slug survives a model-less resume/compact SessionStart
+ *        (Claude only emits `model` on startup/compact; resume carries none),
+ *        and resets only on a genuinely fresh `startup`.
  */
 
 const ev = (over: Partial<TraceEvent>): TraceEvent => ({
@@ -98,29 +99,46 @@ describe('M1: clearSideChannel drops counters but keeps the snapshot', () => {
     })
 })
 
-describe('M2: sticky model resets on a fresh SessionStart', () => {
-    it('a model-less SessionStart drops the prior session\'s slug', () => {
+describe('M2: sticky model survives resume/compact, resets only on a fresh startup', () => {
+    it('a model-less RESUME SessionStart KEEPS the prior slug (regression: chip vanished after resume)', () => {
         const h = new ReplayHarness()
-        h.process(ev({ tab_id: 'tab', event: 'SessionStart', model: 'claude-opus-4-8' }))
+        h.process(ev({ tab_id: 'tab', event: 'SessionStart', source: 'startup', model: 'claude-opus-4-8' }))
+        expect(h.getStatus('tab')?.model).toBe('claude-opus-4-8')
+        // Claude sends model='' on a source:resume SessionStart — it must NOT
+        // wipe the slug (this is the bug that made the model chip disappear).
+        h.process(ev({ tab_id: 'tab', event: 'SessionStart', source: 'resume', ts: 2000 }))
+        expect(h.getStatus('tab')?.model).toBe('claude-opus-4-8')
+    })
+
+    it('a model-less COMPACT SessionStart keeps the slug', () => {
+        const h = new ReplayHarness()
+        h.process(ev({ tab_id: 'tab', event: 'SessionStart', source: 'startup', model: 'claude-opus-4-8' }))
+        h.process(ev({ tab_id: 'tab', event: 'SessionStart', source: 'compact', ts: 2000 }))
+        expect(h.getStatus('tab')?.model).toBe('claude-opus-4-8')
+    })
+
+    it('a model-less fresh STARTUP drops the prior slug (stale-slug guard for a reused tab)', () => {
+        const h = new ReplayHarness()
+        h.process(ev({ tab_id: 'tab', event: 'SessionStart', source: 'startup', model: 'claude-opus-4-8' }))
         expect(h.getStatus('tab')?.model).toBe('claude-opus-4-8')
         // Mid-session model-less events keep it sticky.
         h.process(ev({ tab_id: 'tab', event: 'PostToolUse', tool_name: 'Bash', ts: 1001 }))
         expect(h.getStatus('tab')?.model).toBe('claude-opus-4-8')
-        // A NEW session with no model must NOT inherit the old slug.
-        h.process(ev({ tab_id: 'tab', event: 'SessionStart', ts: 2000 }))
+        // A brand-new startup with no model must NOT inherit the old slug.
+        h.process(ev({ tab_id: 'tab', event: 'SessionStart', source: 'startup', ts: 2000 }))
         expect(h.getStatus('tab')?.model ?? null).toBeNull()
     })
 
     it('a SessionStart WITH a model replaces the prior one', () => {
         const h = new ReplayHarness()
-        h.process(ev({ tab_id: 'tab', event: 'SessionStart', model: 'claude-opus-4-8' }))
-        h.process(ev({ tab_id: 'tab', event: 'SessionStart', model: 'claude-sonnet-4-6', ts: 2000 }))
+        h.process(ev({ tab_id: 'tab', event: 'SessionStart', source: 'startup', model: 'claude-opus-4-8' }))
+        h.process(ev({ tab_id: 'tab', event: 'SessionStart', source: 'startup', model: 'claude-sonnet-4-6', ts: 2000 }))
         expect(h.getStatus('tab')?.model).toBe('claude-sonnet-4-6')
     })
 
     it('mid-session model-less events still keep the slug sticky (non-SessionStart)', () => {
         const h = new ReplayHarness()
-        h.process(ev({ tab_id: 'tab', event: 'SessionStart', model: 'claude-opus-4-8' }))
+        h.process(ev({ tab_id: 'tab', event: 'SessionStart', source: 'startup', model: 'claude-opus-4-8' }))
         h.process(ev({ tab_id: 'tab', event: 'PreToolUse', tool_name: 'Bash', ts: 1001 }))
         h.process(ev({ tab_id: 'tab', event: 'PostToolUse', tool_name: 'Bash', ts: 1002 }))
         expect(h.getStatus('tab')?.model).toBe('claude-opus-4-8')

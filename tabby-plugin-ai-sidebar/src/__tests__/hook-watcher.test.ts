@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 
 import {
     reduceSubagentSet,
+    stickyModel,
     SubagentEvent,
 } from '../hook-watcher.service'
 
@@ -12,6 +13,32 @@ import {
 function run (events: SubagentEvent[]): ReadonlySet<string> {
     return events.reduce<ReadonlySet<string>>(reduceSubagentSet, new Set())
 }
+
+describe('stickyModel', () => {
+    it('takes a non-empty incoming model (Claude SessionStart slug)', () => {
+        expect(stickyModel('SessionStart', 'startup', 'claude-opus-4-8', null)).toBe('claude-opus-4-8')
+    })
+    it('keeps the sticky model on a model-less RESUME SessionStart (the bug fix)', () => {
+        // Claude sends model='' on source:resume — must NOT wipe the chip.
+        expect(stickyModel('SessionStart', 'resume', '', 'claude-opus-4-8')).toBe('claude-opus-4-8')
+    })
+    it('keeps the sticky model on a model-less COMPACT SessionStart', () => {
+        expect(stickyModel('SessionStart', 'compact', '', 'claude-opus-4-8')).toBe('claude-opus-4-8')
+    })
+    it('keeps the sticky across the flood of model-less non-SessionStart events', () => {
+        expect(stickyModel('PostToolUse', undefined, '', 'claude-opus-4-8')).toBe('claude-opus-4-8')
+        expect(stickyModel('Stop', undefined, undefined, 'claude-opus-4-8')).toBe('claude-opus-4-8')
+    })
+    it('resets to null ONLY on a fresh model-less startup (stale-slug guard)', () => {
+        expect(stickyModel('SessionStart', 'startup', '', 'gpt-5.5')).toBe(null)
+    })
+    it('a real startup re-sends its own model, overriding any stale sticky', () => {
+        expect(stickyModel('SessionStart', 'startup', 'gpt-5.5', 'claude-opus-4-8')).toBe('gpt-5.5')
+    })
+    it('null prev + model-less continuation stays null', () => {
+        expect(stickyModel('PreToolUse', undefined, '', null)).toBe(null)
+    })
+})
 
 describe('reduceSubagentSet', () => {
     describe('spawn', () => {

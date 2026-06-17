@@ -279,6 +279,31 @@ export function reduceSubagentSet (
 }
 
 /**
+ * Resolve the per-tab "active model" slug for the snapshot, stickily.
+ *
+ * Claude emits `model` ONLY on its one-shot SessionStart, and a
+ * `source: resume` SessionStart carries an EMPTY model (verified: resume→'',
+ * startup/compact→slug). So we keep the last non-empty slug across the flood of
+ * model-less PreToolUse/PostToolUse/Stop events. The ONLY case we deliberately
+ * drop the sticky is a genuinely fresh `startup` with no model — a tab reused
+ * by a brand-new session must not inherit the prior agent's slug. (A real
+ * `startup` always re-sends its own model, so that drop is just a stale-slug
+ * guard.) resume / compact / clear are continuations and keep the sticky —
+ * treating their model-less SessionStart as a reset is what made the model chip
+ * vanish after a resume / auto-resume / compaction. Pure for unit testing.
+ */
+export function stickyModel (
+    event: string | undefined,
+    source: string | undefined,
+    incoming: string | null | undefined,
+    prev: string | null | undefined,
+): string | null {
+    if (incoming) return incoming
+    if (event === 'SessionStart' && source === 'startup') return null
+    return prev ?? null
+}
+
+/**
  * Watches `~/.glanceterm/hooks/` and exposes the latest status per tab id.
  *
  * IPC format: handler scripts APPEND one NDJSON record per event to a per-tab
@@ -1283,12 +1308,17 @@ export class HookWatcherService implements OnDestroy {
             cwd: parsed.cwd || null,
             transcriptPath: parsed.transcript_path || null,
             // Sticky: keep the last non-empty model so Claude's one-shot
-            // SessionStart slug survives later model-less events — EXCEPT on a
-            // fresh SessionStart, which begins a new session and must NOT
-            // inherit the prior session's slug. A model-less SessionStart drops
-            // the sticky to null rather than carrying a stale model forward
-            // (same tab, reused after the prior agent exited).
-            model: parsed.model || (parsed.event === 'SessionStart' ? null : prev?.model ?? null),
+            // SessionStart slug survives later model-less events. Claude emits
+            // `model` ONLY on SessionStart, and a `source: resume` SessionStart
+            // carries an EMPTY model (verified: resume→'', startup/compact→slug).
+            // So a model-less SessionStart must NOT be treated as "drop the
+            // slug" — doing so wiped the model on every resume / auto-resume,
+            // which is why the chip vanished after a session resumed or
+            // compacted. Reset to null ONLY on a genuinely fresh `startup`
+            // (which always re-sends its own model anyway, so this branch just
+            // clears a stale slug from a tab reused by a brand-new session).
+            // resume / compact / clear keep the sticky. See {@link stickyModel}.
+            model: stickyModel(parsed.event, parsed.source, parsed.model, prev?.model),
         })
         // Unified debug log: one concise line per status-changing event, plus a
         // renderer-side mirror of auto-approve grants (the handler also writes
