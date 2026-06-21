@@ -57,6 +57,17 @@ interface ClaudeUsageState {
      *  sumClaudeAssistantUsage for why. */
     cacheReadTok: number
     outTok: number
+    /** Last non-empty `message.model` seen in the transcript. Claude's hook
+     *  events carry the model ONLY on a `startup`/`compact` SessionStart — a
+     *  `resume` SessionStart sends an empty model — so a resumed tab never gets
+     *  the model via hooks. The transcript records it on every assistant message,
+     *  so we surface it here as the fallback that keeps the model chip alive
+     *  across resume / auto-resume. Sticky (kept across model-less chunks).
+     *  NOTE: tab-monitor uses this ONLY when the hook snapshot's model is empty
+     *  (`model = snap.model || usage.model`), so on a live tab whose SessionStart
+     *  model is present it does NOT override that — a mid-session `/model` switch
+     *  is therefore reflected after a resume, not on the still-running tab. */
+    model: string | null
     /** ms of the last read — throttle gate. */
     lastReadAt: number
 }
@@ -92,6 +103,11 @@ interface JsonUsageState {
 }
 
 interface GeminiUsageState extends JsonUsageState {
+    /** Last `messages[].model` seen in the saved chat. Gemini's hooks never
+     *  carry the model (it's nested under `llm_request` on an event we don't
+     *  subscribe to — see feature-matrix), so the chat file is the ONLY source.
+     *  Sticky; tracks a `/model` switch. */
+    model: string | null
     sessionId: string
 }
 
@@ -134,7 +150,7 @@ export class UsageTrackerService {
         key: object,
         tool: AiTool | null,
         source: string | null | UsageSource,
-    ): Promise<{ inTok: number; outTok: number; cacheReadTok?: number } | null> {
+    ): Promise<{ inTok: number; outTok: number; cacheReadTok?: number; model?: string | null } | null> {
         const src = normalizeUsageSource(source)
         if (tool === 'claude' && src.transcriptPath) {
             return this.computeClaude(key, src.transcriptPath)
@@ -163,20 +179,20 @@ export class UsageTrackerService {
     private async computeClaude (
         key: object,
         path: string,
-    ): Promise<{ inTok: number; cacheReadTok: number; outTok: number } | null> {
+    ): Promise<{ inTok: number; cacheReadTok: number; outTok: number; model: string | null } | null> {
         let st = this.claude.get(key)
         const now = Date.now()
 
         // New tab, or the session's transcript changed → start fresh.
         if (!st || st.path !== path) {
-            st = { path, offset: 0, inTok: 0, cacheReadTok: 0, outTok: 0, lastReadAt: 0 }
+            st = { path, offset: 0, inTok: 0, cacheReadTok: 0, outTok: 0, model: null, lastReadAt: 0 }
             this.claude.set(key, st)
         }
 
         // Throttle: return the last computed value between reads.
         if (now - st.lastReadAt < USAGE_READ_INTERVAL_MS) {
             return st.offset > 0 || st.lastReadAt > 0
-                ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok }
+                ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok, model: st.model }
                 : null
         }
         st.lastReadAt = now
@@ -188,9 +204,11 @@ export class UsageTrackerService {
             return null   // transcript not present (yet)
         }
 
-        // File shrank (truncated / replaced) → re-read from the top.
+        // File shrank (truncated / replaced) → re-read from the top. Reset the
+        // model too: a replaced transcript may belong to a different model, and
+        // the re-read below restores it from the new content.
         if (size < st.offset) {
-            st.offset = 0; st.inTok = 0; st.cacheReadTok = 0; st.outTok = 0
+            st.offset = 0; st.inTok = 0; st.cacheReadTok = 0; st.outTok = 0; st.model = null
         }
         if (size > st.offset) {
             try {
@@ -209,6 +227,10 @@ export class UsageTrackerService {
                         st.inTok += delta.inTok
                         st.cacheReadTok += delta.cacheReadTok
                         st.outTok += delta.outTok
+                        // Model rides the same assistant records we just summed
+                        // (one pass). Keep the prior value if this chunk had no
+                        // assistant line so the chip never blanks mid-session.
+                        if (delta.model) st.model = delta.model
                         st.offset += Buffer.byteLength(text.slice(0, lastNl + 1), 'utf8')
                     }
                 } finally {
@@ -218,13 +240,21 @@ export class UsageTrackerService {
                 /* transient read error — keep prior sums, retry next interval */
             }
         }
-        return { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok }
+        return { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok, model: st.model }
     }
 
     private async computeCodex (
         key: object,
         path: string,
     ): Promise<{ inTok: number; cacheReadTok: number; outTok: number } | null> {
+        // NOTE: no transcript model fallback here, unlike Claude/Gemini. Codex
+        // stamps `.model` on every hook event (including its own SessionStart),
+        // so the hook snapshot always carries it whenever a snapshot exists — and
+        // tab-monitor only calls compute() WHEN a snapshot exists. A rollout
+        // fallback would be dead code (it could only fire if a Codex snapshot had
+        // an empty model, which never happens). The only blank-model case — a
+        // resumed Codex tab with zero hook events yet — has no snapshot, so
+        // compute() isn't called and there's no transcript path to read anyway.
         let st = this.codex.get(key)
         const now = Date.now()
 
@@ -286,19 +316,19 @@ export class UsageTrackerService {
     private async computeGemini (
         key: object,
         sessionId: string,
-    ): Promise<{ inTok: number; cacheReadTok: number; outTok: number } | null> {
+    ): Promise<{ inTok: number; cacheReadTok: number; outTok: number; model: string | null } | null> {
         let st = this.gemini.get(key)
         const now = Date.now()
 
         if (!st || st.sessionId !== sessionId) {
             const chatPath = await findGeminiChatPath(sessionId)
             if (!chatPath) return null
-            st = { sessionId, path: chatPath, inTok: 0, cacheReadTok: 0, outTok: 0, seen: false, size: -1, mtimeMs: -1, lastReadAt: 0 }
+            st = { sessionId, path: chatPath, inTok: 0, cacheReadTok: 0, outTok: 0, model: null, seen: false, size: -1, mtimeMs: -1, lastReadAt: 0 }
             this.gemini.set(key, st)
         }
 
         if (now - st.lastReadAt < USAGE_READ_INTERVAL_MS) {
-            return st.seen ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok } : null
+            return (st.seen || st.model) ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok, model: st.model } : null
         }
         st.lastReadAt = now
 
@@ -311,23 +341,29 @@ export class UsageTrackerService {
         }
 
         if (stat.size === st.size && stat.mtimeMs === st.mtimeMs) {
-            return st.seen ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok } : null
+            return (st.seen || st.model) ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok, model: st.model } : null
         }
 
         try {
             const raw = await fs.readFile(st.path, 'utf8')
+            // One JSON.parse / one message loop yields both tokens and model.
             const usage = sumGeminiMessageUsage(raw)
             st.inTok = usage.inTok
             st.cacheReadTok = usage.cacheReadTok
             st.outTok = usage.outTok
             st.seen = usage.inTok > 0 || usage.cacheReadTok > 0 || usage.outTok > 0
+            // Whole-file read → the parse result IS the complete truth, so assign
+            // (not "keep prior if non-null"): if a rewrite drops the model, the
+            // chip clears rather than showing a slug no longer in the file. Unlike
+            // the incremental Claude reader, there's no earlier chunk to preserve.
+            st.model = usage.model
             st.size = stat.size
             st.mtimeMs = stat.mtimeMs
         } catch {
             /* Gemini may be rewriting the JSON; keep prior totals, retry later. */
         }
 
-        return st.seen ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok } : null
+        return (st.seen || st.model) ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok, model: st.model } : null
     }
 
     private async computeOpencode (
@@ -395,20 +431,29 @@ export class UsageTrackerService {
  * Claude transcript NDJSON, into three buckets: `inTok` (`input_tokens` +
  * `cache_creation_input_tokens`), `cacheReadTok` (`cache_read_input_tokens`,
  * kept apart — see UsageTrackerService doc), and `outTok` (`output_tokens`).
- * Pure; exported for tests. Non-assistant lines, malformed lines, and missing
- * usage are skipped.
+ * Also returns `model` — the newest `message.model` across the assistant records
+ * in the chunk (last-wins; the `<synthetic>` sentinel and empty values skipped),
+ * captured in the SAME pass since it rides the same record as `usage`. Claude's
+ * hooks carry the model only on a `startup`/`compact` SessionStart (a `resume`
+ * one sends an empty model), so this is the source that keeps the chip alive
+ * across resume. Pure; exported for tests. Non-assistant / malformed / usage-less
+ * lines are skipped.
  */
-export function sumClaudeAssistantUsage (text: string): { inTok: number; cacheReadTok: number; outTok: number } {
+export function sumClaudeAssistantUsage (text: string): { inTok: number; cacheReadTok: number; outTok: number; model: string | null } {
     let inTok = 0
     let cacheReadTok = 0
     let outTok = 0
+    let model: string | null = null
     for (const line of text.split('\n')) {
         if (!line) continue
         // Cheap pre-filter to skip the many non-assistant lines without a parse.
+        // Assistant records carry both `usage` and `model`, so one filter serves both.
         if (!line.includes('"usage"')) continue
         let rec: any
         try { rec = JSON.parse(line) } catch { continue }
         if (rec?.type !== 'assistant') continue
+        const mdl = rec?.message?.model
+        if (typeof mdl === 'string' && mdl && mdl !== '<synthetic>') model = mdl
         const u = rec?.message?.usage
         if (!u) continue
         // `inTok` = the input the model actually had to PROCESS as new content
@@ -424,13 +469,14 @@ export function sumClaudeAssistantUsage (text: string): { inTok: number; cacheRe
         if (typeof u.cache_read_input_tokens === 'number') cacheReadTok += u.cache_read_input_tokens
         if (typeof u.output_tokens === 'number') outTok += u.output_tokens
     }
-    return { inTok, cacheReadTok, outTok }
+    return { inTok, cacheReadTok, outTok, model }
 }
 
 /**
  * Return the newest Codex `token_count` running total in a chunk of rollout
- * JSONL. Pure; exported for tests. Malformed lines and partial/non-token
- * records are skipped.
+ * JSONL, or null if none. Pure; exported for tests. Malformed lines and
+ * partial/non-token records are skipped. (No model is read here — see
+ * computeCodex for why the rollout model would be dead code.)
  */
 export function latestCodexTokenUsage (text: string): { inTok: number; cacheReadTok: number; outTok: number } | null {
     let latest: { inTok: number; cacheReadTok: number; outTok: number } | null = null
@@ -439,8 +485,7 @@ export function latestCodexTokenUsage (text: string): { inTok: number; cacheRead
         if (!line.includes('"token_count"')) continue
         let rec: any
         try { rec = JSON.parse(line) } catch { continue }
-        if (rec?.type !== 'event_msg') continue
-        if (rec?.payload?.type !== 'token_count') continue
+        if (rec?.type !== 'event_msg' || rec?.payload?.type !== 'token_count') continue
         const u = rec?.payload?.info?.total_token_usage
         if (!u) continue
         if (typeof u.input_tokens !== 'number' || typeof u.output_tokens !== 'number') continue
@@ -459,16 +504,22 @@ export function latestCodexTokenUsage (text: string): { inTok: number; cacheRead
 }
 
 /**
- * Sum Gemini CLI saved-chat `message.tokens.{input,output}` values. Gemini's
- * saved JSON also carries `cached` and `thoughts`; those are kept separate by
- * Gemini, so the sidebar's in/out display follows the explicit in/out fields.
+ * Sum Gemini CLI saved-chat `message.tokens.{input,output}` values and return
+ * the newest `messages[].model` (last-wins) in the SAME pass. Gemini's hooks
+ * never carry the model (it's nested under `llm_request` on an unsubscribed
+ * event — see feature-matrix), so the saved chat is the ONLY model source, which
+ * means `/model` IS tracked here. Gemini's saved JSON also carries `cached` and
+ * `thoughts`; those are kept separate by Gemini, so the sidebar's in/out display
+ * follows the explicit in/out fields.
  */
-export function sumGeminiMessageUsage (text: string): { inTok: number; cacheReadTok: number; outTok: number } {
+export function sumGeminiMessageUsage (text: string): { inTok: number; cacheReadTok: number; outTok: number; model: string | null } {
     let parsed: any
-    try { parsed = JSON.parse(text) } catch { return { inTok: 0, cacheReadTok: 0, outTok: 0 } }
+    try { parsed = JSON.parse(text) } catch { return { inTok: 0, cacheReadTok: 0, outTok: 0, model: null } }
     const messages = Array.isArray(parsed?.messages) ? parsed.messages : []
     let inTok = 0, cacheReadTok = 0, outTok = 0
+    let model: string | null = null
     for (const msg of messages) {
+        if (typeof msg?.model === 'string' && msg.model) model = msg.model
         const t = msg?.tokens
         if (!t) continue
         // Gemini's `input` INCLUDES `cached` → split it out so `in` is fresh and
@@ -481,7 +532,7 @@ export function sumGeminiMessageUsage (text: string): { inTok: number; cacheRead
         if (typeof t.thoughts === 'number') outTok += t.thoughts
         if (typeof t.tool === 'number') outTok += t.tool
     }
-    return { inTok, cacheReadTok, outTok }
+    return { inTok, cacheReadTok, outTok, model }
 }
 
 /**

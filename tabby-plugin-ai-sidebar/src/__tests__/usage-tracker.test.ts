@@ -59,13 +59,13 @@ const opencodeRecord = (inT: number, outT: number) => JSON.stringify({
 })
 
 describe('sumClaudeAssistantUsage', () => {
-    it('sums input + output across assistant records', () => {
+    it('sums input + output across assistant records and returns the latest model', () => {
         const text = [asst(100, 50), userLine, asst(200, 75)].join('\n')
-        expect(sumClaudeAssistantUsage(text)).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 125 })
+        expect(sumClaudeAssistantUsage(text)).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 125, model: 'claude-opus-4-8' })
     })
 
-    it('ignores non-assistant lines', () => {
-        expect(sumClaudeAssistantUsage([userLine, userLine].join('\n'))).toEqual({ inTok: 0, cacheReadTok: 0, outTok: 0 })
+    it('ignores non-assistant lines (no tokens, no model)', () => {
+        expect(sumClaudeAssistantUsage([userLine, userLine].join('\n'))).toEqual({ inTok: 0, cacheReadTok: 0, outTok: 0, model: null })
     })
 
     it('counts cache CREATION in input but tracks cache READ separately', () => {
@@ -74,7 +74,7 @@ describe('sumClaudeAssistantUsage', () => {
         // already-cached context → its own `cacheReadTok` (9_000_000), NOT
         // folded into the input headline (where it would dwarf it 100x+).
         expect(sumClaudeAssistantUsage(asst(100, 50, 9_000_000, 500)))
-            .toEqual({ inTok: 600, cacheReadTok: 9_000_000, outTok: 50 })
+            .toEqual({ inTok: 600, cacheReadTok: 9_000_000, outTok: 50, model: 'claude-opus-4-8' })
     })
 
     it('skips malformed lines and lines without usage', () => {
@@ -84,11 +84,19 @@ describe('sumClaudeAssistantUsage', () => {
             asst(10, 20),
             '',
         ].join('\n')
-        expect(sumClaudeAssistantUsage(text)).toEqual({ inTok: 10, cacheReadTok: 0, outTok: 20 })
+        expect(sumClaudeAssistantUsage(text)).toEqual({ inTok: 10, cacheReadTok: 0, outTok: 20, model: 'claude-opus-4-8' })
     })
 
-    it('returns zero for empty input', () => {
-        expect(sumClaudeAssistantUsage('')).toEqual({ inTok: 0, cacheReadTok: 0, outTok: 0 })
+    it('returns zero/null for empty input', () => {
+        expect(sumClaudeAssistantUsage('')).toEqual({ inTok: 0, cacheReadTok: 0, outTok: 0, model: null })
+    })
+
+    it('model is last-wins and skips the <synthetic> sentinel', () => {
+        const m = (model: string) => JSON.stringify({ type: 'assistant', message: { model, usage: { input_tokens: 1, output_tokens: 1 } } })
+        expect(sumClaudeAssistantUsage([m('claude-opus-4-8'), m('claude-sonnet-4-6')].join('\n')).model).toBe('claude-sonnet-4-6')
+        // <synthetic> never wins; alone it yields null, and it never overwrites a real model
+        expect(sumClaudeAssistantUsage(m('<synthetic>')).model).toBeNull()
+        expect(sumClaudeAssistantUsage([m('claude-opus-4-8'), m('<synthetic>')].join('\n')).model).toBe('claude-opus-4-8')
     })
 })
 
@@ -121,12 +129,20 @@ describe('sumGeminiMessageUsage', () => {
             geminiMessage(200, 75),
         ])
         // m1: in=100-40=60 cache=40 out=50+7=57 ; m2: in=200 cache=0 out=75
-        expect(sumGeminiMessageUsage(text)).toEqual({ inTok: 260, cacheReadTok: 40, outTok: 132 })
+        expect(sumGeminiMessageUsage(text)).toEqual({ inTok: 260, cacheReadTok: 40, outTok: 132, model: null })
     })
 
-    it('returns zero for malformed or token-less saved chats', () => {
-        expect(sumGeminiMessageUsage('{ not json')).toEqual({ inTok: 0, cacheReadTok: 0, outTok: 0 })
-        expect(sumGeminiMessageUsage(JSON.stringify({ messages: [{ type: 'user' }] }))).toEqual({ inTok: 0, cacheReadTok: 0, outTok: 0 })
+    it('returns zero/null for malformed or token-less saved chats', () => {
+        expect(sumGeminiMessageUsage('{ not json')).toEqual({ inTok: 0, cacheReadTok: 0, outTok: 0, model: null })
+        expect(sumGeminiMessageUsage(JSON.stringify({ messages: [{ type: 'user' }] }))).toEqual({ inTok: 0, cacheReadTok: 0, outTok: 0, model: null })
+    })
+
+    it('returns the newest message model (last-wins) in the same pass', () => {
+        const raw = geminiChat('s', [
+            { ...geminiMessage(10, 5), model: 'gemini-2.5-flash' },
+            { ...geminiMessage(10, 5), model: 'gemini-2.5-pro' },
+        ])
+        expect(sumGeminiMessageUsage(raw).model).toBe('gemini-2.5-pro')
     })
 })
 
@@ -170,42 +186,54 @@ describe('UsageTrackerService.compute (Claude transcript)', () => {
     it('sums the transcript on first read', async () => {
         fs.writeFileSync(tx, [asst(100, 50), userLine, asst(200, 75)].join('\n') + '\n')
         const u = await new UsageTrackerService().compute({}, 'claude', tx)
-        expect(u).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 125 })
+        expect(u).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 125, model: 'claude-opus-4-8' })
     })
 
     it('accumulates incrementally as the transcript grows (byte-offset read)', async () => {
         const svc = new UsageTrackerService()
         const key = {}
         fs.writeFileSync(tx, asst(100, 50) + '\n')
-        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50 })
+        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50, model: 'claude-opus-4-8' })
 
         // Append a second turn; advance past the throttle so the next call reads.
         fs.appendFileSync(tx, asst(200, 75) + '\n')
         vi.advanceTimersByTime(7_000)   // > USAGE_READ_INTERVAL_MS (6 s)
         // Only the NEW bytes are parsed and added — not a re-sum of the whole file.
-        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 125 })
+        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 125, model: 'claude-opus-4-8' })
     })
 
     it('does not re-read within the throttle window (returns the cached value)', async () => {
         const svc = new UsageTrackerService()
         const key = {}
         fs.writeFileSync(tx, asst(100, 50) + '\n')
-        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50 })
+        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50, model: 'claude-opus-4-8' })
         // Append but do NOT advance the clock → throttled, stale value returned.
         fs.appendFileSync(tx, asst(999, 999) + '\n')
-        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50 })
+        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50, model: 'claude-opus-4-8' })
     })
 
     it('resets when the transcript path changes (new session)', async () => {
         const svc = new UsageTrackerService()
         const key = {}
         fs.writeFileSync(tx, asst(100, 50) + '\n')
-        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50 })
+        expect(await svc.compute(key, 'claude', tx)).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50, model: 'claude-opus-4-8' })
 
         const tx2 = path.join(tmp, 'session2.jsonl')
         fs.writeFileSync(tx2, asst(7, 3) + '\n')
         vi.advanceTimersByTime(5_000)
-        expect(await svc.compute(key, 'claude', tx2)).toEqual({ inTok: 7, cacheReadTok: 0, outTok: 3 })
+        expect(await svc.compute(key, 'claude', tx2)).toEqual({ inTok: 7, cacheReadTok: 0, outTok: 3, model: 'claude-opus-4-8' })
+    })
+
+    it('keeps the model sticky when a later chunk has no assistant line', async () => {
+        const svc = new UsageTrackerService()
+        const key = {}
+        fs.writeFileSync(tx, asst(100, 50) + '\n')
+        expect((await svc.compute(key, 'claude', tx))?.model).toBe('claude-opus-4-8')
+
+        // Append only user lines (no model) → the chip must NOT blank.
+        fs.appendFileSync(tx, userLine + '\n')
+        vi.advanceTimersByTime(7_000)
+        expect((await svc.compute(key, 'claude', tx))?.model).toBe('claude-opus-4-8')
     })
 })
 
@@ -258,6 +286,9 @@ describe('UsageTrackerService.compute (Codex transcript)', () => {
         fs.appendFileSync(tx, codexTokenCount(999, 999) + '\n')
         expect(await svc.compute(key, 'codex', tx)).toEqual({ inTok: 60, cacheReadTok: 40, outTok: 57 })
     })
+
+    // No Codex transcript-model test: Codex gets its model from hooks (snap.model)
+    // on every event, so UsageTracker reads no model for it — see computeCodex.
 })
 
 describe('UsageTrackerService.compute (Gemini saved chat)', () => {
@@ -287,17 +318,31 @@ describe('UsageTrackerService.compute (Gemini saved chat)', () => {
     it('locates the saved chat by session id and sums message tokens', async () => {
         fs.writeFileSync(tx, geminiChat(sessionId, [geminiMessage(100, 50), geminiMessage(200, 75)]))
         const u = await new UsageTrackerService().compute({}, 'gemini', { sessionId })
-        expect(u).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 125 })
+        expect(u).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 125, model: null })
     })
 
     it('returns cached Gemini usage inside the throttle window', async () => {
         const svc = new UsageTrackerService()
         const key = {}
         fs.writeFileSync(tx, geminiChat(sessionId, [geminiMessage(100, 50)]))
-        expect(await svc.compute(key, 'gemini', { sessionId })).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50 })
+        expect(await svc.compute(key, 'gemini', { sessionId })).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50, model: null })
 
         fs.writeFileSync(tx, geminiChat(sessionId, [geminiMessage(999, 999)]))
-        expect(await svc.compute(key, 'gemini', { sessionId })).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50 })
+        expect(await svc.compute(key, 'gemini', { sessionId })).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50, model: null })
+    })
+
+    it('surfaces the model from a message.model (hooks never carry it)', async () => {
+        fs.writeFileSync(tx, geminiChat(sessionId, [{ ...geminiMessage(100, 50), model: 'gemini-2.5-pro' }]))
+        const u = await new UsageTrackerService().compute({}, 'gemini', { sessionId })
+        expect(u).toEqual({ inTok: 100, cacheReadTok: 0, outTok: 50, model: 'gemini-2.5-pro' })
+    })
+
+    it('returns the model even when no tokens were seen (does not drop it on !seen)', async () => {
+        // A model-bearing message with no `tokens` block — the chat is Gemini's
+        // ONLY model source, so a zero-token chat must still surface the chip.
+        fs.writeFileSync(tx, geminiChat(sessionId, [{ type: 'assistant', content: 'ok', model: 'gemini-2.5-pro' }]))
+        const u = await new UsageTrackerService().compute({}, 'gemini', { sessionId })
+        expect(u).toEqual({ inTok: 0, cacheReadTok: 0, outTok: 0, model: 'gemini-2.5-pro' })
     })
 })
 

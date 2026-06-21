@@ -296,13 +296,21 @@ export interface TabState {
      * `gpt-5.5`). Sidebar renders it next to the agent tag. Null when unknown
      * (no event yet / source unavailable).
      *
-     * Freshness is per-agent, NOT uniformly live: Codex stamps `.model` on
-     * every hook event (so a mid-session switch is reflected), but Claude only
-     * emits the slug once at `SessionStart` — a mid-session `/model` is NOT
-     * picked up until the next session (the watcher keeps it sticky within a
-     * session and drops it on the next SessionStart). Source is per-agent (the
-     * hook payload field where the agent provides one); see makeState and
-     * HookWatcher.processEvent's sticky-model rule.
+     * Two sources, in priority order (see makeState): the hook snapshot
+     * (`snap.model`) first, then UsageTracker's transcript-derived model as a
+     * fallback when the hook value is empty. Freshness is per-agent:
+     *   - Codex stamps `.model` on every hook event (including SessionStart) →
+     *     snap.model is always present and tracks a mid-session switch; no
+     *     transcript fallback (it would be dead code — see computeCodex).
+     *   - Claude emits the slug only at `SessionStart` and sends an EMPTY model
+     *     on a `resume` SessionStart — so the transcript fallback (UsageTracker
+     *     reading `message.model`) is what keeps the chip alive across resume.
+     *     Because the hook value wins when present, a mid-session `/model` on a
+     *     still-running tab is NOT reflected until a resume.
+     *   - Gemini's hooks never carry the model, so the transcript fallback is the
+     *     ONLY source and it DOES track a `/model` switch.
+     * Null when neither source has it yet. See HookWatcher's sticky-model rule
+     * and UsageTrackerService's per-agent `model` extraction.
      */
     model: string | null
     /**
@@ -787,9 +795,12 @@ export class TabMonitor implements OnDestroy {
         // undefined for tabs without an adapter-supported AI tool, which
         // short-circuits the side-channel read.
         let tabId: string | undefined
-        // Active model slug for this tab, surfaced from the hook snapshot
-        // (Codex every event / Claude SessionStart / opencode plugin). Null
-        // for unsupported tools or before any model-bearing event.
+        // Active model slug for this tab. Primary source is the hook snapshot
+        // (Codex every event / Claude SessionStart / opencode plugin); for
+        // Claude it falls back to the model read from the transcript by
+        // UsageTracker (see below) so a resumed tab — whose resume SessionStart
+        // carries an empty model — still shows the chip. Null for unsupported
+        // tools or before any model-bearing event/transcript line.
         let model: string | null = null
         // Cumulative session token usage. Read from the per-agent source by
         // UsageTrackerService — see below.
@@ -878,7 +889,17 @@ export class TabMonitor implements OnDestroy {
                     sessionId: snap.sessionId,
                     tabId: snap.tabId,
                 })
-                if (usage) { tokensIn = usage.inTok; tokensOut = usage.outTok; tokensCacheRead = usage.cacheReadTok ?? null }
+                if (usage) {
+                    tokensIn = usage.inTok; tokensOut = usage.outTok; tokensCacheRead = usage.cacheReadTok ?? null
+                    // Model fallback (hook snapshot wins; transcript fills the
+                    // gap). A resumed Claude tab gets an empty hook model (resume
+                    // SessionStart carries none), so `model` is null here and we
+                    // take UsageTracker's transcript-derived value. Codex stamps
+                    // the model on every hook event so snap.model is already set
+                    // (no-op); Gemini's hooks never carry it so this is its ONLY
+                    // source. `!model` treats '' and null alike as "absent".
+                    if (!model && usage.model) model = usage.model
+                }
                 // Subagent in-flight → working. A main-agent Stop routinely fires
                 // WHILE a launched subagent keeps working — real logs show `Stop`
                 // at HH:MM:SS immediately followed by that subagent's next
