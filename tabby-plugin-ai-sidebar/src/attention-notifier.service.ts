@@ -200,16 +200,23 @@ export class AttentionNotifierService implements OnDestroy {
         if (now - last < this.COOLDOWN_MS) return
         this.lastFiredAt.set(key, now)
 
-        const title = kind === NotifyKind.Permission
-            ? 'GlanceTerm — agent needs you'
-            : 'GlanceTerm — agent ready'
+        // Identify the tab the way the sidebar row does: "#<n> <folder>", with
+        // the full working path in the body (the row shows it on hover). The tab
+        // number is the tab-bar position; the folder is the cwd basename, falling
+        // back to the tab title when no cwd is known.
+        const i = this.app.tabs.indexOf(s.outerTab)
+        const num = i >= 0 ? `#${i + 1}` : ''
+        const folder = s.cwd ? folderBasename(s.cwd) : s.title
+        const title = [num, folder].filter(Boolean).join(' ') || 'GlanceTerm'
+
         const subline = kind === NotifyKind.Permission
             ? 'permission required'
             : 'ready for next prompt'
+        const status = `${s.aiTool ? s.aiTool + ' · ' : ''}${subline}`
 
         try {
             const n = new Notification(title, {
-                body: `${s.title}${s.aiTool ? ' · ' + s.aiTool : ''} — ${subline}`,
+                body: s.cwd ? `${s.cwd}\n${status}` : status,
                 silent: false,
                 tag: `glanceterm-attn-${(s.innerTab as any).id ?? Math.random()}`,
             })
@@ -323,4 +330,13 @@ export class AttentionNotifierService implements OnDestroy {
         osc.start(at)
         osc.stop(at + durSec + 0.02)
     }
+}
+
+/** Last path segment of a working dir (e.g. `/a/b/glanceterm` → `glanceterm`).
+ *  Mirrors SidebarComponent.folderName so the notification matches the row. */
+function folderBasename (p: string): string {
+    const trimmed = p.replace(/[/\\]+$/, '')
+    if (!trimmed) return p
+    const m = trimmed.match(/[^/\\]+$/)
+    return m ? m[0] : p
 }
