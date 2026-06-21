@@ -39,14 +39,16 @@ export type BridgeEventType =
  * side, so concurrent callers (this service + PairingService during
  * pairing) don't race.
  *
- * Event coverage in v0:
- *   - needs_permission: any → NeedsPermission
- *   - task_completed:   Working → Idle
+ * Event coverage:
+ *   - needs_permission:  any → NeedsPermission
+ *   - task_completed:    Working → Idle/Done
+ *   - state_transition:  (non-Working) → Working  ("started"; opt-in, default
+ *                        off). Focus-driven idle↔done flips and → no_ai are
+ *                        intentionally NOT emitted to keep the phone quiet.
  *
  * Deferred (still needs HookWatcherService integration):
  *   - task_failed (no clean signal from TabState alone)
  *   - tool_use (default off; would need raw hook events)
- *   - state_transition (default off)
  */
 @Injectable()
 export class OutboundDispatcherService implements OnDestroy {
@@ -252,12 +254,24 @@ export class OutboundDispatcherService implements OnDestroy {
     }
 
     private detect (s: TabState, prev: TabStatus | undefined): void {
+        // any → NeedsPermission
         if (s.status === TabStatus.NeedsPermission && prev !== TabStatus.NeedsPermission) {
             void this.dispatch(s, 'needs_permission', `${s.aiTool ?? 'agent'} needs permission — check the desktop`)
             return
         }
-        if (s.status === TabStatus.Idle && prev === TabStatus.Working) {
+        // Working → Idle/Done = finished a turn. `done` is just idle-while-
+        // unfocused, so both terminal states mean "stopped working".
+        if ((s.status === TabStatus.Idle || s.status === TabStatus.Done) && prev === TabStatus.Working) {
             void this.dispatch(s, 'task_completed', `${s.aiTool ?? 'agent'} finished — ready for next prompt`)
+            return
+        }
+        // (non-working) → Working = started / resumed a turn. Opt-in
+        // `state_transition` event. Deliberately NOT emitted for idle↔done
+        // (those are desktop focus flips, not real activity) nor → no_ai (the
+        // tab/agent went away) — keeps the phone to ~one "started" + one
+        // "finished" per turn instead of every raw TabStatus flip.
+        if (s.status === TabStatus.Working && prev !== TabStatus.Working) {
+            void this.dispatch(s, 'state_transition', `${s.aiTool ?? 'agent'} started`)
             return
         }
     }
@@ -388,6 +402,7 @@ export class OutboundDispatcherService implements OnDestroy {
             eventType === 'needs_permission' ? '🔔'
             : eventType === 'task_completed' ? '✅'
             : eventType === 'task_failed' ? '⚠️'
+            : eventType === 'state_transition' ? '▶'
             : eventType === 'tool_use' ? '▷'
             : 'ℹ️'
         return `${icon} ${body}`

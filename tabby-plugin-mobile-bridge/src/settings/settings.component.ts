@@ -74,6 +74,13 @@ type Platform = 'telegram' | 'feishu' | 'discord'
                                    (change)="toggleEnabled(binding)"/>
                             Enabled
                         </label>
+                        <label class="form-check-label me-3"
+                               title="Also push agent status changes (▶ started · ✅ done · 🔔 needs permission). Off = only the agent's own messages.">
+                            <input type="checkbox" class="form-check-input me-1"
+                                   [checked]="statusUpdates(binding)"
+                                   (change)="toggleStatusUpdates(binding)"/>
+                            Status updates
+                        </label>
                         <button class="btn btn-sm btn-outline-danger ms-auto"
                                 (click)="disconnect(binding)">
                             Disconnect
@@ -727,6 +734,23 @@ export class BridgeSettingsComponent implements OnDestroy {
 
     toggleEnabled (b: ChannelBinding): void {
         void this.store.update(b.id, { enabled: !b.enabled })
+    }
+
+    /** Whether agent status events are pushed (not just the agent's messages).
+     *  Derived from the per-binding event filter — `state_transition` only ever
+     *  appears when status updates are on. */
+    statusUpdates (b: ChannelBinding): boolean {
+        return b.eventFilter.includes('state_transition')
+    }
+
+    /** Toggle status pushes. ON sets an explicit filter that keeps the agent's
+     *  messages AND adds the status events; OFF clears it back to `[]`, whose
+     *  default (assistant_text only) is the conversation-only baseline. */
+    toggleStatusUpdates (b: ChannelBinding): void {
+        const eventFilter = this.statusUpdates(b)
+            ? []
+            : ['assistant_text', 'needs_permission', 'task_completed', 'state_transition']
+        void this.store.update(b.id, { eventFilter })
     }
 
     /** Hard-disconnect = remove binding entirely. Also clears the
