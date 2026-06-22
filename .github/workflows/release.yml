@@ -1,45 +1,57 @@
 name: Release
 
-# Cut a release by pushing a tag like `v0.1.0`:
-#   git tag v0.1.0 && git push origin v0.1.0
+# Versioning + releases are fully driven by release-please — you never edit a
+# version number by hand:
+#   1. On every push to main, release-please reads the conventional commits since
+#      the last release and maintains a single open "Release PR" that bumps the
+#      version in app/package.json (+ writes CHANGELOG.md). `fix:` -> patch,
+#      `feat:` -> minor, `feat!:` / `BREAKING CHANGE` -> major.
+#   2. Merge that PR when you want to ship. release-please then tags vX.Y.Z and
+#      creates the GitHub release; the `build` job below builds the signed,
+#      notarized dual-arch dmgs and attaches them to that release.
 #
-# Builds the macOS dmg for BOTH architectures — Apple Silicon (arm64) on
-# macos-latest and Intel (x64) on macos-13 — Developer-ID signs + notarizes
-# each, and attaches both .dmg installers to a DRAFT release for review before
-# you publish it.
+# Why the build lives in THIS workflow (gated on release_created) rather than a
+# separate tag-triggered one: a tag pushed by GITHUB_TOKEN does NOT trigger other
+# workflows, so a standalone `on: push: tags` release.yml would never fire from
+# release-please's tag. Chaining here keeps it to one workflow with no PAT.
 #
-# Only the .dmg installers are uploaded. electron-builder also produces .zip /
-# .blockmap / latest-mac.yml, but those are purely for in-app auto-update,
-# which isn't wired up for this repo — keeping the release page to the two
-# installers people actually download.
+# The Release-PR flow is also what our branch protection requires — "require a PR
+# review on main" blocks CI from direct-pushing a version bump, but a PR the
+# maintainer approves + merges is exactly the supported path.
 #
-# Signing is opt-in via repo secrets (CSC_LINK, CSC_KEY_PASSWORD, APPLE_ID,
-# APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID). Without them build-macos.mjs
-# ad-hoc signs (downloaders get a Gatekeeper warning). The tag-only trigger
-# keeps secrets off fork PRs.
-#
-# Version note: RELEASE=1 stamps app/package.json's version, not the tag — bump
-# app/package.json before tagging so the dmg version matches.
+# Build details: dual-arch (arm64 on macos-latest, x64 on macos-13), RELEASE=1
+# stamps the (release-please-bumped) app/package.json version, Developer-ID signs
+# + notarizes when the signing secrets are present (CSC_LINK, CSC_KEY_PASSWORD,
+# APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID). Only the .dmg installers
+# are attached — electron-builder's .zip / .blockmap / latest-mac.yml are for
+# in-app auto-update, which isn't wired up here.
 #
 # ── Planned (DEFERRED) ────────────────────────────────────────────────────
-# Windows (x64 + arm64, NSIS .exe — needs WIN_CSC_LINK/WIN_CSC_KEY_PASSWORD)
-# and Linux (x64 + arm64, AppImage/.deb/.rpm) — add matrix entries + the
-# win/linux build commands when implementing.
+# Windows (x64 + arm64, NSIS .exe) and Linux (x64 + arm64, AppImage/.deb/.rpm) —
+# add matrix entries + the win/linux build commands when implementing.
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
 
 permissions:
   contents: write
-
-concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  pull-requests: write
 
 jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: rp
+
   build:
     name: macOS build (${{ matrix.arch }})
+    needs: release-please
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -51,6 +63,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
 
       - uses: actions/setup-node@v4
         with:
@@ -72,30 +86,7 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
-      - name: Upload dmg artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: dmg-${{ matrix.arch }}
-          path: dist/*.dmg
-          if-no-files-found: error
-
-  release:
-    name: Draft release
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download both dmgs
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: List
-        run: ls -lh dist/
-
-      - name: Draft release with both dmgs
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          generate_release_notes: true
-          files: dist/*.dmg
+      - name: Attach the dmg to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" dist/*.dmg --clobber
