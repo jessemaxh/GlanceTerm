@@ -51,6 +51,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libfontconfig1-dev libsecret-1-dev libarchive-tools rpm fakeroot
 
+      # build/installer.nsh bundles the VC++ runtime (node-pty needs
+      # vcruntime140.dll) via `File "${BUILD_RESOURCES_DIR}\vc_redist.exe"`, but
+      # that binary isn't committed — fetch it before packaging or makensis aborts.
+      - name: Windows — fetch VC++ redistributable
+        if: runner.os == 'Windows'
+        shell: bash
+        run: curl -fL -o build/vc_redist.exe https://aka.ms/vs/17/release/vc_redist.x64.exe
+
       - name: Install dependencies
         run: yarn install --network-timeout 1000000
 
@@ -69,4 +77,5 @@ jobs:
             dist/*.pacman
             dist/*.tar.gz
             dist/*.exe
+            dist/*.zip
           if-no-files-found: warn
