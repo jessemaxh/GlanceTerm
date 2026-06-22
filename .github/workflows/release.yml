@@ -3,33 +3,28 @@ name: Release
 # Cut a release by pushing a tag like `v0.1.0`:
 #   git tag v0.1.0 && git push origin v0.1.0
 #
-# Builds the macOS (arm64) dmg with a clean version (RELEASE=1) and attaches it
-# to a DRAFT GitHub release for review before you publish it.
+# Builds the macOS dmg for BOTH architectures — Apple Silicon (arm64) on
+# macos-latest and Intel (x64) on macos-13 — Developer-ID signs + notarizes
+# each, and attaches both .dmg installers to a DRAFT release for review before
+# you publish it.
 #
-# Signing is opt-in via repo secrets. With CSC_LINK + CSC_KEY_PASSWORD +
-# APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD + APPLE_TEAM_ID set, the dmg is
-# Developer-ID signed and notarized; without them, scripts/build-macos.mjs
-# falls back to ad-hoc signing (downloaders get a Gatekeeper warning).
+# Only the .dmg installers are uploaded. electron-builder also produces .zip /
+# .blockmap / latest-mac.yml, but those are purely for in-app auto-update,
+# which isn't wired up for this repo — keeping the release page to the two
+# installers people actually download.
 #
-# The tag-only trigger is what keeps the secrets safe on a public repo: only a
-# maintainer can push a tag, and GitHub never exposes secrets to fork PRs (the
-# CI workflow that does run on PRs carries no secrets).
+# Signing is opt-in via repo secrets (CSC_LINK, CSC_KEY_PASSWORD, APPLE_ID,
+# APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID). Without them build-macos.mjs
+# ad-hoc signs (downloaders get a Gatekeeper warning). The tag-only trigger
+# keeps secrets off fork PRs.
 #
-# Version note: RELEASE=1 stamps app/package.json's version (0.1.0), not the
-# tag — bump app/package.json before tagging so the dmg version matches.
+# Version note: RELEASE=1 stamps app/package.json's version, not the tag — bump
+# app/package.json before tagging so the dmg version matches.
 #
-# ── Planned (DEFERRED — not implemented yet) ──────────────────────────────
-# Full release matrix: 3 platforms × CPU architectures, each into one draft
-# release. To wire up later:
-#   - macOS:   arm64 (below, active)  +  x64 (Intel)            → .dmg/.zip
-#   - Windows: x64 + arm64  → NSIS .exe  (needs WIN_CSC_LINK / WIN_CSC_KEY_PASSWORD secrets)
-#   - Linux:   x64 + arm64  → AppImage / .deb / .rpm           (unsigned)
-# Shape it as a `strategy.matrix` of {os, arch, build-cmd} fanning into one
-# `softprops/action-gh-release` per tag (the action appends assets to the same
-# draft when called from multiple jobs with the same tag). The mac/win/linux
-# build commands already exist in scripts/ (build-macos.mjs today); add the
-# win/linux equivalents when implementing. Keeping the single macOS-arm64 job
-# below as the first slice.
+# ── Planned (DEFERRED) ────────────────────────────────────────────────────
+# Windows (x64 + arm64, NSIS .exe — needs WIN_CSC_LINK/WIN_CSC_KEY_PASSWORD)
+# and Linux (x64 + arm64, AppImage/.deb/.rpm) — add matrix entries + the
+# win/linux build commands when implementing.
 
 on:
   push:
@@ -43,10 +38,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # TODO: expand into a {os, arch} matrix per the "Planned" note above.
-  macos:
-    name: macOS build + draft release (arm64)
-    runs-on: macos-latest # arm64 (macos-14+)
+  build:
+    name: macOS build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-latest # Apple Silicon
+          - arch: x64
+            runner: macos-13 # Intel
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -56,6 +58,8 @@ jobs:
 
       # macOS runners ship Xcode + command-line tools, so the native modules
       # (node-pty, keytar, fontmanager-redux) build without extra system libs.
+      # ARCH defaults to the runner's process.arch, so the same command yields
+      # arm64 on macos-latest and x64 on macos-13.
       - name: Install dependencies
         run: yarn install --network-timeout 1000000
 
@@ -68,15 +72,30 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
-      - name: List artifacts
-        run: ls -lh dist/*.dmg dist/*.zip 2>/dev/null || true
+      - name: Upload dmg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dmg-${{ matrix.arch }}
+          path: dist/*.dmg
+          if-no-files-found: error
 
-      - name: Draft release with artifacts
+  release:
+    name: Draft release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download both dmgs
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List
+        run: ls -lh dist/
+
+      - name: Draft release with both dmgs
         uses: softprops/action-gh-release@v2
         with:
           draft: true
           generate_release_notes: true
-          files: |
-            dist/*.dmg
-            dist/*.zip
-            dist/*.blockmap
+          files: dist/*.dmg
