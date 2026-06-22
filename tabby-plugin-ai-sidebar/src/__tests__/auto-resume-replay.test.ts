@@ -1,4 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import * as fs from 'fs'
+import * as os from 'os'
+import * as path from 'path'
 
 import { AutoResumeHarness, makeTabState } from './auto-resume-harness'
 
@@ -122,16 +125,39 @@ describe('AutoResumeService — integration', () => {
 
         it('end-to-end: a restored claude tab replays --resume <id> into the shell', async () => {
             const sid = 'ea59366a-a2d5-43e1-b894-aa40a8188fb6'
-            // Restored, active tab that captured a session id before quit.
-            const h = new AutoResumeHarness({
-                preexistingTabs: [{ active: true, resumeCommand: `claude --resume ${sid}` }],
-            })
-            h.start()
-            const a = h.app.tabs[0]
-            // Shell comes alive: cwd known, no agent yet (the recovered bare shell).
-            h.emitTick([makeTabState(a, { aiTool: null, cwd: '/repo' })])
-            await vi.advanceTimersByTimeAsync(2_000)
-            expect(a.sentInputs).toContain(`claude --resume ${sid}\r`)
+            // The replay path runs demoteStaleClaudeResume, which demotes a
+            // `claude --resume <uuid>` back to a bare `claude` when Claude no
+            // longer holds that session's transcript on disk. Point $HOME at a
+            // temp tree that DOES contain the transcript so the (valid) resume
+            // survives — otherwise this only passes on a machine that happens to
+            // have this exact session in ~/.claude and fails on a clean CI
+            // runner. os.homedir() honours $HOME on POSIX, which is how the
+            // service resolves the transcript path.
+            const home = fs.mkdtempSync(path.join(os.tmpdir(), 'glanceterm-replay-'))
+            const proj = path.join(home, '.claude', 'projects', '-repo')
+            fs.mkdirSync(proj, { recursive: true })
+            fs.writeFileSync(path.join(proj, `${sid}.jsonl`), '{}\n')
+            const prevHome = process.env.HOME
+            process.env.HOME = home
+            try {
+                // Restored, active tab that captured a session id before quit.
+                const h = new AutoResumeHarness({
+                    preexistingTabs: [{ active: true, resumeCommand: `claude --resume ${sid}` }],
+                })
+                h.start()
+                const a = h.app.tabs[0]
+                // Shell comes alive: cwd known, no agent yet (recovered bare shell).
+                h.emitTick([makeTabState(a, { aiTool: null, cwd: '/repo' })])
+                await vi.advanceTimersByTimeAsync(2_000)
+                expect(a.sentInputs).toContain(`claude --resume ${sid}\r`)
+            } finally {
+                if (prevHome === undefined) {
+                    delete process.env.HOME
+                } else {
+                    process.env.HOME = prevHome
+                }
+                fs.rmSync(home, { recursive: true, force: true })
+            }
         })
 
         it('does not stash a shell-unsafe command that survives reduction', async () => {
