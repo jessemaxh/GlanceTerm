@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  一个 macOS 终端，在一个窗口里并排运行、监控、切换多个 AI 编程 agent ——
+  <strong>专为 AI 编程 agent 打造的终端。</strong>在一个窗口里并排运行、监控、切换
   <strong>Claude&nbsp;Code</strong>、<strong>Codex</strong>、<strong>Gemini&nbsp;CLI</strong>、<strong>opencode</strong>。
 </p>
 

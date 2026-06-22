@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  A macOS terminal that runs, monitors, and switches between multiple AI coding agents —
+  <strong>The terminal for AI coding agents.</strong> Run, monitor, and switch between
   <strong>Claude&nbsp;Code</strong>, <strong>Codex</strong>, <strong>Gemini&nbsp;CLI</strong>, and <strong>opencode</strong> — side by side in one window.
 </p>
 
