@@ -20,7 +20,7 @@
   "devDependencies": {
     "@types/marked": "^5.0.1",
     "marked": "^5.1.2",
-    "ngx-infinite-scroll": "^16"
+    "ngx-infinite-scroll": "^21"
   },
   "peerDependencies": {
     "@angular/animations": "^15",
