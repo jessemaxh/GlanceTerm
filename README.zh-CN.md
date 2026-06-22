@@ -22,6 +22,18 @@
 
 ---
 
+<p align="center">
+  <img src="assets/screenshots/sidebar.png" alt="GlanceTerm 侧边栏 —— 每个 AI agent 标签页的实时状态" width="820">
+  <br>
+  <em>所有 agent 标签页集中在一个侧边栏，每个配实时状态点 —— 点一行直接跳过去。</em>
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/token-usage.png" alt="GlanceTerm Token 用量面板" width="820">
+  <br>
+  <em>内置 Token 用量统计 —— 跨所有会话的 in / cache / out，可按 agent / 会话 / 项目拆分，支持 CSV 导出。</em>
+</p>
+
 如果你同时开着 5 个以上的 Claude Code / Codex / Gemini / opencode 会话，分散
 在不同标签页里，你大概干过这种事：Cmd-Tab 一个个切过去，盯着标题栏眯眼辨认，
 想搞清楚哪个已经做完、可以接下一个任务了。

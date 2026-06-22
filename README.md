@@ -22,6 +22,18 @@
 
 ---
 
+<p align="center">
+  <img src="assets/screenshots/sidebar.png" alt="GlanceTerm sidebar — live status for every AI agent tab" width="820">
+  <br>
+  <em>Every agent tab in one side panel with a live status dot — click a row to jump straight to it.</em>
+</p>
+
+<p align="center">
+  <img src="assets/screenshots/token-usage.png" alt="GlanceTerm Token Usage panel" width="820">
+  <br>
+  <em>Built-in token usage — in / cache / out across every session, broken down by agent / session / project, with CSV export.</em>
+</p>
+
 If you have 5+ Claude Code / Codex / Gemini / opencode sessions running in
 different tabs, you've probably done this dance: Cmd-Tab through them all,
 squinting at the title bar, trying to figure out which one is done and ready
