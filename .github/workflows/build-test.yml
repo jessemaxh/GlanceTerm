@@ -1,0 +1,67 @@
+name: Build test (Linux + Windows)
+
+# Manual "does it even compile?" probe for the non-macOS targets. The Linux and
+# Windows build scripts (scripts/build-linux.mjs, scripts/build-windows.mjs)
+# exist — inherited from Tabby and they DO run the load-bearing prepackage step
+# (scripts/prepackage-plugins.mjs) — but they have NOT been hardened/verified for
+# GlanceTerm the way macOS was (the app/node_modules refresh + asar self-check
+# live only in build-macos.mjs). This runs them on real ubuntu/windows runners
+# and uploads whatever they produce so we can see how far the existing scripts
+# get. Unsigned (no signing secrets). Does NOT publish a release.
+#
+# Caveat: green here means it BUILT, not that the artifact RUNS — verifying no
+# "asar with zero node_modules" crash needs a real Linux/Windows machine to launch
+# it on. Treat this as step 1 of bringing those platforms up.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux
+            os: ubuntu-latest
+            script: build-linux.mjs
+          - name: Windows
+            os: windows-latest
+            script: build-windows.mjs
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libsecret-1-dev libarchive-tools rpm fakeroot
+
+      - name: Install dependencies
+        run: yarn install --network-timeout 1000000
+
+      - name: Build (${{ matrix.name }})
+        run: node scripts/${{ matrix.script }}
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.name }}
+          path: |
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.rpm
+            dist/*.pacman
+            dist/*.tar.gz
+            dist/*.exe
+          if-no-files-found: warn
