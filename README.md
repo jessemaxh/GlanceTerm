@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <strong>The terminal for AI coding agents.</strong> Run, monitor, and switch between
-  <strong>Claude&nbsp;Code</strong>, <strong>Codex</strong>, <strong>Gemini&nbsp;CLI</strong>, and <strong>opencode</strong> — side by side in one window.
+  <strong>The terminal for running multiple AI coding agents in parallel.</strong> Run, monitor, and switch between
+  <strong>Claude&nbsp;Code</strong>, <strong>Codex</strong>, <strong>Gemini&nbsp;CLI</strong>, and <strong>opencode</strong> sessions — and never miss the one that's done or waiting on you.
 </p>
 
 <p align="center">

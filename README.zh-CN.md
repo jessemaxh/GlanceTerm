@@ -9,8 +9,8 @@
 </p>
 
 <p align="center">
-  <strong>专为 AI 编程 agent 打造的终端。</strong>在一个窗口里并排运行、监控、切换
-  <strong>Claude&nbsp;Code</strong>、<strong>Codex</strong>、<strong>Gemini&nbsp;CLI</strong>、<strong>opencode</strong>。
+  <strong>并行运行多个 AI 编程 agent 的终端。</strong>在一个窗口里运行、监控、切换
+  <strong>Claude&nbsp;Code</strong>、<strong>Codex</strong>、<strong>Gemini&nbsp;CLI</strong>、<strong>opencode</strong> 的多个 session —— 时刻知道哪个在跑、哪个完成了、哪个在等你。
 </p>
 
 <p align="center">
