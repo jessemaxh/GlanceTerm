@@ -48,6 +48,12 @@ ipcMain.on('app:new-window', () => {
     application.newWindow()
 })
 
+ipcMain.on('app:new-window-with-tab', async (_event, token) => {
+    const window = await application.newWindow()
+    await window.ready
+    window.send('host:open-recovered-tab', token)
+})
+
 process.on('uncaughtException' as any, err => {
     console.log(err)
     application.broadcast('uncaughtException', err)

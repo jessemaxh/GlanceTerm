@@ -70,6 +70,9 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
     session: BaseSession|null = null
     savedState?: any
     savedStateIsLive = false
+    /** When true, `destroy()` leaves the underlying PTY running (the session is
+     *  being adopted by another window). Set via {@link releaseSession}. */
+    protected sessionReused = false
 
     @Input() zoom = 0
 
@@ -667,9 +670,24 @@ export class BaseTerminalTabComponent<P extends BaseTerminalProfile> extends Bas
         this.frontendReady.complete()
 
         super.destroy()
-        if (this.session?.open) {
+        if (this.session?.open && !this.sessionReused) {
             await this.session.destroy()
         }
+    }
+
+    /**
+     * Mark this tab's session as being handed off (e.g. moved to another
+     * window): detach our handlers and skip `session.destroy()` on the next
+     * `destroy()` so the underlying PTY keeps running for the new owner to
+     * re-attach via `restoreFromPTYID`.
+     */
+    releaseSession (): void {
+        this.sessionReused = true
+        this.detachSessionHandlers()
+        // Drop the session's renderer-side PTY subscription too — otherwise this
+        // (closing) window keeps receiving + acking the PTY stream alongside the
+        // window that just adopted the session.
+        this.session?.releasePTY()
     }
 
     protected detachTermContainerHandlers (): void {

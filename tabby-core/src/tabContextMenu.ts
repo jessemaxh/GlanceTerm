@@ -129,6 +129,11 @@ export class CommonOptionsContextMenu extends TabContextMenuItemProvider {
                     click: () => this.app.duplicateTab(tab),
                 },
                 {
+                    label: this.translate.instant('Move to new window'),
+                    commandLabel: this.translate.instant('Move tab to new window'),
+                    click: () => this.app.moveTabToNewWindow(tab),
+                },
+                {
                     label: this.translate.instant('Color'),
                     commandLabel: this.translate.instant('Change tab color'),
                     sublabel: currentColor ? this.translate.instant(currentColor) : undefined,

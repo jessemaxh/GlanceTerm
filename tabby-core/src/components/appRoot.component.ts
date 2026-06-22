@@ -11,6 +11,7 @@ import { ConfigService } from '../services/config.service'
 import { ThemesService } from '../services/themes.service'
 import { UpdaterService } from '../services/updater.service'
 import { CommandService } from '../services/commands.service'
+import { ProfilesService } from '../services/profiles.service'
 
 import { BaseTabComponent } from './baseTab.component'
 import { SafeModeModalComponent } from './safeModeModal.component'
@@ -97,6 +98,7 @@ export class AppRootComponent {
         public config: ConfigService,
         public app: AppService,
         public sidebarService: SidebarService,
+        private profilesService: ProfilesService,
         platform: PlatformService,
         log: LogService,
         ngbModal: NgbModal,
@@ -168,6 +170,21 @@ export class AppRootComponent {
 
         this.hostWindow.windowCloseRequest$.subscribe(async () => {
             this.app.closeWindow()
+        })
+
+        // File-menu commands routed from the main process to the focused window.
+        // new-tab mirrors the "+" toolbar action (profile selector → launch);
+        // close-tab mirrors the close-tab hotkey.
+        this.hostApp.hostCommand$.subscribe(async command => {
+            if (command === 'new-tab') {
+                const profile = await this.profilesService.showProfileSelector().catch(() => null)
+                if (profile) {
+                    this.profilesService.launchProfile(profile)
+                }
+            }
+            if (command === 'close-tab' && this.app.activeTab) {
+                this.app.closeTab(this.app.activeTab, true)
+            }
         })
 
         if (window['safeModeReason']) {

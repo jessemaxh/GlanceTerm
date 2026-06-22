@@ -25,6 +25,10 @@ export class WebHostApp extends HostAppService {
         throw new Error('Not implemented')
     }
 
+    moveTabToNewWindow (): void {
+        throw new Error('Not implemented')
+    }
+
     relaunch (): void {
         location.reload()
     }

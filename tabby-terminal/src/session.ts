@@ -69,6 +69,16 @@ export abstract class BaseSession {
         this.loginScriptProcessor = newProcessor
     }
 
+    /**
+     * Detach this session from its underlying PTY/transport WITHOUT killing it,
+     * so another window can re-attach to the still-running process (tab
+     * move / tear-off). No-op for transports that can't be handed off;
+     * overridden by the local session to drop its renderer-side PTY
+     * subscription (otherwise the closing window keeps consuming + acking the
+     * PTY data stream after the session is reused elsewhere).
+     */
+    releasePTY (): void { }
+
     async destroy (): Promise<void> {
         if (this.open) {
             this.logger.info('Destroying')

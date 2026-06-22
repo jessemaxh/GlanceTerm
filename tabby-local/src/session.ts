@@ -176,6 +176,13 @@ export class Session extends BaseSession {
         return this.pty?.getID() ?? null
     }
 
+    /** Drop our renderer-side PTY subscription without killing the PTY, so the
+     *  window adopting this session (tab move) becomes the sole data/ack peer.
+     *  Same call `destroyed$` makes on destroy — minus the `pty.kill`. */
+    override releasePTY (): void {
+        this.pty?.unsubscribeAll()
+    }
+
     resize (columns: number, rows: number): void {
         this.pty?.resize(columns, rows)
     }

@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/explicit-module-boundary-types */
 import { Component, Input, Optional, Inject, HostBinding, HostListener, NgZone } from '@angular/core'
+import { CdkDragEnd } from '@angular/cdk/drag-drop'
 import { auditTime } from 'rxjs'
 import { TabContextMenuItemProvider } from '../api/tabContextMenuProvider'
 import { BaseTabComponent } from './baseTab.component'
@@ -82,11 +83,38 @@ export class TabHeaderComponent extends BaseComponent {
         this.app.emitTabDragStarted(tab)
     }
 
-    onTabDragEnd () {
+    onTabDragEnd (event: CdkDragEnd) {
+        const tearOff = this.shouldTearOffToNewWindow(event)
         setTimeout(() => {
             this.app.emitTabDragEnded()
             this.app.emitTabsChanged()
+            if (tearOff) {
+                this.app.moveTabToNewWindow(this.tab)
+            }
         })
+    }
+
+    /**
+     * A tab header released clear of the window — past a small margin on any
+     * edge — is a "tear off" gesture, so pop the tab into its own window.
+     *
+     * `dropPoint` is the pointer position in viewport coordinates at release.
+     * The margin keeps an edge-of-strip reorder (pointer flicking a few px past
+     * the top) from misfiring. A drop that lands *inside* the window — a reorder
+     * within the tab strip, or onto a split drop zone — stays inside the rect
+     * and is handled by the normal CDK paths instead. Web has no windowing (its
+     * moveTabToNewWindow throws), so the gesture is disabled there.
+     */
+    private shouldTearOffToNewWindow (event: CdkDragEnd): boolean {
+        if (this.hostApp.platform === Platform.Web) {
+            return false
+        }
+        const { x, y } = event.dropPoint
+        const margin = 30
+        return x < -margin
+            || y < -margin
+            || x > window.innerWidth + margin
+            || y > window.innerHeight + margin
     }
 
     @HostBinding('class.flex-width') get isFlexWidthEnabled (): boolean {

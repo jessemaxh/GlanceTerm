@@ -18,6 +18,8 @@ export abstract class HostAppService {
 
     protected settingsUIRequest = new Subject<void>()
     protected configChangeBroadcast = new Subject<void>()
+    protected openRecoveredTab = new Subject<any>()
+    protected hostCommand = new Subject<string>()
     protected logger: Logger
 
     /**
@@ -30,6 +32,19 @@ export abstract class HostAppService {
      */
     get configChangeBroadcast$ (): Observable<void> { return this.configChangeBroadcast }
 
+    /**
+     * Fired when this (newly opened) window is handed a tab recovery token to
+     * adopt — the other half of [[moveTabToNewWindow]].
+     */
+    get openRecoveredTab$ (): Observable<any> { return this.openRecoveredTab }
+
+    /**
+     * Fired when the application menu (main process) asks this window to run a
+     * renderer-side command — e.g. `'new-tab'` / `'close-tab'` from the File
+     * menu. Delivered only to the focused window.
+     */
+    get hostCommand$ (): Observable<string> { return this.hostCommand }
+
     constructor (
         injector: Injector,
     ) {
@@ -37,6 +52,13 @@ export abstract class HostAppService {
     }
 
     abstract newWindow (): void
+
+    /**
+     * Opens a new window and hands it `token` (a full tab recovery token) to
+     * adopt. Used to move a tab — including its live session — into a fresh
+     * window. The receiving window fires [[openRecoveredTab$]].
+     */
+    abstract moveTabToNewWindow (token: any): void
 
     // eslint-disable-next-line @typescript-eslint/no-empty-function
     emitReady (): void { }

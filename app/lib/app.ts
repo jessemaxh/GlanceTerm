@@ -1,4 +1,4 @@
-import { app, ipcMain, Menu, Tray, shell, screen, globalShortcut, MenuItemConstructorOptions, WebContents } from 'electron'
+import { app, ipcMain, Menu, Tray, shell, screen, globalShortcut, MenuItemConstructorOptions, WebContents, BrowserWindow } from 'electron'
 import promiseIpc from 'electron-promise-ipc'
 import * as remote from '@electron/remote/main'
 import { spawnSync } from 'child_process'
@@ -335,6 +335,52 @@ export class Application {
                             this.quitRequested = true
                             app.quit()
                         },
+                    },
+                ],
+            },
+            {
+                label: 'File',
+                submenu: [
+                    {
+                        label: 'New Window',
+                        // ⌘N is already handled by the renderer hotkey
+                        // (tabby-electron `new-window`). Show the shortcut here
+                        // for discoverability but DON'T re-register it, so a
+                        // single ⌘N opens exactly one window.
+                        accelerator: 'CmdOrCtrl+N',
+                        registerAccelerator: false,
+                        click: async () => {
+                            await this.newWindow()
+                        },
+                    },
+                    {
+                        label: 'New Tab',
+                        // No renderer hotkey claims ⌘T, so the menu owns it and
+                        // routes to the focused window (mirrors the "+" toolbar
+                        // button: profile selector → launch).
+                        accelerator: 'CmdOrCtrl+T',
+                        click: () => {
+                            BrowserWindow.getFocusedWindow()?.webContents.send('host:command', 'new-tab')
+                        },
+                    },
+                    { type: 'separator' },
+                    {
+                        label: 'Close Tab',
+                        // ⌘W is already the renderer close-tab hotkey — show it
+                        // but DON'T re-register, so a single ⌘W closes one tab.
+                        // The click still works for mouse users.
+                        accelerator: 'CmdOrCtrl+W',
+                        registerAccelerator: false,
+                        click: () => {
+                            BrowserWindow.getFocusedWindow()?.webContents.send('host:command', 'close-tab')
+                        },
+                    },
+                    {
+                        // ⇧⌘W, not ⌘W (which closes a tab). `role: 'close'`
+                        // targets the focused window automatically.
+                        role: 'close',
+                        label: 'Close Window',
+                        accelerator: 'Shift+CmdOrCtrl+W',
                     },
                 ],
             },

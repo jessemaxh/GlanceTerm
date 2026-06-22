@@ -49,6 +49,14 @@ export class ElectronHostAppService extends HostAppService {
             this.configChangeBroadcast.next()
         }))
 
+        electron.ipcRenderer.on('host:open-recovered-tab', (_$event, token: any) => this.zone.run(() => {
+            this.openRecoveredTab.next(token)
+        }))
+
+        electron.ipcRenderer.on('host:command', (_$event, command: string) => this.zone.run(() => {
+            this.hostCommand.next(command)
+        }))
+
         if (isWindowsBuild(WIN_BUILD_FLUENT_BG_SUPPORTED)) {
             electron.ipcRenderer.send('window-set-disable-vibrancy-while-dragging', true)
         }
@@ -56,6 +64,10 @@ export class ElectronHostAppService extends HostAppService {
 
     newWindow (): void {
         this.electron.ipcRenderer.send('app:new-window')
+    }
+
+    moveTabToNewWindow (token: any): void {
+        this.electron.ipcRenderer.send('app:new-window-with-tab', token)
     }
 
     async saveConfig (data: string): Promise<void> {

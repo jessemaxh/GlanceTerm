@@ -117,6 +117,17 @@ export class AppService {
         })
 
         hostWindow.windowFocused$.subscribe(() => this._activeTab?.emitFocused())
+
+        // A tab moved into this (freshly opened) window from another one —
+        // re-create it from the recovery token. For terminal tabs the token
+        // carries `restoreFromPTYID`, so this re-attaches to the still-running
+        // PTY instead of spawning a new shell. See moveTabToNewWindow().
+        hostApp.openRecoveredTab$.subscribe(async token => {
+            const tab = await this.tabRecovery.recoverTab(token)
+            if (tab) {
+                this.openNewTabRaw(tab)
+            }
+        })
     }
 
     addTabRaw (tab: BaseTabComponent, index: number|null = null): void {
@@ -359,6 +370,34 @@ export class AppService {
             this.addTabRaw(dup, this.tabs.indexOf(tab) + 1)
         }
         return dup
+    }
+
+    /**
+     * Moves a tab into a brand-new window, keeping its live session running.
+     * Serializes the tab (full token → `restoreFromPTYID` for terminals),
+     * releases the session so the upcoming close does NOT kill the PTY, hands
+     * the token to a new window (which re-attaches via [[openRecoveredTab$]]),
+     * then removes the tab here.
+     */
+    async moveTabToNewWindow (tab: BaseTabComponent): Promise<void> {
+        if (!this.tabs.includes(tab)) {
+            return
+        }
+        const token = await this.tabRecovery.getFullRecoveryToken(tab, { includeState: true })
+        if (!token) {
+            return
+        }
+        // Detach + keep the underlying PTY alive across the close. Recurses into
+        // split panes so every terminal inside a split hands off its session.
+        for (const t of (tab instanceof SplitTabComponent ? tab.getAllTabs() : [tab])) {
+            if (typeof (t as any).releaseSession === 'function') {
+                (t as any).releaseSession()
+            }
+        }
+        this.hostApp.moveTabToNewWindow(token)
+        // Destroy directly (not closeTab) so it doesn't land on the reopen-closed
+        // stack — the session now lives in the other window.
+        tab.destroy()
     }
 
     /**
