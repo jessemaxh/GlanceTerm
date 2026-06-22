@@ -31,12 +31,15 @@ jobs:
         with:
           node-version: '22'
 
-      # keytar links against libsecret; libarchive-tools mirrors Tabby's old
-      # Linux job. The checks below (tsc + vitest) don't load native modules,
-      # but the install's build-native step still compiles node-pty/keytar, so
-      # the headers must be present or `yarn install` fails.
+      # Native-module build headers for the install's node-gyp steps:
+      #   libfontconfig1-dev -> fontmanager-redux (FontManagerLinux.cc)
+      #   libsecret-1-dev    -> keytar
+      #   libarchive-tools   -> mirrors Tabby's old Linux job (bsdtar)
+      # The checks below (tsc + vitest) never load these natives, but the
+      # install compiles them eagerly, so the headers must be present or
+      # `yarn install` fails.
       - name: Install system libraries
-        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev libarchive-tools
+        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libsecret-1-dev libarchive-tools
 
       # Not a yarn-workspaces repo: the root postinstall (install-deps.mjs)
       # cascades the install into app/, web/ and every plugin — installing each
