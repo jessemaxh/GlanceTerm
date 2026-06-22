@@ -8,7 +8,7 @@ name: Release
 #      `feat:` -> minor, `feat!:` / `BREAKING CHANGE` -> major.
 #   2. Merge that PR when you want to ship. release-please then tags vX.Y.Z and
 #      creates the GitHub release; the `build` job below builds the signed,
-#      notarized dual-arch dmgs and attaches them to that release.
+#      notarized arm64 (Apple Silicon) dmg and attaches it to that release.
 #
 # Why the build lives in THIS workflow (gated on release_created) rather than a
 # separate tag-triggered one: a tag pushed by GITHUB_TOKEN does NOT trigger other
@@ -19,14 +19,21 @@ name: Release
 # review on main" blocks CI from direct-pushing a version bump, but a PR the
 # maintainer approves + merges is exactly the supported path.
 #
-# Build details: dual-arch (arm64 on macos-latest, x64 on macos-13), RELEASE=1
-# stamps the (release-please-bumped) app/package.json version, Developer-ID signs
-# + notarizes when the signing secrets are present (CSC_LINK, CSC_KEY_PASSWORD,
-# APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID). Only the .dmg installers
-# are attached — electron-builder's .zip / .blockmap / latest-mac.yml are for
-# in-app auto-update, which isn't wired up here.
+# Build details: arm64 only (Apple Silicon, macos-latest). RELEASE=1 stamps the
+# (release-please-bumped) app/package.json version, Developer-ID signs + notarizes
+# when the signing secrets are present (CSC_LINK, CSC_KEY_PASSWORD, APPLE_ID,
+# APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID). Only the .dmg installer is attached
+# — electron-builder's .zip / .blockmap / latest-mac.yml are for in-app
+# auto-update, which isn't wired up here.
 #
 # ── Planned (DEFERRED) ────────────────────────────────────────────────────
+# Intel macOS (x64): DROPPED. GitHub's hosted Intel runners (macos-13) are a
+# scarce, being-deprecated pool — x64 jobs sat queued 30+ min with no pickup. To
+# bring Intel back, cross-build x64 (or a universal binary) on an arm64 runner —
+# but the native modules (node-pty / keytar / fontmanager-redux) must be verified
+# on a real Intel Mac first — or register a self-hosted Intel runner. Note: arm64
+# binaries can't run on Intel (Rosetta translates Intel->arm only), so until then
+# this ships Apple Silicon only.
 # Windows (x64 + arm64, NSIS .exe) and Linux (x64 + arm64, AppImage/.deb/.rpm) —
 # add matrix entries + the win/linux build commands when implementing.
 
@@ -58,8 +65,6 @@ jobs:
         include:
           - arch: arm64
             runner: macos-latest # Apple Silicon
-          - arch: x64
-            runner: macos-13 # Intel
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -72,8 +77,7 @@ jobs:
 
       # macOS runners ship Xcode + command-line tools, so the native modules
       # (node-pty, keytar, fontmanager-redux) build without extra system libs.
-      # ARCH defaults to the runner's process.arch, so the same command yields
-      # arm64 on macos-latest and x64 on macos-13.
+      # ARCH defaults to the runner's process.arch (arm64 on macos-latest).
       - name: Install dependencies
         run: yarn install --network-timeout 1000000
 
