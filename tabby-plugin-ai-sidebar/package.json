@@ -6,6 +6,7 @@
     "tabby-plugin"
   ],
   "main": "dist/index.js",
+  "typings": "typings/index.d.ts",
   "scripts": {
     "build": "webpack --progress --color",
     "watch": "webpack --progress --color --watch",
