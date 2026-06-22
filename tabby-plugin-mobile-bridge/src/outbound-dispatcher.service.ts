@@ -15,6 +15,7 @@ import { appendAudit, redactToken } from './audit-log'
 import { TranscriptTailerService, TranscriptEvent } from './transcript/tailer.service'
 import { PtyTailerService } from './transcript/pty-tailer.service'
 import { InstanceLockService } from './instance-lock.service'
+import { classifyStatusTransition } from './status-transition'
 
 /** Event types pushed to phones. Aligned with the per-event-type filter
  *  defaults. */
@@ -254,26 +255,15 @@ export class OutboundDispatcherService implements OnDestroy {
     }
 
     private detect (s: TabState, prev: TabStatus | undefined): void {
-        // any → NeedsPermission
-        if (s.status === TabStatus.NeedsPermission && prev !== TabStatus.NeedsPermission) {
-            void this.dispatch(s, 'needs_permission', `${s.aiTool ?? 'agent'} needs permission — check the desktop`)
-            return
-        }
-        // Working → Idle/Done = finished a turn. `done` is just idle-while-
-        // unfocused, so both terminal states mean "stopped working".
-        if ((s.status === TabStatus.Idle || s.status === TabStatus.Done) && prev === TabStatus.Working) {
-            void this.dispatch(s, 'task_completed', `${s.aiTool ?? 'agent'} finished — ready for next prompt`)
-            return
-        }
-        // (non-working) → Working = started / resumed a turn. Opt-in
-        // `state_transition` event. Deliberately NOT emitted for idle↔done
-        // (those are desktop focus flips, not real activity) nor → no_ai (the
-        // tab/agent went away) — keeps the phone to ~one "started" + one
-        // "finished" per turn instead of every raw TabStatus flip.
-        if (s.status === TabStatus.Working && prev !== TabStatus.Working) {
-            void this.dispatch(s, 'state_transition', `${s.aiTool ?? 'agent'} started`)
-            return
-        }
+        if (prev === undefined) return
+        const event = classifyStatusTransition(s.status, prev)
+        if (!event) return
+        const label = s.aiTool ?? 'agent'
+        const body =
+            event === 'needs_permission' ? `${label} needs permission — check the desktop`
+            : event === 'task_completed' ? `${label} finished — ready for next prompt`
+            : `${label} started`
+        void this.dispatch(s, event, body)
     }
 
     private async dispatch (state: TabState, eventType: BridgeEventType, body: string): Promise<void> {

@@ -9,6 +9,7 @@ import { BackendRegistry } from '../backends/registry.service'
 import { TopicService } from '../topic.service'
 import { InstanceLockService } from '../instance-lock.service'
 import { ChannelBinding, PendingPairing } from '../binding/types'
+import { hasStatusUpdates, nextStatusFilter } from '../binding/event-filter'
 import { BackendLastError, BotIdentity } from '../backends/types'
 
 type Platform = 'telegram' | 'feishu' | 'discord'
@@ -740,17 +741,14 @@ export class BridgeSettingsComponent implements OnDestroy {
      *  Derived from the per-binding event filter — `state_transition` only ever
      *  appears when status updates are on. */
     statusUpdates (b: ChannelBinding): boolean {
-        return b.eventFilter.includes('state_transition')
+        return hasStatusUpdates(b.eventFilter)
     }
 
-    /** Toggle status pushes. ON sets an explicit filter that keeps the agent's
-     *  messages AND adds the status events; OFF clears it back to `[]`, whose
-     *  default (assistant_text only) is the conversation-only baseline. */
+    /** Toggle status pushes. The filter math (preserve unrelated allowlist
+     *  entries, round-trip the "empty = defaults" sentinel) lives in the pure,
+     *  unit-tested {@link nextStatusFilter}. */
     toggleStatusUpdates (b: ChannelBinding): void {
-        const eventFilter = this.statusUpdates(b)
-            ? []
-            : ['assistant_text', 'needs_permission', 'task_completed', 'state_transition']
-        void this.store.update(b.id, { eventFilter })
+        void this.store.update(b.id, { eventFilter: nextStatusFilter(b.eventFilter) })
     }
 
     /** Hard-disconnect = remove binding entirely. Also clears the
