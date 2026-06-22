@@ -1,0 +1,115 @@
+name: Test build (all platforms)
+
+# Manual cross-platform build for hands-on testing. Builds macOS arm64 (signed +
+# notarized), Linux (AppImage/deb/rpm/pacman/tar.gz), and Windows (NSIS .exe +
+# portable .zip), then publishes everything to a single "test-build" PRERELEASE
+# you can download from. NOT a real release: it's a prerelease on a fixed tag,
+# which release-please and the Homebrew cask both ignore (they only track stable
+# releases). Re-running updates the same prerelease in place.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS-arm64
+            os: macos-latest
+          - name: Linux
+            os: ubuntu-latest
+          - name: Windows
+            os: windows-2022
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libsecret-1-dev libarchive-tools rpm fakeroot
+
+      # build/installer.nsh bundles the VC++ runtime via File ${BUILD_RESOURCES_DIR}\vc_redist.exe
+      - name: Windows — fetch VC++ redistributable
+        if: matrix.os == 'windows-2022'
+        shell: bash
+        run: curl -fL -o build/vc_redist.exe https://aka.ms/vs/17/release/vc_redist.x64.exe
+
+      - name: Install dependencies
+        run: yarn install --network-timeout 1000000
+
+      - name: Build macOS (signed + notarized when secrets present)
+        if: matrix.os == 'macos-latest'
+        run: RELEASE=1 npm run dmg:mac
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Build Linux
+        if: matrix.os == 'ubuntu-latest'
+        run: RELEASE=1 node scripts/build-linux.mjs
+
+      - name: Build Windows
+        if: matrix.os == 'windows-2022'
+        run: node scripts/build-windows.mjs
+        env:
+          RELEASE: '1'
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.name }}
+          path: |
+            dist/*.dmg
+            dist/*.AppImage
+            dist/*.deb
+            dist/*.rpm
+            dist/*.pacman
+            dist/*.tar.gz
+            dist/*.exe
+            dist/*.zip
+          if-no-files-found: warn
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all installers
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List
+        run: ls -lhR dist
+
+      - name: Publish "test-build" prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: test-build
+          name: Test build (all platforms)
+          prerelease: true
+          body: |
+            Cross-platform test build for hands-on verification — **not a real release**.
+
+            - macOS arm64 (Apple Silicon): signed + notarized `.dmg`
+            - Linux: `.AppImage` / `.deb` / `.rpm` / `.pacman` / `.tar.gz` (unsigned)
+            - Windows x64: NSIS `.exe` + portable `.zip` (unsigned → SmartScreen warning)
+
+            Built from `${{ github.sha }}`. Green = it built; please confirm each actually launches.
+          files: dist/*
+          fail_on_unmatched_files: false
