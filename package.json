@@ -33,7 +33,7 @@
     "compare-versions": "^5",
     "core-js": "^3.31.0",
     "core-js-pure": "^3.21.1",
-    "cross-env": "7.0.3",
+    "cross-env": "10.1.0",
     "css-loader": "^6.7.3",
     "deep-equal": "2.0.5",
     "electron": "38",
