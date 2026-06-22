@@ -1366,6 +1366,25 @@ export class HookWatcherService implements OnDestroy {
             return changed
         }
 
+        // A tool event carrying an `agent_id` is from a SUBAGENT, not the main
+        // agent — it must NOT drive the tab's MAIN status. Claude emits no
+        // agent_id on the main agent's own events (verified: main Pre/PostToolUse
+        // and Stop have agent_id absent), so an agent_id is an unambiguous
+        // "this came from a subagent" marker. Without this guard, a backgrounded
+        // subagent's Pre/PostToolUse (→ working) clobbers the main agent's
+        // needs_permission while it waits at an AskUserQuestion: observed live —
+        // main agent hit PermissionRequest(AskUserQuestion) → needs_permission,
+        // then its backgrounded reviewer subagent's Bash/Read events flipped the
+        // row back to "working" and it sat there until the user answered. The
+        // subagent's liveness is already reflected by the subagent set (the
+        // "· N agents" badge + the idle→working override), so dropping its
+        // status mapping here loses nothing. The side-channels above (spawn/stop
+        // set tracking, which key off agent_id) already ran, so we still return
+        // `changed` to surface any set mutation.
+        if (parsed.agent_id) {
+            return changed
+        }
+
         let status = adapter.mapEventToStatus(parsed.event, parsed.matcher)
         if (parsed.event === 'PostToolUse' && parsed.interrupted === 1) {
             status = TabStatus.Idle
