@@ -10,8 +10,8 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-yellow.svg"></a>
-  <img alt="Platforms" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
-  <img alt="Status" src="https://img.shields.io/badge/status-v0.2%20pre--release-orange">
+  <img alt="Platform" src="https://img.shields.io/badge/prebuilt-macOS%20Apple%20Silicon-lightgrey">
+  <a href="https://github.com/jessemaxh/GlanceTerm/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/jessemaxh/GlanceTerm"></a>
   <img alt="Built on Tabby" src="https://img.shields.io/badge/built%20on-Tabby-blue">
   <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg">
 </p>
@@ -200,21 +200,34 @@ goes wrong, you own it — the confirm dialog exists for exactly this reason.
 
 ## Install
 
-**macOS (recommended)** — grab the latest `.dmg` from the
-[releases page](../../releases), open it, and drag GlanceTerm.app into
-`/Applications`.
+**macOS · Apple Silicon — Homebrew (recommended)**
 
-The build is **signed with an Apple Developer ID and notarized**, so it opens
-with a normal double-click — no Gatekeeper warning, no right-click dance.
+```sh
+brew install --cask jessemaxh/glanceterm/glanceterm
+```
 
-**Linux / Windows** — **no prebuilt installers are provided yet.** There's no
-CI at the moment, so only the macOS `.dmg` is built (locally) and uploaded by
-hand. The cross-platform code paths exist — the hook handler ships a PowerShell
-variant for Windows and POSIX `sh` for Linux, and everything compiles — but
-nothing has been smoke-tested. To try GlanceTerm on Linux/Windows, build from
-source (see [Dev / Build](#dev--build)). PRs reporting "works on my distro" /
-"breaks here, fix attached" — or contributing a build workflow — are very
-welcome.
+Homebrew grabs the [latest release](../../releases/latest), drops GlanceTerm into
+`/Applications`, and strips the quarantine flag — so it opens with no "downloaded
+from the Internet" prompt.
+
+**Or download the `.dmg`** from the [latest release](../../releases/latest), open
+it, and drag GlanceTerm.app into `/Applications`. The build is **signed with an
+Apple Developer ID and notarized** — a normal double-click. On a direct download,
+macOS shows a one-time "downloaded from the Internet… Apple checked it for malware,
+none found" confirmation the first time you open it; that's expected for any
+downloaded app — click **Open** once. (Homebrew installs skip even that.)
+
+> **Apple Silicon (arm64) only.** Intel (x64) Macs aren't supported: GitHub's
+> hosted Intel runners are too scarce to build on, and arm64 binaries can't run on
+> Intel (Rosetta only translates Intel→arm). Each release is built, signed,
+> notarized and published automatically by CI on every version bump.
+
+**Linux / Windows** — **no prebuilt installers.** The cross-platform code paths
+exist — the hook handler ships a PowerShell variant for Windows and POSIX `sh` for
+Linux, and everything compiles — but nothing has been smoke-tested. To try
+GlanceTerm there, build from source (see [Dev / Build](#dev--build)). PRs reporting
+"works on my distro" / "breaks here, fix attached" — or contributing a build
+workflow — are very welcome.
 
 ## Dev / Build
 

@@ -10,8 +10,8 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-yellow.svg"></a>
-  <img alt="Platforms" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
-  <img alt="Status" src="https://img.shields.io/badge/status-v0.2%20pre--release-orange">
+  <img alt="Platform" src="https://img.shields.io/badge/prebuilt-macOS%20Apple%20Silicon-lightgrey">
+  <a href="https://github.com/jessemaxh/GlanceTerm/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/jessemaxh/GlanceTerm"></a>
   <img alt="Built on Tabby" src="https://img.shields.io/badge/built%20on-Tabby-blue">
   <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg">
 </p>
@@ -187,16 +187,28 @@ Claude 的 `PermissionRequest` 回复 `allow`。此后 Claude 可以执行任何
 
 ## 安装
 
-**macOS（推荐）** —— 从[发布页](../../releases)下载最新的 `.dmg`，打开后把
-GlanceTerm.app 拖进 `/Applications`。
+**macOS · Apple Silicon —— Homebrew（推荐）**
 
-该构建已用 **Apple Developer ID 签名并经过公证**，所以双击即可正常打开 ——
-没有 Gatekeeper 警告，也不用右键那一套。
+```sh
+brew install --cask jessemaxh/glanceterm/glanceterm
+```
 
-**Linux / Windows** —— **暂不提供预构建安装包。** 目前没有 CI，只有 macOS 的
-`.dmg` 是本地构建、手动上传的。跨平台代码路径是存在的 —— hook 处理器为 Windows
-提供了 PowerShell 变体、为 Linux 提供了 POSIX `sh`，全部能编译 —— 但都没做过
-冒烟测试。想在 Linux/Windows 上试用，请从源码构建（见[开发 / 构建](#开发--构建)）。
+Homebrew 会拉取[最新发布版](../../releases/latest)，把 GlanceTerm 放进
+`/Applications`，并自动去掉隔离标记 —— 打开时**不会**弹"从互联网下载"的提示。
+
+**或下载 `.dmg`** —— 从[最新发布版](../../releases/latest)下载，打开后把
+GlanceTerm.app 拖进 `/Applications`。该构建已用 **Apple Developer ID 签名并公证**，
+双击即可。直接下载 dmg 时，macOS 首次打开会弹一次"已从互联网下载…… Apple 已检查、
+未发现恶意软件"的确认 —— 这对任何下载的 app 都正常，点一次 **Open** 即可。（用
+Homebrew 安装连这一下都没有。）
+
+> **仅支持 Apple Silicon（arm64）。** 不支持 Intel（x64）Mac：GitHub 托管的 Intel
+> runner 太稀缺、没法用来构建，而且 arm64 程序无法在 Intel 上运行（Rosetta 只能
+> Intel→arm 单向）。每次版本号更新，发布版由 CI 自动构建、签名、公证并发布。
+
+**Linux / Windows** —— **暂不提供预构建安装包。** 跨平台代码路径是存在的 —— hook
+处理器为 Windows 提供 PowerShell 变体、为 Linux 提供 POSIX `sh`，全部能编译 ——
+但都没做过冒烟测试。想在那上面试用，请从源码构建（见[开发 / 构建](#开发--构建)）。
 欢迎提"在我的发行版上能用"/"这里有问题、附上修复"的 PR，或贡献一个构建 workflow。
 
 ## 开发 / 构建
