@@ -1,12 +1,19 @@
 name: CI
 
-# Quality gate for every pull request and every push to main: a whole-tree
-# typecheck plus the plugin unit suites.
+# Quality gate for every pull request and every push to main: the plugin unit
+# suites (ai-sidebar + mobile-bridge).
 #
-# Lint is intentionally NOT gated here. The fork's code (and the ai-sidebar /
-# mobile-bridge plugins) predates Tabby's strict eslint config and carries
-# ~1.2k violations against it (no-brace `if`, init-declarations, …). Enforcing
-# lint is a separate cleanup, not a prerequisite for CI.
+# NOT gated here, deliberately:
+#   - lint: the fork predates Tabby's strict eslint config and carries ~1.2k
+#     violations against it (no-brace `if`, init-declarations, …) — a separate
+#     cleanup, not a CI prerequisite.
+#   - `build:typings`: it depends on warm build artifacts (a plugin's
+#     dist/index.js must already exist for a cross-plugin import like
+#     mobile-bridge -> ai-sidebar to resolve) and, when they do exist, resolves
+#     those imports as `any` — so it neither runs reliably on a cold checkout
+#     nor meaningfully typechecks cross-plugin code. Typecheck stays a dev-time
+#     check (per-package `tsc --noEmit`) until the plugins gain real `types`
+#     entries or a pre-build step.
 #
 # Build / signing / release live in a separate workflow (phase 2) because they
 # need signing secrets; see release.yml history.
@@ -21,8 +28,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check:
-    name: Typecheck & tests
+  test:
+    name: Plugin tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,9 +54,6 @@ jobs:
       # the same dependency flow `npm run dmg:mac` relies on locally.
       - name: Install dependencies
         run: yarn install --network-timeout 1000000
-
-      - name: Typecheck (emit typings across all packages)
-        run: yarn build:typings
 
       - name: Test — ai-sidebar
         working-directory: tabby-plugin-ai-sidebar
