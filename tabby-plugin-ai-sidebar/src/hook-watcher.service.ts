@@ -179,6 +179,12 @@ const BG_ARRIVAL_TTL_MS = 10_000
  */
 const SUBAGENT_TOMBSTONE_TTL_MS = 60_000
 
+/** Throttle for the transcript-based subagent reconcile — at most one file
+ *  read per tab per window. A reconcile that clears the set ends the trigger
+ *  condition (set empty), so this mainly bounds the rarer case where a real
+ *  subagent is still pending while Stop events keep firing. */
+const SUBAGENT_RECONCILE_THROTTLE_MS = 2_000
+
 /**
  * Fallback live-window for a Monitor task whose start event carried no
  * `monitor_timeout_ms` (older Claude builds, or a future Monitor schema
@@ -276,6 +282,44 @@ export function reduceSubagentSet (
     const next = new Set(set)
     next.delete(ev.agentId)
     return next
+}
+
+/**
+ * Count subagents still in flight per the TRANSCRIPT — the authoritative
+ * tool_use↔tool_result record. A Task/Agent `tool_use` with no matching
+ * `tool_result` is a subagent that hasn't finished yet.
+ *
+ * Unlike the hook-event set (which leaks when Claude omits a `SubagentStop`
+ * for an agent that gets *backgrounded*), the transcript always records the
+ * `tool_result` when a subagent completes — including backgrounded ones — so
+ * this is leak-proof and used to reconcile {@link liveAgentIds} on idle.
+ *
+ * `transcript` is the raw JSONL text. Lines that don't parse, or carry no
+ * `message.content` array (e.g. `type: "system"` entries), are skipped.
+ * Pure + exported for unit tests.
+ */
+export function countPendingSubagentsInTranscript (transcript: string): number {
+    const spawned = new Set<string>()
+    const resolved = new Set<string>()
+    for (const line of transcript.split('\n')) {
+        if (!line) continue
+        let msg: any
+        try { msg = JSON.parse(line) } catch { continue }
+        const content = msg?.message?.content
+        if (!Array.isArray(content)) continue
+        for (const b of content) {
+            // Claude renamed the subagent-spawning tool from `Task` to `Agent`;
+            // accept both, same as the hook side-channel.
+            if (b?.type === 'tool_use' && (b.name === 'Agent' || b.name === 'Task') && typeof b.id === 'string') {
+                spawned.add(b.id)
+            } else if (b?.type === 'tool_result' && typeof b.tool_use_id === 'string') {
+                resolved.add(b.tool_use_id)
+            }
+        }
+    }
+    let pending = 0
+    for (const id of spawned) if (!resolved.has(id)) pending++
+    return pending
 }
 
 /**
@@ -388,6 +432,10 @@ export class HookWatcherService implements OnDestroy {
      * forever.
      */
     private readonly liveAgentIds = new Map<string, Set<string>>()
+
+    /** Per-tab throttle stamp for {@link reconcileSubagentsFromTranscript} —
+     *  bounds how often we re-read a tab's (potentially large) transcript. */
+    private readonly lastSubagentReconcile = new Map<string, number>()
 
     /**
      * Per-tab tombstone for recently-stopped subagent ids. Inner Map is
@@ -603,6 +651,47 @@ export class HookWatcherService implements OnDestroy {
      *  green even after the main agent fires Stop. */
     getSubagentInFlight (tabId: string): number {
         return this.liveAgentIds.get(tabId)?.size ?? 0
+    }
+
+    /**
+     * Reconcile the id-based subagent set against the transcript and clear it
+     * if the transcript proves 0 subagents are still pending. Fixes the leak
+     * where a backgrounded agent never emits its `SubagentStop`, stranding an
+     * id in {@link liveAgentIds} that pins the row to "working · N agents" even
+     * though the main agent is idle. Authoritative (the transcript records the
+     * `tool_result` for every subagent, backgrounded or not), best-effort, and
+     * throttled — safe to fire on every idle event. Async (reads the
+     * transcript file); on completion it emits so the row repaints.
+     *
+     * Conservative: only CLEARS on a proven-0 transcript, and only if the set
+     * did not GROW during the read (a spawn that arrived mid-read isn't in the
+     * text we parsed, so clearing would drop a real, live subagent). A partial
+     * leak (set > transcript-pending > 0) is left alone — the row is correctly
+     * "working", and the residual id is reaped at the next idle once the real
+     * subagents finish.
+     */
+    private async reconcileSubagentsFromTranscript (tabId: string, transcriptPath: string): Promise<void> {
+        const now = this.now()
+        if (now - (this.lastSubagentReconcile.get(tabId) ?? 0) < SUBAGENT_RECONCILE_THROTTLE_MS) return
+        this.lastSubagentReconcile.set(tabId, now)
+
+        const before = this.liveAgentIds.get(tabId)?.size ?? 0
+        if (before === 0) return
+
+        let text: string
+        try {
+            text = await fs.readFile(transcriptPath, 'utf8')
+        } catch {
+            return // transcript gone / unreadable — leave the set untouched
+        }
+
+        const pending = countPendingSubagentsInTranscript(text)
+        const after = this.liveAgentIds.get(tabId)?.size ?? 0
+        if (pending === 0 && after > 0 && after <= before) {
+            this.liveAgentIds.delete(tabId)
+            this.subagentTombstones.delete(tabId)
+            this.emit()
+        }
     }
 
     /** Sync lookup — how many Monitor tasks are currently live. Drives the
@@ -1333,6 +1422,22 @@ export class HookWatcherService implements OnDestroy {
         debugLog.log('debug', 'watcher', `${parsed.tab_id.slice(0, 8)} ${parsed.agent} ${parsed.event}${parsed.tool_name ? `(${parsed.tool_name})` : ''} → ${status}`)
         if (parsed.auto_approved === 1) {
             debugLog.log('info', 'auto-approve', `${parsed.tab_id.slice(0, 8)} granted ${parsed.tool_name || '?'} in ${parsed.cwd || '?'}`)
+        }
+
+        // Transcript reconciliation (Claude only). The id-based subagent set
+        // assumes Claude fires a matching SubagentStop for every spawn — but it
+        // does NOT for an agent that gets *backgrounded*, so the set can strand
+        // a stuck id and pin the row to "working · N agents" forever. When the
+        // main agent goes idle with a non-empty set, cross-check the transcript
+        // (authoritative) and clear the set if 0 subagents are actually pending.
+        // Throttled + best-effort; runs only on the suspected-leak condition.
+        if (
+            adapter.id === 'claude'
+            && status === TabStatus.Idle
+            && parsed.transcript_path
+            && (this.liveAgentIds.get(parsed.tab_id)?.size ?? 0) > 0
+        ) {
+            void this.reconcileSubagentsFromTranscript(parsed.tab_id, parsed.transcript_path)
         }
         return true
     }

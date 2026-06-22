@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 
 import {
+    countPendingSubagentsInTranscript,
     reduceSubagentSet,
     stickyModel,
     SubagentEvent,
@@ -168,5 +169,71 @@ describe('reduceSubagentSet', () => {
             ])
             expect([...final]).toEqual(['a3'])
         })
+    })
+})
+
+describe('countPendingSubagentsInTranscript', () => {
+    const line = (content: any[]) => JSON.stringify({ message: { content } })
+    const spawn = (id: string, name = 'Agent') => line([{ type: 'tool_use', id, name }])
+    const result = (id: string) => line([{ type: 'tool_result', tool_use_id: id }])
+
+    it('empty transcript → 0', () => {
+        expect(countPendingSubagentsInTranscript('')).toBe(0)
+    })
+
+    it('a spawn with no matching tool_result → 1 pending', () => {
+        expect(countPendingSubagentsInTranscript(spawn('toolu_1'))).toBe(1)
+    })
+
+    it('a spawn with its tool_result → 0 pending', () => {
+        expect(countPendingSubagentsInTranscript([spawn('toolu_1'), result('toolu_1')].join('\n'))).toBe(0)
+    })
+
+    it('counts both Task and Agent tool names', () => {
+        expect(countPendingSubagentsInTranscript([spawn('toolu_a', 'Task'), spawn('toolu_b', 'Agent')].join('\n'))).toBe(2)
+    })
+
+    it('the leak shape: N spawned, N-1 resolved → 1 (the stuck backgrounded agent)', () => {
+        // Mirrors tab-4: many Agent spawns, all but one resolved. The hook set
+        // leaks that one (no SubagentStop); the transcript shows it pending.
+        const lines: string[] = []
+        for (let i = 0; i < 5; i++) lines.push(spawn(`toolu_${i}`))
+        for (let i = 0; i < 4; i++) lines.push(result(`toolu_${i}`)) // toolu_4 unresolved
+        expect(countPendingSubagentsInTranscript(lines.join('\n'))).toBe(1)
+    })
+
+    it('all resolved → 0 (the fix: a backgrounded agent IS recorded as resolved)', () => {
+        const lines: string[] = []
+        for (let i = 0; i < 36; i++) lines.push(spawn(`toolu_${i}`))
+        for (let i = 0; i < 36; i++) lines.push(result(`toolu_${i}`))
+        expect(countPendingSubagentsInTranscript(lines.join('\n'))).toBe(0)
+    })
+
+    it('resolves across separate transcript lines', () => {
+        const t = [
+            spawn('toolu_1'),
+            line([{ type: 'text', text: 'an assistant message in between' }]),
+            result('toolu_1'),
+        ].join('\n')
+        expect(countPendingSubagentsInTranscript(t)).toBe(0)
+    })
+
+    it('ignores malformed lines and non-content entries', () => {
+        const t = [
+            'not json at all',
+            JSON.stringify({ type: 'system', subtype: 'init' }), // no message.content
+            spawn('toolu_1'),
+            JSON.stringify({ message: { content: 'a string, not an array' } }),
+            result('toolu_1'),
+        ].join('\n')
+        expect(countPendingSubagentsInTranscript(t)).toBe(0)
+    })
+
+    it('a tool_result for an unspawned id does not go negative', () => {
+        expect(countPendingSubagentsInTranscript([result('toolu_never'), spawn('toolu_1')].join('\n'))).toBe(1)
+    })
+
+    it('a non-subagent tool_use (Bash) is not counted', () => {
+        expect(countPendingSubagentsInTranscript(line([{ type: 'tool_use', id: 'toolu_bash', name: 'Bash' }]))).toBe(0)
     })
 })
