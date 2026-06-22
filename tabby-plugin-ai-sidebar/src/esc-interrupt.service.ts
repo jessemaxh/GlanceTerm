@@ -155,7 +155,11 @@ export class EscInterruptService implements OnDestroy {
     private onConfirmedEsc (innerTab: BaseTabComponent): void {
         const tabState = this.monitor.current.find(s => s.innerTab === innerTab)
         if (!tabState) return
-        if (tabState.status !== TabStatus.Working) return
+        // Working: ESC interrupts in-flight LLM/tool work (no hook fires).
+        // NeedsPermission: ESC cancels the permission prompt → agent returns to
+        // idle (also no clearing hook) — without this the row stuck on
+        // `needs_permission`. forceIdle self-corrects if the agent continues.
+        if (tabState.status !== TabStatus.Working && tabState.status !== TabStatus.NeedsPermission) return
         if (!tabState.tabId) return
         this.hooks.forceIdle(tabState.tabId, 'user-esc')
     }

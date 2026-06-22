@@ -69,7 +69,11 @@ describe('HookWatcher.forceIdle (ESC fast-path target)', () => {
         expect(flipped).toBe(false)
     })
 
-    it('refuses to flip NeedsPermission (would hide a real prompt)', () => {
+    it('flips NeedsPermission to Idle (ESC cancels the permission prompt)', () => {
+        // A bare ESC while a permission prompt is up cancels it and returns the
+        // agent to idle with no clearing hook; the row must not stay stuck on
+        // needs_permission. (If the agent actually continues, its next real
+        // hook re-establishes the status.)
         const h = new ReplayHarness()
         h.process({
             tab_id: TAB,
@@ -81,8 +85,8 @@ describe('HookWatcher.forceIdle (ESC fast-path target)', () => {
         })
         expect(h.getStatus(TAB)?.status).toBe(TabStatus.NeedsPermission)
         const flipped = h.watcher.forceIdle(TAB, 'user-esc')
-        expect(flipped).toBe(false)
-        expect(h.getStatus(TAB)?.status).toBe(TabStatus.NeedsPermission)
+        expect(flipped).toBe(true)
+        expect(h.getStatus(TAB)?.status).toBe(TabStatus.Idle)
     })
 
     it('updates eventAt so the slow-path probe rearms its grace window', () => {

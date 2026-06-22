@@ -575,9 +575,16 @@ export class HookWatcherService implements OnDestroy {
      * No-op when:
      *   - No snapshot yet (we'd be fabricating a tool we don't know).
      *   - Already Idle (nothing to do).
-     *   - NeedsPermission (a permission dialog is the user's call; ESC
-     *     there cancels the dialog → next PreToolUse re-establishes
-     *     status anyway, no need to race).
+     *
+     * NeedsPermission IS flipped to Idle. A confirmed bare ESC there is the
+     * user cancelling the permission prompt, which returns the agent to the
+     * input prompt (idle) WITHOUT firing any clearing hook — so previously the
+     * row stayed stuck on `needs_permission` forever. (The earlier "refuse, it
+     * would hide a real prompt" stance assumed a follow-up PreToolUse always
+     * re-establishes status; on a cancel-to-idle there is none.) If the agent
+     * actually continued instead of going idle, its next real hook
+     * (PreToolUse / Stop / a fresh PermissionRequest) re-establishes the true
+     * status, so a wrong Idle self-corrects.
      *
      * `reason` is a label for future telemetry; not currently logged.
      */
@@ -586,7 +593,6 @@ export class HookWatcherService implements OnDestroy {
         const current = this.map.get(tabId)
         if (!current) return false
         if (current.status === TabStatus.Idle) return false
-        if (current.status === TabStatus.NeedsPermission) return false
         this.map.set(tabId, { ...current, status: TabStatus.Idle, eventAt: Date.now() })
         this.emit()
         return true
