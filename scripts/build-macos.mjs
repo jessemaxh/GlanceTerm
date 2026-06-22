@@ -425,6 +425,7 @@ async function signNotarizeStapleDmg () {
     const kc = path.join(os.tmpdir(), `gt-dmgsign-${process.pid}.keychain-db`)
     const kcPass = `tmp-${process.pid}`
     const sec = args => execFileSync('security', args, { stdio: 'pipe' })
+    let prevSearch = null
     try {
         try { sec(['delete-keychain', kc]) } catch { /* none yet */ }
         sec(['create-keychain', '-p', kcPass, kc])
@@ -432,6 +433,17 @@ async function signNotarizeStapleDmg () {
         sec(['import', p12Path, '-k', kc, '-P', CSC_KEY_PASSWORD ?? '', '-T', '/usr/bin/codesign', '-A'])
         // Allow codesign to use the key WITHOUT a GUI authorization prompt.
         sec(['set-key-partition-list', '-S', 'apple-tool:,apple:', '-s', '-k', kcPass, kc])
+
+        // codesign resolves the signing identity through the keychain SEARCH
+        // LIST, not the --keychain flag alone. On a clean CI runner the cert
+        // lives only in our temp keychain, which isn't in the search list, so
+        // codesign fails with "The specified item could not be found in the
+        // keychain" — even though find-identity below finds it in `kc`.
+        // (Locally it works only because the login keychain also holds the
+        // cert.) Prepend kc to the user search list; restore it in finally.
+        prevSearch = execFileSync('security', ['list-keychains', '-d', 'user'], { encoding: 'utf8' })
+            .split('\n').map(s => s.trim().replace(/(^")|("$)/g, '')).filter(Boolean)
+        sec(['list-keychains', '-d', 'user', '-s', kc, ...prevSearch])
 
         const ids = execFileSync('security', ['find-identity', '-v', '-p', 'codesigning', kc], { encoding: 'utf8' })
         const line = ids.split('\n').find(l => /Developer ID Application/.test(l))
@@ -450,6 +462,7 @@ async function signNotarizeStapleDmg () {
             execFileSync('xcrun', ['stapler', 'staple', dmgPath], { stdio: 'inherit' })
         }
     } finally {
+        if (prevSearch) { try { sec(['list-keychains', '-d', 'user', '-s', ...prevSearch]) } catch { /* best-effort */ } }
         try { sec(['delete-keychain', kc]) } catch { /* best-effort */ }
         if (tmpP12) { try { fs.rmSync(tmpP12, { force: true }) } catch { /* best-effort */ } }
     }
