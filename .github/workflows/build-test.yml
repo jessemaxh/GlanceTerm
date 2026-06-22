@@ -46,6 +46,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libfontconfig1-dev libsecret-1-dev libarchive-tools rpm fakeroot
 
+      # npm's bundled node-gyp chokes on VS detection on windows-latest
+      # (gyp ERR! find VS ... RangeError ERR_CHILD_PROCESS_STDIO_MAXBUFFER).
+      # A fresh global node-gyp fixes it — same recipe upstream Tabby uses.
+      - name: Windows — fresh global node-gyp
+        if: matrix.os == 'windows-latest'
+        run: npm install -g node-gyp@latest
+
       - name: Install dependencies
         run: yarn install --network-timeout 1000000
 
