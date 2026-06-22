@@ -1,0 +1,57 @@
+name: CI
+
+# Quality gate for every pull request and every push to main: a whole-tree
+# typecheck plus the plugin unit suites.
+#
+# Lint is intentionally NOT gated here. The fork's code (and the ai-sidebar /
+# mobile-bridge plugins) predates Tabby's strict eslint config and carries
+# ~1.2k violations against it (no-brace `if`, init-declarations, …). Enforcing
+# lint is a separate cleanup, not a prerequisite for CI.
+#
+# Build / signing / release live in a separate workflow (phase 2) because they
+# need signing secrets; see release.yml history.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Typecheck & tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # keytar links against libsecret; libarchive-tools mirrors Tabby's old
+      # Linux job. The checks below (tsc + vitest) don't load native modules,
+      # but the install's build-native step still compiles node-pty/keytar, so
+      # the headers must be present or `yarn install` fails.
+      - name: Install system libraries
+        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev libarchive-tools
+
+      # Not a yarn-workspaces repo: the root postinstall (install-deps.mjs)
+      # cascades the install into app/, web/ and every plugin — installing each
+      # plugin's own vitest — and symlinks the local tabby-* packages. This is
+      # the same dependency flow `npm run dmg:mac` relies on locally.
+      - name: Install dependencies
+        run: yarn install --network-timeout 1000000
+
+      - name: Typecheck (emit typings across all packages)
+        run: yarn build:typings
+
+      - name: Test — ai-sidebar
+        working-directory: tabby-plugin-ai-sidebar
+        run: yarn test
+
+      - name: Test — mobile-bridge
+        working-directory: tabby-plugin-mobile-bridge
+        run: yarn test
