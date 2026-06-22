@@ -10,20 +10,26 @@ const __dirname = url.fileURLToPath(new URL('.', import.meta.url))
 
 const electronInfo = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../node_modules/electron/package.json')))
 
-// Version: GlanceTerm owns it in app/package.json (single source of truth).
-// We deliberately do NOT derive it from `git describe` — this repo is a Tabby
-// fork and still carries upstream's old `v1.x` git tags, so describe would make
-// builds report 1.0.235 instead of GlanceTerm's own line. To bump the marketing
-// version, edit app/package.json.
+// Version source, in order:
+//   1. The pushed git TAG. CI sets GITHUB_REF=refs/tags/vX.Y.Z on a tag build,
+//      and the tag IS the release version — so cutting a release is just
+//      `git tag v0.1.1 && git push`, with NO app/package.json edit. We read the
+//      EXPLICIT ref rather than `git describe`, because this Tabby fork still
+//      carries upstream's old v1.x tags (describe would report 1.0.235).
+//   2. app/package.json's version — the local/dev baseline when there's no tag.
 //
 // The build version is then specialised so every artifact filename is traceable
 // (e.g. GlanceTerm-0.1.0-dev.g3a1b2c4-macos-arm64.dmg). Precedence:
 //   RELEASE=1 → clean baseVersion (the actual distributable; keeps semver/auto-update tidy)
-//   REV set   → CI nightly, 0.1.0-nightly.<REV>
-//   otherwise → local dev, 0.1.0-dev.g<shorthash>[.dirty]
+//   REV set   → CI nightly, <base>-nightly.<REV>
+//   otherwise → local dev, <base>-dev.g<shorthash>[.dirty]
 // The `g` prefix keeps the hash a valid *alphanumeric* semver prerelease id even
 // when a hash is all digits (a bare numeric id may not have a leading zero).
-const baseVersion = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../app/package.json'), 'utf-8')).version
+function tagVersion () {
+    const m = (process.env.GITHUB_REF || '').match(/^refs\/tags\/v(\d+\.\d+\.\d+(?:-[\w.]+)?)$/)
+    return m && semver.valid(m[1]) ? m[1] : null
+}
+const baseVersion = tagVersion() ?? JSON.parse(fs.readFileSync(path.resolve(__dirname, '../app/package.json'), 'utf-8')).version
 
 function gitDevTag() {
     try {
