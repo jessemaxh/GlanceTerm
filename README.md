@@ -9,6 +9,11 @@
 </p>
 
 <p align="center">
+  A macOS terminal that runs, monitors, and switches between multiple AI coding agents —
+  <strong>Claude&nbsp;Code</strong>, <strong>Codex</strong>, <strong>Gemini&nbsp;CLI</strong>, and <strong>opencode</strong> — side by side in one window.
+</p>
+
+<p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-yellow.svg"></a>
   <img alt="Platform" src="https://img.shields.io/badge/prebuilt-macOS%20Apple%20Silicon-lightgrey">
   <a href="https://github.com/jessemaxh/GlanceTerm/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/jessemaxh/GlanceTerm"></a>

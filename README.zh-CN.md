@@ -9,6 +9,11 @@
 </p>
 
 <p align="center">
+  一个 macOS 终端，在一个窗口里并排运行、监控、切换多个 AI 编程 agent ——
+  <strong>Claude&nbsp;Code</strong>、<strong>Codex</strong>、<strong>Gemini&nbsp;CLI</strong>、<strong>opencode</strong>。
+</p>
+
+<p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-yellow.svg"></a>
   <img alt="Platform" src="https://img.shields.io/badge/prebuilt-macOS%20Apple%20Silicon-lightgrey">
   <a href="https://github.com/jessemaxh/GlanceTerm/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/jessemaxh/GlanceTerm"></a>
