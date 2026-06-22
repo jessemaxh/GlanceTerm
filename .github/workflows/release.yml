@@ -17,6 +17,19 @@ name: Release
 #
 # Version note: RELEASE=1 stamps app/package.json's version (0.1.0), not the
 # tag — bump app/package.json before tagging so the dmg version matches.
+#
+# ── Planned (DEFERRED — not implemented yet) ──────────────────────────────
+# Full release matrix: 3 platforms × CPU architectures, each into one draft
+# release. To wire up later:
+#   - macOS:   arm64 (below, active)  +  x64 (Intel)            → .dmg/.zip
+#   - Windows: x64 + arm64  → NSIS .exe  (needs WIN_CSC_LINK / WIN_CSC_KEY_PASSWORD secrets)
+#   - Linux:   x64 + arm64  → AppImage / .deb / .rpm           (unsigned)
+# Shape it as a `strategy.matrix` of {os, arch, build-cmd} fanning into one
+# `softprops/action-gh-release` per tag (the action appends assets to the same
+# draft when called from multiple jobs with the same tag). The mac/win/linux
+# build commands already exist in scripts/ (build-macos.mjs today); add the
+# win/linux equivalents when implementing. Keeping the single macOS-arm64 job
+# below as the first slice.
 
 on:
   push:
@@ -30,8 +43,9 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # TODO: expand into a {os, arch} matrix per the "Planned" note above.
   macos:
-    name: macOS build + draft release
+    name: macOS build + draft release (arm64)
     runs-on: macos-latest # arm64 (macos-14+)
     steps:
       - uses: actions/checkout@v4
