@@ -226,11 +226,13 @@ Docs: https://opencode.ai/docs/plugins/ and https://opencode.ai/docs/server/
 
 ## Platform support (macOS / Linux / Windows)
 
-The matrix above is implicitly **macOS** — that's the only platform anything has
-been validated on. This section is the platform dimension: which OS code paths
-*exist* vs which have been *run*. Same legend (✅ tested · 🧪 implemented, not
-tested · ❌ not implemented). Grounded in a code audit on 2026-06-12, not
-optimism — every 🧪 here is real code that has **never been executed on that OS**.
+Since v0.1.2 GlanceTerm **builds, launch-smoke-tests (the app must come up headless
+in CI), and ships installers for all three platforms** — so the app is proven to
+*launch* on Linux and Windows. The per-feature matrix above is still **macOS**:
+that's where each capability is validated against a real agent in daily use. This
+section is the platform dimension — which OS code paths *exist + launch* vs which
+have had their **feature** exercised. Legend: ✅ tested · 🧪 implemented + launches,
+feature not yet driven on that OS · ❌ not implemented.
 
 | Capability | macOS | Linux | Windows | Platform-specific implementation |
 |---|---|---|---|---|
@@ -255,11 +257,12 @@ Implemented-but-unrun code reliably has bugs. Test in descending risk:
 
 ### How to flip a cell 🧪 → ✅
 
-Build natively (CI on a public repo, or a VM/Docker — see
-`docs/open-source-checklist.md` CI section), **run the app on that OS**, exercise
-the capability against a real agent, then update the cell here with a one-line
-note of what was observed. Until then GlanceTerm only *claims* macOS (the README
-already says so) — Linux/Windows are "compiles + probably works, unproven."
+CI already builds + launch-smoke-tests every platform on each release (see
+`.github/workflows/release.yml`). To flip a feature cell: **run the app on that OS**
+(grab the installer from a [release](../../releases/latest), or a VM/Docker),
+exercise the capability against a real agent, then update the cell here with a
+one-line note of what was observed. The app is proven to *launch* everywhere; these
+🧪 cells are about whether each *feature* actually works there.
 
 ## Dropped agents (2026-06-10)
 
