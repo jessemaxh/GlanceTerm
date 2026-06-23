@@ -31,6 +31,7 @@ import { ScreenshotService } from './screenshot/screenshot.service'
 import { ScreenshotPasteService } from './screenshot/paste.service'
 import { ImagePasteHookService } from './image-paste-hook.service'
 import { SplitShellService } from './split-shell.service'
+import { WorktreeService } from './worktree.service'
 import { EscInterruptService } from './esc-interrupt.service'
 import { UpdateCheckService } from './update-check.service'
 import { UpdateForceModalComponent } from './update-force-modal.component'
@@ -137,6 +138,7 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
         ScreenshotPasteService,
         ImagePasteHookService,
         SplitShellService,
+        WorktreeService,
         EscInterruptService,
         UpdateCheckService,
         { provide: SidebarProvider,       useClass: AiSidebarContribProvider,      multi: true },
