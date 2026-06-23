@@ -33,7 +33,9 @@ import { ScreenshotPasteService } from './screenshot/paste.service'
 import { ImagePasteHookService } from './image-paste-hook.service'
 import { SplitShellService } from './split-shell.service'
 import { WorktreeService } from './worktree.service'
+import { WorktreeLifecycleService } from './worktree-lifecycle.service'
 import { WorktreeActionsService, WorktreeContextMenu } from './worktree-actions.service'
+import { WorktreePickerComponent } from './worktree-picker.component'
 import { EscInterruptService } from './esc-interrupt.service'
 import { UpdateCheckService } from './update-check.service'
 import { UpdateForceModalComponent } from './update-force-modal.component'
@@ -123,7 +125,7 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
 
 @NgModule({
     imports: [CommonModule, NgbTooltipModule],
-    declarations: [AiSidebarComponent, UpdateForceModalComponent, TokenStatsTabComponent],
+    declarations: [AiSidebarComponent, UpdateForceModalComponent, TokenStatsTabComponent, WorktreePickerComponent],
     providers: [
         HookAdapterRegistry,
         HookRuntimeService,
@@ -141,6 +143,7 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
         ImagePasteHookService,
         SplitShellService,
         WorktreeService,
+        WorktreeLifecycleService,
         WorktreeActionsService,
         EscInterruptService,
         UpdateCheckService,
@@ -195,6 +198,10 @@ export default class AiSidebarModule {
         // Eager-inject so the remote update check schedules itself at launch
         // (first check + interval) without waiting for any UI consumer.
         _uc: UpdateCheckService,
+        // Eager-inject so the worktree auto-cleanup subscribes to tabRemoved$ at
+        // startup — otherwise closing a worktree tab before the sidebar UI ever
+        // touched the service would leak the worktree.
+        _wl: WorktreeLifecycleService,
     ) {
         // eslint-disable-next-line no-console
         console.log('[glanceterm] plugin loaded')

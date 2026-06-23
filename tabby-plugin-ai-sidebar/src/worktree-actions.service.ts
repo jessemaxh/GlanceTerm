@@ -1,33 +1,38 @@
 import { Injectable } from '@angular/core'
 import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import {
+    AppService,
     BaseTabComponent,
     MenuItemOptions,
     NotificationsService,
-    PromptModalComponent,
     TabContextMenuItemProvider,
 } from 'tabby-core'
 import { BaseTerminalTabComponent } from 'tabby-terminal'
 import { TerminalService } from 'tabby-local'
 
 import { WorktreeService, WorktreeSet } from './worktree.service'
+import { WorktreeLifecycleService } from './worktree-lifecycle.service'
+import { WorktreePickerComponent, WorktreePickerResult } from './worktree-picker.component'
 
 /**
  * UI glue for optional git-worktree isolation: "Open agent in worktree…" opens a
  * new terminal tab cd'd into an isolated worktree of the active tab's workspace,
  * so a second agent can work the same project without clobbering the first. The
  * git/fs work lives in {@link WorktreeService}; this orchestrates discover →
- * prompt → createSet → openTab. The multi-repo PICKER (deselect repos), the
- * branch badge, auto-remove-on-close and the reaper are follow-up P1 steps —
- * for now ALL discovered repos are isolated. See `internal/todo-worktree-isolation.md`.
+ * pick repos + branch → createSet → openTab → register for lifecycle cleanup.
+ * Auto-remove-on-close + the branch badge come from {@link WorktreeLifecycleService};
+ * the startup reaper + manager panel are follow-up P1/P2 steps. See
+ * `internal/todo-worktree-isolation.md`.
  */
 @Injectable()
 export class WorktreeActionsService {
     constructor (
         private worktree: WorktreeService,
+        private lifecycle: WorktreeLifecycleService,
         private terminal: TerminalService,
         private notifications: NotificationsService,
         private ngbModal: NgbModal,
+        private app: AppService,
     ) { }
 
     /** The tab's live working directory (the agent's cwd), else $HOME. */
@@ -44,13 +49,12 @@ export class WorktreeActionsService {
         return process.env.HOME ?? '/'
     }
 
-    private async promptBranch (defaultName: string): Promise<string | null> {
-        const modal = this.ngbModal.open(PromptModalComponent)
-        modal.componentInstance.prompt = 'Branch name for the isolated agent worktree'
-        modal.componentInstance.value = defaultName
+    /** Branch name + which repos to isolate; null if the user cancels. */
+    private async pickReposAndBranch (repos: WorktreePickerResult['repos']): Promise<WorktreePickerResult | null> {
+        const modal = this.ngbModal.open(WorktreePickerComponent)
+        ;(modal.componentInstance as WorktreePickerComponent).init(repos, 'agent/')
         const result = await modal.result.catch(() => null)
-        const value = result?.value?.trim()
-        return value || null
+        return (result as WorktreePickerResult | null) ?? null
     }
 
     /**
@@ -64,26 +68,45 @@ export class WorktreeActionsService {
             this.notifications.error(`No git repository found under ${root}`)
             return null
         }
-        const branch = await this.promptBranch('agent/')
-        if (!branch) {
-            return null // cancelled / empty
+
+        const choice = await this.pickReposAndBranch(repos)
+        if (!choice) {
+            return null // cancelled
         }
 
         let set: WorktreeSet
         try {
-            set = await this.worktree.createSet(root, repos, branch)
+            set = await this.worktree.createSet(root, choice.repos, choice.branch)
         } catch (err: any) {
             this.notifications.error(`Worktree isolation failed: ${err?.message ?? err}`)
             return null
         }
 
-        const tab = await this.terminal.openTab(null, set.isolatedRoot)
+        // openTab can REJECT (unguarded profile/PTY init), not just return null —
+        // both leave the freshly-created set orphaned on disk, so handle them the
+        // same way: force-remove the empty set (branch is at base → safe) + toast.
+        let tab: BaseTabComponent | null
+        try {
+            tab = await this.terminal.openTab(null, set.isolatedRoot)
+        } catch {
+            tab = null
+        }
         if (!tab) {
-            await this.worktree.removeSet(set, { force: true }).catch(() => { /* */ })
+            await this.worktree.removeSet(set, { force: true }).catch(e => {
+                // eslint-disable-next-line no-console
+                console.warn('[glanceterm] worktree rollback after failed openTab failed:', e)
+            })
             this.notifications.error('Could not open the isolated tab')
             return null
         }
-        this.notifications.info(`Isolated worktree ${branch} — ${repos.map(r => r.name).join(', ')}`)
+        // openTab returns the INNER leaf, but the sidebar badge keys off the
+        // top-level tab (TabState.outerTab) and AppService.tabRemoved$ emits the
+        // top-level tab — so register the wrapping SplitTabComponent, else both
+        // the badge and the close-time cleanup silently miss. getParentTab() is
+        // the split that now contains the leaf; `?? tab` covers the unwrapped case.
+        const outer = this.app.getParentTab(tab) ?? tab
+        this.lifecycle.register(outer, set, tab)
+        this.notifications.info(`Isolated worktree ${choice.branch} — ${choice.repos.map(r => r.name).join(', ')}`)
         return set
     }
 }

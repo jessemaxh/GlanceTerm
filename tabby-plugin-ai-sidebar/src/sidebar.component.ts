@@ -10,6 +10,7 @@ import { UnreadService } from './unread.service'
 import { ScreenshotService } from './screenshot/screenshot.service'
 import { ScreenshotPasteService } from './screenshot/paste.service'
 import { SplitShellService } from './split-shell.service'
+import { WorktreeLifecycleService } from './worktree-lifecycle.service'
 import { AutoApproveService } from './auto-approve.service'
 import { SidebarSettingsRegistry, SidebarSettingsSection } from './sidebar-settings-registry.service'
 import { TokenStatsTabComponent } from './token-stats-tab.component'
@@ -131,6 +132,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 7v6a2 2 0 0 0 2 2h6"/></svg>
                             </span>
                             <span class="primary" [attr.title]="s.cwd || s.title">{{ s.cwd ? folderName(s.cwd) : s.title }}</span>
+                            <span *ngIf="worktreeBranch(s) as br" class="wt-badge" [attr.title]="'Isolated worktree — ' + br">⎇ {{ br }}</span>
                             <svg *ngIf="isPinned(s)" class="pin-mark" width="11" height="11" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true" title="Pinned to top">
                                 <path d="M9.5 1.5 L14.5 6.5 L12 7.2 L11.5 11 L8.2 7.8 L4 12 L4 11 L8 6.8 L4.8 3.5 L8.5 3 Z"
                                       stroke="currentColor" stroke-width="0.6" stroke-linejoin="round"/>
@@ -711,6 +713,25 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             height: 11px;
         }
         .pin-mark > svg, svg.pin-mark { width: 11px; height: 11px; flex: none; }
+
+        /* ---- isolated-worktree branch badge (line1, after the name) ----
+           Marks a row whose tab runs in a git-worktree this session. Subtle
+           chip so it reads as metadata, not a status. */
+        .wt-badge {
+            flex: none;
+            max-width: 40%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-family: ui-monospace, monospace;
+            font-size: 10px;
+            line-height: 1.4;
+            padding: 0 5px;
+            border-radius: 999px;
+            color: var(--gt-text-dim);
+            border: 1px solid var(--gt-hairline, rgba(255,255,255,.12));
+            opacity: .85;
+        }
 
         /* ---- rail line — the continuous vertical thread the status dots ride
                on, like a timeline / subway map. Drawn full-height per row so
@@ -1471,6 +1492,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         private screenshot: ScreenshotService,
         private screenshotPaste: ScreenshotPasteService,
         private splitShell: SplitShellService,
+        private worktreeLifecycle: WorktreeLifecycleService,
         private config: ConfigService,
         private notifications: NotificationsService,
         private zone: NgZone,
@@ -2454,6 +2476,17 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         if (!trimmed) return p
         const m = trimmed.match(/[^/\\]+$/)
         return m ? m[0] : p
+    }
+
+    /**
+     * Worktree branch for a row, if it's running in an isolated worktree this
+     * session — drives the `⎇ branch` badge. Cheap Map lookup, safe to call per
+     * CD cycle. Null for ordinary tabs (and for worktree tabs recovered from a
+     * previous launch, which the in-memory map doesn't track — see
+     * WorktreeLifecycleService).
+     */
+    worktreeBranch (s: TabState): string | null {
+        return this.worktreeLifecycle.branchForTab(s.outerTab)
     }
 
     /**
