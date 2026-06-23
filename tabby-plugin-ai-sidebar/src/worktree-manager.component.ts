@@ -93,7 +93,7 @@ export class WorktreeManagerComponent {
     /** In use = a live tab in THIS window OR (cross-process, best-effort) a live
      *  process cwd'd inside the worktree. Re-checked at click time because the
      *  row's `live` snapshot from refresh() can be stale. */
-    private async inUse (r: Row): Promise<boolean> {
+    private async inUse (r: Row): Promise<boolean | 'unknown'> {
         if (this.lifecycle.liveIsolatedRoots().has(r.set.isolatedRoot)) {
             return true
         }
@@ -162,10 +162,17 @@ export class WorktreeManagerComponent {
         try {
             // Re-check in-use AT CLICK TIME — `r.live` from refresh() can be stale (a
             // tab opened/recovered into this worktree since) and never saw another
-            // window's tab. Never delete a worktree in use, esp. on the force path.
-            if (await this.inUse(r)) {
+            // window's tab.
+            const usage = await this.inUse(r)
+            if (usage === true) {
                 this.notifications.error(`${r.set.branch} is in use by an open tab — close it first`)
                 void this.refresh()
+                return
+            }
+            // Can't verify it's unused (no lsof/proc, or another window) → never
+            // FORCE-discard uncommitted work we can't prove is abandoned.
+            if (usage === 'unknown' && !r.status.safe) {
+                this.notifications.error(`Can't verify ${r.set.branch} isn't in use — close any tab using it, or commit/discard its changes first`)
                 return
             }
             const removed = await this.worktree.removeSet(r.set, { force: !r.status.safe })
@@ -173,8 +180,9 @@ export class WorktreeManagerComponent {
                 this.rows = this.rows.filter(x => x !== r)
                 this.notifications.info(`Removed worktree ${r.set.branch}`)
             } else {
-                // non-force no-op (became dirty/unmerged since refresh) → keep + re-sync.
-                this.notifications.info(`Kept ${r.set.branch} — it has unsaved or unmerged work`)
+                // removeSet kept it: it became dirty since refresh, or the rm couldn't
+                // complete (in use / perms). Re-sync so the row reflects reality.
+                this.notifications.info(`Kept ${r.set.branch} — still present`)
                 void this.refresh()
             }
         } catch (e: any) {
@@ -194,8 +202,8 @@ export class WorktreeManagerComponent {
             const targets = this.rows.filter(r => !r.live && r.status.safe)
             let removed = 0
             for (const r of targets) {
-                if (await this.inUse(r)) {
-                    continue // went live since refresh → skip (don't delete an in-use worktree)
+                if (await this.inUse(r) !== false) {
+                    continue // in use, or can't verify (unknown) → skip; conservative for a bulk op
                 }
                 r.busy = true
                 try {

@@ -433,11 +433,19 @@ export class WorktreeService {
         const anyWorktreeLeft = set.repos.some(r => fsSync.existsSync(r.worktreePath))
         if (opts.force || !anyWorktreeLeft) {
             this.assertWithinManagedRoot(set.isolatedRoot)
-            await fs.rm(set.isolatedRoot, { recursive: true, force: true }).catch(() => {})
+            try {
+                await fs.rm(set.isolatedRoot, { recursive: true, force: true })
+            } catch { /* fall through to the existence check below */ }
+            // Only treat the set as removed if the isolated root is ACTUALLY gone.
+            // A failed/partial rm (permissions, a file held open on Windows, a git
+            // worktree-remove that left metadata) must NOT forget the registry entry
+            // — else the manager/reaper lose track of a dir that still exists.
+            if (fsSync.existsSync(set.isolatedRoot)) {
+                return false
+            }
             // Best-effort: drop the now-empty per-workspace parent (<name>-<hash>/).
             try { await fs.rmdir(path.dirname(set.isolatedRoot)) } catch { /* not empty / gone */ }
-            // The set is gone → drop it from the resume/reaper registry. (A non-force
-            // KEEP returned early above, so a kept-because-dirty set stays recorded.)
+            // Gone for real → drop it from the resume/reaper registry.
             await this.forgetSet(set)
             return true
         }
@@ -452,9 +460,16 @@ export class WorktreeService {
      * darwin/linux via `lsof`; returns false when it can't tell (win32 / lsof
      * missing / timeout) — there the in-memory live check is the only backstop.
      */
-    async isInUse (set: WorktreeSet): Promise<boolean> {
+    async isInUse (set: WorktreeSet): Promise<boolean | 'unknown'> {
+        // Linux: read /proc/<pid>/cwd directly — reliable, no lsof dependency.
+        if (process.platform === 'linux') {
+            const viaProc = this.isInUseViaProc(set.isolatedRoot)
+            if (viaProc !== 'unknown') {
+                return viaProc
+            }
+        }
         if (process.platform === 'win32') {
-            return false
+            return 'unknown' // no lsof / /proc here — can't verify cross-process use
         }
         try {
             // `lsof -t +D <dir>`: pids with any open file (incl. a shell's cwd)
@@ -462,12 +477,46 @@ export class WorktreeService {
             const { stdout } = await execFileAsync('lsof', ['-t', '+D', set.isolatedRoot], { timeout: 4000 })
             return stdout.trim() !== ''
         } catch (e: any) {
-            // CRITICAL: lsof EXITS 1 even when it DID find occupants (it prints the
-            // pids to stdout), so execFile *rejects* on a real match. Recover the
-            // pid from e.stdout: non-empty → in use. A true no-match is exit 1 with
-            // EMPTY stdout; a missing binary / timeout-kill has no stdout → false
-            // (best-effort; liveIsolatedRoots backstops the same window).
-            return typeof e?.stdout === 'string' && e.stdout.trim() !== ''
+            // lsof EXITS 1 BOTH when it found occupants (pids on stdout) AND when it
+            // found none (empty stdout) — both authoritative. A spawn failure (lsof
+            // missing) or a timeout-kill gives no usable result → 'unknown', so the
+            // manager can refuse a destructive remove it can't verify is safe.
+            if (e?.killed) {
+                return 'unknown' // timed out
+            }
+            if (typeof e?.stdout === 'string') {
+                return e.stdout.trim() !== ''
+            }
+            return 'unknown' // lsof missing / spawn failure
+        }
+    }
+
+    /** Linux-only: is any process cwd'd inside `dir`? Scans /proc/<pid>/cwd.
+     *  'unknown' if /proc isn't readable (not Linux / sandboxed). */
+    private isInUseViaProc (dir: string): boolean | 'unknown' {
+        if (process.platform !== 'linux') {
+            return 'unknown'
+        }
+        try {
+            const resolved = path.resolve(dir)
+            for (const pid of fsSync.readdirSync('/proc')) {
+                if (!/^\d+$/.test(pid)) {
+                    continue
+                }
+                let cwd: string
+                try {
+                    cwd = fsSync.readlinkSync(`/proc/${pid}/cwd`)
+                } catch {
+                    continue // process exited / not ours → skip
+                }
+                const c = path.resolve(cwd)
+                if (c === resolved || c.startsWith(resolved + path.sep)) {
+                    return true
+                }
+            }
+            return false
+        } catch {
+            return 'unknown'
         }
     }
 
