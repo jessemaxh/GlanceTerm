@@ -1,16 +1,14 @@
 import { Injectable } from '@angular/core'
-import { Subscription } from 'rxjs'
-import { BaseTabComponent, NotificationsService, TabRecoveryService } from 'tabby-core'
+import { AppService, BaseTabComponent, NotificationsService, TabRecoveryService } from 'tabby-core'
 
 import { WorktreeService, WorktreeSet } from './worktree.service'
 
-/** A tracked worktree tab. */
+/** A tracked worktree tab: the set + the inner terminal leaf (for the
+ *  still-alive-session move guard — see onTabRemoved). */
 interface TrackedTab {
     set: WorktreeSet
-    /** The inner BaseTerminalTabComponent whose session owns the isolated cwd. */
+    /** A terminal leaf of this worktree tab whose session owns the isolated cwd. */
     inner: BaseTabComponent
-    /** destroyed$ subscription on `inner` — the universal close signal. */
-    sub: Subscription
 }
 
 /**
@@ -20,55 +18,58 @@ interface TrackedTab {
  * reflexive open/close leaves zero worktrees, but work is never silently
  * dropped. See `internal/todo-worktree-isolation.md` (lifecycle).
  *
- * KEYED BY THE TOP-LEVEL (outer) tab so `branchForTab(TabState.outerTab)` lights
- * the sidebar badge, but cleanup is driven by the INNER terminal leaf's
- * `destroyed$` — NOT `AppService.tabRemoved$`. tabRemoved$ only emits when a
- * TOP-LEVEL tab goes away, so closing a single worktree pane inside a still-open
- * split would never fire it and the worktree would leak. The inner leaf's
- * `destroyed$` fires in EVERY teardown path (whole-tab close, inner-pane close,
- * move-to-new-window, app quit), so it's the one universal signal.
+ * KEYED BY + TRIGGERED ON THE TOP-LEVEL (outer) tab via `AppService.tabRemoved$`.
+ * `tabRemoved$` fires only when a top-level tab is removed — i.e. when the WHOLE
+ * worktree tab closes. A SplitTabComponent auto-destroys once its last pane
+ * closes, so this still fires for the common single-pane tab. Crucially, closing
+ * just ONE pane of a multi-pane worktree split does NOT fire it (the split
+ * survives) → we never delete a worktree another live pane (e.g. the agent) is
+ * still working in. (Earlier this triggered on the inner leaf's destroyed$ to
+ * also reclaim a single-pane close, but that let a split where the reaper had
+ * tracked a *shell* pane delete the worktree out from under the agent pane —
+ * data loss. The safe trade-off: a closed-pane-in-a-surviving-split worktree is
+ * KEPT until the split fully closes; the reaper / manager panel reclaim it.)
  *
- * Timing: the inner's `destroyed$` fires from `super.destroy()` BEFORE
- * `destroy()` reaches `await session.destroy()`, so `session.open` is still true
- * at the synchronous instant of the event. We defer one microtask — by then the
- * synchronous continuation of `destroy()` has run `session.destroy()`, which
- * sets `open = false` synchronously (tabby-terminal/src/session.ts:85) before
- * its first await. So at decision time:
- *  - GENUINE CLOSE — `session.destroy()` ran → `open === false` → remove if safe.
- *  - MOVE TO NEW WINDOW — `releaseSession()` set `sessionReused`, so `destroy()`
- *    SKIPS `session.destroy()` and the PTY keeps running for the new window →
- *    `open === true` → KEEP (never delete a worktree a live tab is using).
- *  - APP QUIT — `closeWindow()` set `TabRecoveryService.enabled = false` before
- *    destroying tabs → KEEP so the tab resumes next launch (the on-disk worktree
- *    survives any app death; Tabby's recovery token carries the isolated cwd).
- * The bias is safe: only a clean (no-data) close is ever removed.
+ * Three ways a tab leaves, three outcomes:
+ *  - APP QUIT — `closeWindow()` sets `TabRecoveryService.enabled = false` before
+ *    destroying every tab, and destruction is what fires `tabRemoved$`. So
+ *    `enabled === false` ⇒ quitting ⇒ KEEP (the tab resumes next launch; the
+ *    on-disk worktree survives any app death, and Tabby's recovery token carries
+ *    the isolated cwd).
+ *  - MOVE TO NEW WINDOW — `moveTabToNewWindow()` calls `releaseSession()` (sets
+ *    `sessionReused`, so `destroy()` SKIPS `session.destroy()` and the PTY keeps
+ *    running) then destroys the source tab with `enabled === true`. The split
+ *    tears down its terminal children before emitting its own `destroyed$`, so by
+ *    `tabRemoved$` a genuine close has already run `session.destroy()` →
+ *    `session.open === false`, whereas a released/moved session is still
+ *    `open === true`. So `inner.session.open` truthy ⇒ KEEP. Bias is safe: only a
+ *    clean (no-data) close is ever removed.
+ *  - USER CLOSE — app running, session torn down → remove IF safe.
  *
- * Scope (P1): the map is in-memory, so it tracks only tabs opened this session.
- * A worktree tab recovered from a previous launch is not tracked — its badge is
- * absent and closing it won't auto-clean; the startup reaper (P2) sweeps those
- * (and anything this keeps).
+ * Scope (P1): the map is in-memory. A worktree tab recovered from a previous
+ * launch is re-registered by the startup reaper (cwd match); anything it can't
+ * reclaim is left for the manager panel (P2c).
  */
 @Injectable()
 export class WorktreeLifecycleService {
     private tracked = new Map<BaseTabComponent, TrackedTab>()
 
     constructor (
+        app: AppService,
         private worktree: WorktreeService,
         private notifications: NotificationsService,
         private tabRecovery: TabRecoveryService,
-    ) { }
+    ) {
+        app.tabRemoved$.subscribe(tab => { void this.onTabRemoved(tab) })
+    }
 
     /**
-     * Associate a freshly-opened worktree tab with its set.
-     * @param outer the TOP-LEVEL tab (the badge reads `TabState.outerTab`)
-     * @param inner the inner terminal leaf whose session owns the isolated cwd
+     * Associate a worktree tab with its set.
+     * @param outer the TOP-LEVEL tab (what tabRemoved$ emits / the badge reads)
+     * @param inner a terminal leaf whose session owns the isolated cwd (move guard)
      */
     register (outer: BaseTabComponent, set: WorktreeSet, inner: BaseTabComponent): void {
-        // Idempotent: the startup reaper may re-attach a tab already tracked this
-        // session — tear down the old subscription so we never double-subscribe.
-        this.tracked.get(outer)?.sub.unsubscribe()
-        const sub = inner.destroyed$.subscribe(() => { void this.onTabGone(outer) })
-        this.tracked.set(outer, { set, inner, sub })
+        this.tracked.set(outer, { set, inner })
     }
 
     /** Branch name for a tab's worktree set, for the sidebar badge — else null. */
@@ -76,18 +77,12 @@ export class WorktreeLifecycleService {
         return this.tracked.get(tab)?.set.branch ?? null
     }
 
-    private async onTabGone (outer: BaseTabComponent): Promise<void> {
+    private async onTabRemoved (outer: BaseTabComponent): Promise<void> {
         const entry = this.tracked.get(outer)
         if (!entry) {
             return
         }
-        // Drop tracking + the badge immediately (the tab is gone either way).
         this.tracked.delete(outer)
-        entry.sub.unsubscribe()
-
-        // Let destroy()'s synchronous continuation run session.destroy() (which
-        // sets session.open=false before its first await) before we read it.
-        await Promise.resolve()
 
         // App quitting → keep so the tab resumes next launch.
         if (!this.tabRecovery.enabled) {
@@ -107,7 +102,7 @@ export class WorktreeLifecycleService {
                 this.notifications.info(`Kept worktree ${entry.set.branch} — it has unsaved or unmerged work`)
             }
         } catch {
-            // Never let cleanup throw out of the destroyed$ subscription; on any
+            // Never let cleanup throw out of the tabRemoved$ subscription; on any
             // error the worktree simply stays on disk for the reaper to reconcile.
         }
     }

@@ -66,6 +66,19 @@ describe('WorktreeReaperService.reconcile (conservative — never deletes an exi
         expect(worktree.isSetSafeToRemove).not.toHaveBeenCalled()
     })
 
+    it('registers a split worktree ONCE, preferring the aiTool pane as inner', async () => {
+        const a = set('/m/p-a/agent')
+        const outer = {}; const agentInner = {}; const shellInner = {}
+        const states = [
+            { cwd: '/m/p-a/agent', outerTab: outer, innerTab: shellInner, aiTool: null },
+            { cwd: '/m/p-a/agent', outerTab: outer, innerTab: agentInner, aiTool: 'claude' },
+        ]
+        const { svc, lifecycle } = make([a], states)
+        await svc.reconcile()
+        expect(lifecycle.register).toHaveBeenCalledTimes(1)               // outer registered once
+        expect(lifecycle.register).toHaveBeenCalledWith(outer, a, agentInner) // agent pane wins, not shell
+    })
+
     it('forgets a registry entry whose dir vanished out-of-band', async () => {
         const b = set('/m/p-b/agent')
         const { svc, worktree } = make([b], [])

@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core'
 import * as fsSync from 'fs'
 import * as path from 'path'
-import { ConfigService } from 'tabby-core'
+import { BaseTabComponent, ConfigService } from 'tabby-core'
 
 import { TabMonitor } from './tab-monitor'
 import { WorktreeService, WorktreeSet } from './worktree.service'
@@ -86,14 +86,21 @@ export class WorktreeReaperService {
             if (!sets.length) {
                 return
             }
-            // 1) Re-attach live tabs sitting in a persisted worktree.
-            for (const st of this.monitor.current) {
-                if (!st.cwd) {
+            // 1) Re-attach live tabs sitting in a persisted worktree. Register
+            //    each OUTER tab at most once, preferring an aiTool pane as the
+            //    representative inner — so a split's move-guard reads the agent's
+            //    session, not an unrelated shell pane. (Cleanup triggers on the
+            //    outer's removal anyway, so the inner only feeds the move guard.)
+            const seenOuter = new Set<BaseTabComponent>()
+            const agentFirst = [...this.monitor.current].sort((a, b) => Number(!!b.aiTool) - Number(!!a.aiTool))
+            for (const st of agentFirst) {
+                if (!st.cwd || seenOuter.has(st.outerTab)) {
                     continue
                 }
                 const set = worktreeSetForCwd(st.cwd, sets, canonical)
                 if (set) {
                     this.lifecycle.register(st.outerTab, set, st.innerTab)
+                    seenOuter.add(st.outerTab)
                 }
             }
             // 2) Drop registry entries whose worktree dir vanished out-of-band.

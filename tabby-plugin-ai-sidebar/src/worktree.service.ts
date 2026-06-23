@@ -1,4 +1,4 @@
-import { Injectable } from '@angular/core'
+import { Injectable, InjectionToken, Optional, Inject } from '@angular/core'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import * as fs from 'fs/promises'
@@ -26,6 +26,13 @@ const execFileAsync = promisify(execFile)
 /** Root under which ALL GlanceTerm-managed worktrees live — the reaper's hard
  *  boundary. We only ever remove worktrees here, never the user's own. */
 export const MANAGED_ROOT = path.join(os.homedir(), '.glanceterm', 'worktrees')
+
+/** Optional DI override for the registry path (tests pass it positionally to
+ *  `new WorktreeService(path)`; production never provides it → default is used).
+ *  A token, NOT a bare `string` ctor param: an @Injectable with a primitive
+ *  param makes Angular's emitDecoratorMetadata emit `design:paramtypes:[String]`
+ *  and DI then fails with "No provider for String" at load. */
+export const WORKTREE_REGISTRY_PATH = new InjectionToken<string>('WORKTREE_REGISTRY_PATH')
 
 /** A git repo found under a workspace root. */
 export interface SubRepo {
@@ -113,8 +120,11 @@ export class WorktreeService {
      *  process can't lose updates. See mutateRegistry. */
     private registryQueue: Promise<void> = Promise.resolve()
 
-    constructor (registryPath: string = path.join(MANAGED_ROOT, 'registry.json')) {
-        this.registryPath = registryPath
+    // @Optional @Inject so Angular resolves the TOKEN (absent in prod → null →
+    // default), NOT the reflected `String` type. Calling `new WorktreeService(p)`
+    // directly (tests) ignores the decorators and just binds the positional arg.
+    constructor (@Optional() @Inject(WORKTREE_REGISTRY_PATH) registryPath?: string) {
+        this.registryPath = registryPath ?? path.join(MANAGED_ROOT, 'registry.json')
     }
 
     private async git (cwd: string, args: string[]): Promise<string> {
