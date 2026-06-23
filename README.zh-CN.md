@@ -40,6 +40,7 @@
 - 🎯 **点击即跳** 到正在等你的那个标签页
 - 🔄 **重启不丢** —— 重开后每个 agent 恢复到它**之前那个**会话(`claude --resume`、`codex resume`、`opencode --session`)
 - 🤖 **多 agent** —— Claude Code 一等公民且已测试;Codex / Gemini CLI / opencode 也有 adapter
+- 🌳 **Worktree 隔离(可选)** —— 右键让 agent 在自己的 git worktree + 分支里跑,多个 agent 同时改一个工程互不冲突;关掉干净的自动清理,其余在管理面板里统一管
 - 🧩 **零工作流改动** —— 照样敲 `claude`,hook 首次启动自动装
 - 📊 **Token 用量** —— in / cache / out 按 agent · 会话 · 项目拆分,支持 CSV 导出
 - 🛡️ **可选自动批准**(有审计日志,**默认关**)· 📸 **截图直接粘给 agent** · 旁边开 shell

@@ -41,6 +41,7 @@ and **one click jumps you to the tab that needs you**.
 - 🎯 **Click to jump** straight to the tab waiting on you
 - 🔄 **Restart-safe** — reopen and every agent resumes its *exact* prior session (`claude --resume`, `codex resume`, `opencode --session`)
 - 🤖 **Multi-agent** — Claude Code first-class & tested; Codex / Gemini CLI / opencode adapters too
+- 🌳 **Worktree isolation (optional)** — right-click → run an agent in its own git worktree + branch, so several agents work one project without clobbering each other; auto-cleans a clean one on close, with a manager panel for the rest
 - 🧩 **Zero workflow change** — keep typing `claude`; the hook self-installs on first launch
 - 📊 **Token usage** — in / cache / out per agent · session · project, with CSV export
 - 🛡️ **Opt-in auto-approve** (audit-logged, **off by default**) · 📸 **screenshot-to-paste** · split shell
