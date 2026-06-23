@@ -7,8 +7,8 @@ name: Release
 #      version in app/package.json (+ writes CHANGELOG.md). `fix:` -> patch,
 #      `feat:` -> minor, `feat!:` / `BREAKING CHANGE` -> major.
 #   2. Merge that PR when you want to ship. release-please then tags vX.Y.Z and
-#      creates the GitHub release; the `build` job below builds the signed,
-#      notarized arm64 (Apple Silicon) dmg and attaches it to that release.
+#      creates the GitHub release; the `build` job below builds the installers for
+#      every platform, smoke-tests them, and attaches them to that release.
 #
 # Why the build lives in THIS workflow (gated on release_created) rather than a
 # separate tag-triggered one: a tag pushed by GITHUB_TOKEN does NOT trigger other
@@ -19,23 +19,23 @@ name: Release
 # review on main" blocks CI from direct-pushing a version bump, but a PR the
 # maintainer approves + merges is exactly the supported path.
 #
-# Build details: arm64 only (Apple Silicon, macos-latest). RELEASE=1 stamps the
-# (release-please-bumped) app/package.json version, Developer-ID signs + notarizes
-# when the signing secrets are present (CSC_LINK, CSC_KEY_PASSWORD, APPLE_ID,
-# APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID). Only the .dmg installer is attached
-# — electron-builder's .zip / .blockmap / latest-mac.yml are for in-app
-# auto-update, which isn't wired up here.
+# Platforms (all x64 unless noted): macOS arm64 (Apple Silicon, signed +
+# notarized), Linux x64 (AppImage/deb/rpm/pacman/tar.gz, unsigned), Windows x64
+# (NSIS .exe + portable .zip, UNSIGNED → SmartScreen "unknown publisher" warning).
+# RELEASE=1 stamps the release-please-bumped app/package.json version. Each
+# non-macOS build is gated by a headless launch smoke test (Electron must come up)
+# — a platform that fails to launch is simply not attached, the rest still ship.
+# macOS needs no separate smoke: build-macos.mjs's afterPack asar self-check
+# already catches the "shipped without node_modules" crash at build time.
 #
 # ── Planned (DEFERRED) ────────────────────────────────────────────────────
 # Intel macOS (x64): DROPPED. GitHub's hosted Intel runners (macos-13) are a
-# scarce, being-deprecated pool — x64 jobs sat queued 30+ min with no pickup. To
-# bring Intel back, cross-build x64 (or a universal binary) on an arm64 runner —
-# but the native modules (node-pty / keytar / fontmanager-redux) must be verified
-# on a real Intel Mac first — or register a self-hosted Intel runner. Note: arm64
-# binaries can't run on Intel (Rosetta translates Intel->arm only), so until then
-# this ships Apple Silicon only.
-# Windows (x64 + arm64, NSIS .exe) and Linux (x64 + arm64, AppImage/.deb/.rpm) —
-# add matrix entries + the win/linux build commands when implementing.
+# scarce, being-deprecated pool — x64 jobs sat queued 30+ min with no pickup. arm64
+# binaries can't run on Intel (Rosetta translates Intel->arm only), so macOS ships
+# Apple Silicon only. To revisit: cross-build x64/universal on an arm64 runner
+# (verify native modules on a real Intel Mac) or a self-hosted Intel runner.
+# Windows pinned to windows-2022 (windows-latest ships VS 18, which node-gyp 11.x
+# can't detect). Windows code-signing + Linux/Windows arm64 are still TODO.
 
 on:
   push:
@@ -56,16 +56,20 @@ jobs:
         id: rp
 
   build:
-    name: macOS build (${{ matrix.arch }})
+    name: ${{ matrix.name }}
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - arch: arm64
-            runner: macos-latest # Apple Silicon
-    runs-on: ${{ matrix.runner }}
+          - name: macOS arm64
+            os: macos-latest
+          - name: Linux x64
+            os: ubuntu-latest
+          - name: Windows x64
+            os: windows-2022
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -75,13 +79,23 @@ jobs:
         with:
           node-version: '22'
 
-      # macOS runners ship Xcode + command-line tools, so the native modules
-      # (node-pty, keytar, fontmanager-redux) build without extra system libs.
-      # ARCH defaults to the runner's process.arch (arm64 on macos-latest).
+      - name: Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libsecret-1-dev libarchive-tools rpm fakeroot
+
+      # build/installer.nsh bundles the VC++ runtime via File ${BUILD_RESOURCES_DIR}\vc_redist.exe
+      - name: Windows — fetch VC++ redistributable
+        if: matrix.os == 'windows-2022'
+        shell: bash
+        run: curl -fL -o build/vc_redist.exe https://aka.ms/vs/17/release/vc_redist.x64.exe
+
       - name: Install dependencies
         run: yarn install --network-timeout 1000000
 
-      - name: Build dmg (RELEASE; signed + notarized when secrets are present)
+      - name: Build macOS (signed + notarized when secrets present)
+        if: matrix.os == 'macos-latest'
         run: RELEASE=1 npm run dmg:mac
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
@@ -90,7 +104,74 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
-      - name: Attach the dmg to the release
+      - name: Build Linux
+        if: matrix.os == 'ubuntu-latest'
+        run: RELEASE=1 node scripts/build-linux.mjs
+
+      - name: Build Windows
+        if: matrix.os == 'windows-2022'
+        run: node scripts/build-windows.mjs
+        env:
+          RELEASE: '1'
+
+      # Launch smoke gate (Linux + Windows). Install/launch the built app headless
+      # and confirm Electron comes up — catches the asar-without-node_modules crash.
+      - name: Linux — launch smoke (Electron up via CDP)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -uo pipefail
+          sudo apt-get install -y xvfb
+          sudo apt-get install -y ./dist/*.deb
+          PKG=$(dpkg-deb -f dist/*.deb Package)
+          BIN=$(dpkg -L "$PKG" | while read -r f; do
+            [ -f "$f" ] && [ -x "$f" ] || continue
+            case "$f" in *.so|*.so.*|*.node|*chrome-sandbox|*crashpad*) continue;; esac
+            case "$(file -b "$f" 2>/dev/null)" in *ELF*executable*) echo "$f"; break;; esac
+          done | head -1)
+          echo "package: $PKG  binary: ${BIN:-<none>}"
+          if [ -z "$BIN" ]; then echo "✗ app binary not found"; exit 1; fi
+          xvfb-run -a "$BIN" --no-sandbox --disable-gpu --disable-software-rasterizer --remote-debugging-port=9222 > /tmp/app.log 2>&1 &
+          APP=$!; ok=0
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:9222/json/version >/dev/null 2>&1 && { ok=1; break; }
+            kill -0 "$APP" 2>/dev/null || break
+            sleep 2
+          done
+          echo "----- app log (tail) -----"; tail -40 /tmp/app.log || true
+          kill "$APP" 2>/dev/null || true
+          if grep -qi "cannot find module" /tmp/app.log; then echo "✗ asar/module crash"; exit 1; fi
+          if [ "$ok" != 1 ]; then echo "✗ Electron never answered on CDP"; exit 1; fi
+          echo "✓ Linux launch smoke passed"
+
+      - name: Windows — launch smoke (no crash; CDP if reachable)
+        if: matrix.os == 'windows-2022'
+        shell: pwsh
+        run: |
+          $exe = "dist/win-unpacked/GlanceTerm.exe"
+          if (!(Test-Path $exe)) { $exe = (Get-ChildItem -Recurse dist -Filter GlanceTerm.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName }
+          Write-Host "launching: $exe"
+          if (-not $exe) { Write-Error "GlanceTerm.exe not found"; exit 1 }
+          $p = Start-Process -FilePath $exe -ArgumentList "--remote-debugging-port=9222","--no-sandbox","--disable-gpu","--disable-software-rasterizer" -PassThru
+          $ok = $false
+          for ($i=0; $i -lt 20; $i++) {
+            try { Invoke-WebRequest -UseBasicParsing http://127.0.0.1:9222/json/version -TimeoutSec 2 | Out-Null; $ok = $true; break } catch {}
+            if ($p.HasExited) { Write-Host "process exited early, code $($p.ExitCode)"; break }
+            Start-Sleep 2
+          }
+          $alive = -not $p.HasExited
+          try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
+          if ($ok)    { Write-Host "✓ Windows launch smoke passed (CDP up)"; exit 0 }
+          if ($alive) { Write-Host "✓ Windows launch smoke passed (launched, stayed alive — no asar crash)"; exit 0 }
+          Write-Error "✗ app exited early (likely an asar/startup crash)"; exit 1
+
+      - name: Attach installers to the release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" dist/*.dmg --clobber
+        run: |
+          shopt -s nullglob
+          # macOS: .dmg only (the .zip/.blockmap/latest-mac.yml are auto-update).
+          # Linux: all package formats. Windows: setup .exe + portable .zip.
+          files=(dist/*.dmg dist/*.AppImage dist/*.deb dist/*.rpm dist/*.pacman dist/*.tar.gz dist/*.exe dist/*-portable-*.zip)
+          echo "uploading: ${files[*]}"
+          gh release upload "${{ needs.release-please.outputs.tag_name }}" "${files[@]}" --clobber
