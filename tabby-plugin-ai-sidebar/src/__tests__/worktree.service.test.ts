@@ -98,4 +98,38 @@ describe('WorktreeService — multi-repo non-git root (real git)', () => {
         expect(repos).toHaveLength(1)
         expect(repos[0].name).toBe('client')
     })
+
+    it('rejects a path-traversal branch name before touching the filesystem', async () => {
+        const repos = await svc.discoverSubRepos(root)
+        await expect(svc.createSet(root, repos, '../../evil')).rejects.toThrow(/invalid branch/)
+    })
+
+    it('single-repo: isolatedRoot IS the worktree (no nested subdir / symlinked original)', async () => {
+        const client = path.join(root, 'client')
+        const set = await svc.createSet(client, await svc.discoverSubRepos(client), 'agent/solo')
+        // worktreePath == isolatedRoot, and it's a real checkout (own .git + files)
+        expect(set.repos[0].worktreePath).toBe(set.isolatedRoot)
+        expect(fs.existsSync(path.join(set.isolatedRoot, '.git'))).toBe(true)
+        expect(fs.existsSync(path.join(set.isolatedRoot, 'README.md'))).toBe(true)
+        // README is the worktree's OWN checkout, not a symlink back to the original
+        expect(fs.lstatSync(path.join(set.isolatedRoot, 'README.md')).isSymbolicLink()).toBe(false)
+        // no nested <repoName>/ dir
+        expect(fs.existsSync(path.join(set.isolatedRoot, 'client'))).toBe(false)
+        await svc.removeSet(set, { force: true })
+    })
+
+    it('force-remove discards uncommitted changes but KEEPS a branch with unmerged commits', async () => {
+        const repos = await svc.discoverSubRepos(root)
+        const set = await svc.createSet(root, repos, 'agent/work')
+        const client = repos.find(r => r.name === 'client')!
+        const wt = set.repos.find(r => r.name === 'client')!.worktreePath
+        // a real commit on the worktree branch → ahead of base
+        fs.writeFileSync(path.join(wt, 'feature.txt'), 'done')
+        git(wt, 'add', '.'); git(wt, 'commit', '-qm', 'feature')
+        // plus an uncommitted file → force is needed to remove the worktree dir
+        fs.writeFileSync(path.join(wt, 'scratch.txt'), 'wip')
+        await svc.removeSet(set, { force: true })
+        // committed work survives: the branch still exists in the ORIGINAL repo
+        expect(git(client.repoPath, 'branch', '--list', 'agent/work')).toContain('agent/work')
+    })
 })

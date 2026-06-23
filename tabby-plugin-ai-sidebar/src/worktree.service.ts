@@ -71,6 +71,32 @@ export class WorktreeService {
         return stdout
     }
 
+    /** Reject a branch name that git would refuse — BEFORE it ever reaches a path.
+     *  An unvalidated `../x` would otherwise `mkdir`/`rm -rf` outside the managed
+     *  root (the branch is used in `isolatedRootFor`). Cheap structural reject +
+     *  git's own authoritative `check-ref-format`. */
+    private async validateBranch (branch: string): Promise<void> {
+        if (!branch || branch.startsWith('-') || branch.startsWith('/') || branch.includes('..')) {
+            throw new Error(`invalid branch name: "${branch}"`)
+        }
+        try {
+            await execFileAsync('git', ['check-ref-format', `refs/heads/${branch}`], { encoding: 'utf-8' })
+        } catch {
+            throw new Error(`invalid branch name: "${branch}"`)
+        }
+    }
+
+    /** Defense-in-depth: refuse to mkdir/rm a path outside ~/.glanceterm/worktrees.
+     *  Even if branch validation is somehow bypassed, the destructive `fs.rm` and
+     *  `mkdir` can never escape the managed root. */
+    private assertWithinManagedRoot (p: string): void {
+        const resolved = path.resolve(p)
+        const managed = path.resolve(MANAGED_ROOT)
+        if (resolved !== managed && !resolved.startsWith(managed + path.sep)) {
+            throw new Error(`refusing to touch a path outside the managed worktree root: ${p}`)
+        }
+    }
+
     /** True if `dir` is a git repo TOPLEVEL (or a linked worktree) — it has a
      *  `.git` entry directly inside it (a directory for a normal repo, a file for
      *  a worktree). A subdirectory inside a repo has none. We check for `.git`
@@ -116,32 +142,50 @@ export class WorktreeService {
      * fresh name).
      */
     async createSet (root: string, repos: SubRepo[], branch: string): Promise<WorktreeSet> {
+        await this.validateBranch(branch)
         for (const r of repos) {
             if (await this.branchExists(r.repoPath, branch)) {
                 throw new Error(`branch "${branch}" already exists in ${r.name}`)
             }
         }
         const isolatedRoot = isolatedRootFor(root, branch)
-        await fs.mkdir(isolatedRoot, { recursive: true })
+        this.assertWithinManagedRoot(isolatedRoot)
+
+        // Single-repo (root IS the git repo): `isolatedRoot` must BE the worktree —
+        // NOT a `<repoName>/` subdir with the original's top-level files symlinked
+        // into isolatedRoot (that would make a tab cd'd to isolatedRoot edit the
+        // ORIGINAL repo through symlinks, defeating isolation). Multi-repo: assemble
+        // a worktree per repo under isolatedRoot + symlink the non-isolated siblings.
+        const singleRepo = repos.length === 1 && path.resolve(repos[0].repoPath) === path.resolve(root)
+        await fs.mkdir(path.dirname(isolatedRoot), { recursive: true })
+
         const created: WorktreeRepo[] = []
         try {
-            for (const r of repos) {
+            if (singleRepo) {
+                const r = repos[0]
                 const base = await this.currentBranch(r.repoPath)
-                const worktreePath = path.join(isolatedRoot, r.name)
-                await this.git(r.repoPath, ['worktree', 'add', worktreePath, '-b', branch])
-                created.push({ name: r.name, origPath: r.repoPath, worktreePath, base })
-            }
-            // Symlink every root entry that isn't one of the isolated repos →
-            // the isolated root mirrors the original, git repos isolated, the
-            // rest (scripts/, config, node_modules) shared.
-            const selected = new Set(repos.map(r => r.name))
-            let entries: fsSync.Dirent[] = []
-            try { entries = await fs.readdir(root, { withFileTypes: true }) } catch { /* single-repo root */ }
-            for (const e of entries) {
-                if (selected.has(e.name)) continue
-                const link = path.join(isolatedRoot, e.name)
-                if (fsSync.existsSync(link)) continue
-                try { await fs.symlink(path.join(root, e.name), link) } catch { /* best-effort */ }
+                // `worktree add` creates isolatedRoot itself — no symlinks, no subdir.
+                await this.git(r.repoPath, ['worktree', 'add', isolatedRoot, '-b', branch])
+                created.push({ name: r.name, origPath: r.repoPath, worktreePath: isolatedRoot, base })
+            } else {
+                await fs.mkdir(isolatedRoot, { recursive: true })
+                for (const r of repos) {
+                    const base = await this.currentBranch(r.repoPath)
+                    const worktreePath = path.join(isolatedRoot, r.name)
+                    await this.git(r.repoPath, ['worktree', 'add', worktreePath, '-b', branch])
+                    created.push({ name: r.name, origPath: r.repoPath, worktreePath, base })
+                }
+                // Symlink every root entry that ISN'T an isolated repo (non-git
+                // content + repos the user left unchecked) → shared.
+                const selected = new Set(repos.map(r => r.name))
+                let entries: fsSync.Dirent[] = []
+                try { entries = await fs.readdir(root, { withFileTypes: true }) } catch { /* */ }
+                for (const e of entries) {
+                    if (selected.has(e.name)) continue
+                    const link = path.join(isolatedRoot, e.name)
+                    if (fsSync.existsSync(link)) continue
+                    try { await fs.symlink(path.join(root, e.name), link) } catch { /* best-effort */ }
+                }
             }
         } catch (err) {
             await this.removeSet({ root, isolatedRoot, branch, repos: created }, { force: true }).catch(() => {})
@@ -171,17 +215,25 @@ export class WorktreeService {
      */
     async removeSet (set: WorktreeSet, opts: { force?: boolean } = {}): Promise<void> {
         for (const r of set.repos) {
+            // `force` ONLY relaxes `worktree remove`'s dirty check — it discards
+            // UNCOMMITTED changes (the UI dirty-guard already confirmed that).
             const args = ['worktree', 'remove', r.worktreePath]
             if (opts.force) args.push('--force')
             try { await this.git(r.origPath, args) } catch { /* maybe already removed */ }
+            // Branch deletion is a SEPARATE, never-forced data-protection decision:
+            // delete the branch ONLY when it has no commits ahead of base (fully
+            // merged / never diverged). A branch with unmerged COMMITS is kept even
+            // under force — committed work is never lost when the worktree dir goes.
             try {
                 const ahead = await this.git(r.origPath, ['rev-list', `${r.base}..${set.branch}`])
-                if (opts.force || ahead.trim() === '') {
+                if (ahead.trim() === '') {
                     await this.git(r.origPath, ['branch', '-D', set.branch]).catch(() => {})
                 }
             } catch { /* base/branch gone — ignore */ }
             try { await this.git(r.origPath, ['worktree', 'prune']) } catch { /* */ }
         }
+        // Guard the only unconditional destructive op against a corrupted set.
+        this.assertWithinManagedRoot(set.isolatedRoot)
         await fs.rm(set.isolatedRoot, { recursive: true, force: true }).catch(() => {})
     }
 }
