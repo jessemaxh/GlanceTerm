@@ -151,15 +151,17 @@ describe('WorktreeService — multi-repo non-git root (real git)', () => {
         await svc.removeSet(set, { force: true })
     })
 
-    it('non-force removeSet on a dirty worktree PRESERVES the work (no fs.rm)', async () => {
+    it('non-force removeSet is ATOMIC: one dirty repo → the WHOLE set is preserved', async () => {
         const repos = await svc.discoverSubRepos(root)
         const set = await svc.createSet(root, repos, 'agent/dirty')
-        const wt = set.repos[0].worktreePath
-        fs.writeFileSync(path.join(wt, 'uncommitted.txt'), 'precious')
-        // non-force: git refuses to remove a worktree with untracked files — the
-        // unconditional fs.rm must NOT then delete the very work git protected.
+        const dirty = set.repos.find(r => r.name === 'client')!
+        const clean = set.repos.find(r => r.name === 'server')!
+        fs.writeFileSync(path.join(dirty.worktreePath, 'uncommitted.txt'), 'precious')
+        // one repo unsafe → abort the whole set, remove NOTHING (no partial teardown)
         await svc.removeSet(set)
-        expect(fs.existsSync(path.join(wt, 'uncommitted.txt'))).toBe(true)
+        expect(fs.existsSync(path.join(dirty.worktreePath, 'uncommitted.txt'))).toBe(true) // dirty work kept
+        expect(fs.existsSync(clean.worktreePath)).toBe(true)                                // clean SIBLING worktree kept
+        expect(git(clean.origPath, 'branch', '--list', 'agent/dirty')).toContain('agent/dirty') // sibling branch NOT deleted
         await svc.removeSet(set, { force: true }) // cleanup
     })
 })

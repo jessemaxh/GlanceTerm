@@ -237,16 +237,27 @@ export class WorktreeService {
      * repo already gone is fine.
      */
     async removeSet (set: WorktreeSet, opts: { force?: boolean } = {}): Promise<void> {
+        // ATOMIC non-force: if ANY repo in the set is unsafe (dirty / unmerged),
+        // remove NOTHING — otherwise a multi-repo set is half torn down (a clean
+        // sibling's worktree + branch deleted while the dirty one is kept). force =
+        // the UI dirty-guard already confirmed the discard, so skip this gate.
+        if (!opts.force && !(await this.isSetSafeToRemove(set))) {
+            return
+        }
+
+        // 1) Remove every worktree dir. `force` ONLY relaxes git's dirty check.
         for (const r of set.repos) {
-            // `force` ONLY relaxes `worktree remove`'s dirty check — it discards
-            // UNCOMMITTED changes (the UI dirty-guard already confirmed that).
             const args = ['worktree', 'remove', r.worktreePath]
             if (opts.force) args.push('--force')
             try { await this.git(r.origPath, args) } catch { /* maybe already removed */ }
-            // Branch deletion is a SEPARATE, never-forced data-protection decision:
-            // delete the branch ONLY when it has no commits ahead of base (fully
-            // merged / never diverged). A branch with unmerged COMMITS is kept even
-            // under force — committed work is never lost when the worktree dir goes.
+        }
+        // 2) THEN delete branches — SEPARATE, never-forced data protection: delete a
+        //    repo's branch ONLY if its worktree actually went AND it has no commits
+        //    ahead of base (fully merged). A branch with unmerged COMMITS is kept
+        //    even under force; deferring until the worktree is gone means a refused
+        //    remove never leaves a deleted branch behind a surviving worktree.
+        for (const r of set.repos) {
+            if (fsSync.existsSync(r.worktreePath)) continue // worktree survived → keep its branch
             try {
                 const ahead = await this.git(r.origPath, ['rev-list', `${r.base}..${set.branch}`])
                 if (ahead.trim() === '') {
@@ -255,11 +266,7 @@ export class WorktreeService {
             } catch { /* base/branch gone — ignore */ }
             try { await this.git(r.origPath, ['worktree', 'prune']) } catch { /* */ }
         }
-        // Only nuke the isolated root if force, OR every worktree dir is actually
-        // gone. A NON-force `worktree remove` that git REFUSED (dirty / untracked
-        // files) leaves the worktree dir in place — `fs.rm`-ing it here would
-        // delete the very uncommitted work git just protected. force = the caller
-        // (UI dirty-guard) already confirmed the discard.
+        // 3) Nuke the isolated root only if force OR every worktree dir is gone.
         const anyWorktreeLeft = set.repos.some(r => fsSync.existsSync(r.worktreePath))
         if (opts.force || !anyWorktreeLeft) {
             this.assertWithinManagedRoot(set.isolatedRoot)
