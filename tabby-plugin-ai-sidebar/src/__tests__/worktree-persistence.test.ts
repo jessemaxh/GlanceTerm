@@ -3,7 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { WorktreeService, isWorktreeSet, isolatedRootFor, WorktreeSet } from '../worktree.service'
+import { WorktreeService, isWorktreeSet, isolatedRootFor, MANAGED_ROOT, WorktreeSet } from '../worktree.service'
 
 /**
  * Persistence registry tests. No git + no real-home writes: the registry path is
@@ -81,6 +81,15 @@ describe('WorktreeService persistence (registry)', () => {
         const good = fakeSet('/ws/proj', 'agent/x')
         const foreign = { ...fakeSet('/ws/p', 'agent/y'), isolatedRoot: '/etc/evil' }
         fs.writeFileSync(registry, JSON.stringify({ version: 1, sets: [good, foreign, { garbage: true }, null] }))
+        expect(await svc.loadPersistedSets()).toEqual([good])
+    })
+
+    it('drops a 1-level isolatedRoot (the per-workspace-parent rm landmine)', async () => {
+        const good = fakeSet('/ws/proj', 'agent/x') // 2-level, valid
+        // 1-level: the <name>-<hash> parent that holds every sibling worktree —
+        // recursive rm here would wipe a workspace's other branches.
+        const parent = { ...fakeSet('/ws/p', 'agent/y'), isolatedRoot: path.join(MANAGED_ROOT, 'proj-abc1234567') }
+        fs.writeFileSync(registry, JSON.stringify({ version: 1, sets: [good, parent] }))
         expect(await svc.loadPersistedSets()).toEqual([good])
     })
 

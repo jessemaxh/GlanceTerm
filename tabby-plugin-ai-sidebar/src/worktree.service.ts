@@ -143,9 +143,11 @@ export class WorktreeService {
     private assertWithinManagedRoot (p: string): void {
         const resolved = path.resolve(p)
         const managed = path.resolve(MANAGED_ROOT)
-        // Must be STRICTLY inside — refuse `=== managed` too, so a corrupt
-        // isolatedRoot of MANAGED_ROOT itself can never reach fs.rm(managed).
-        if (resolved === managed || !resolved.startsWith(managed + path.sep)) {
+        // Must be a GRANDCHILD of the managed root — exactly the 2-level shape
+        // isolatedRootFor produces (MANAGED_ROOT/<name-hash>/<leaf>). Refusing the
+        // root AND the 1-level per-workspace parent stops a corrupt registry from
+        // recursively rm-ing a parent dir that holds every sibling-branch worktree.
+        if (!resolved.startsWith(managed + path.sep) || path.dirname(resolved) === managed) {
             throw new Error(`refusing to touch a path outside the managed worktree root: ${p}`)
         }
     }
@@ -399,7 +401,12 @@ export class WorktreeService {
         const managed = path.resolve(MANAGED_ROOT)
         return sets.filter(isWorktreeSet).filter(s => {
             const r = path.resolve(s.isolatedRoot)
-            return r === managed || r.startsWith(managed + path.sep)
+            // Require the 2-level grandchild shape isolatedRootFor produces, so a
+            // hand-edited entry pointing at the managed root or a 1-level
+            // per-workspace parent is dropped here (defense in depth — removeSet's
+            // assertWithinManagedRoot enforces the same, but never feed the reaper
+            // a path whose recursive removal could take sibling worktrees).
+            return r.startsWith(managed + path.sep) && path.dirname(r) !== managed
         })
     }
 
@@ -423,8 +430,10 @@ export class WorktreeService {
      * queue, so concurrent persist/forget (rapid open/close) can't lose updates
      * or interleave. `transform` runs against the freshly-loaded set inside the
      * critical section. (Cross-PROCESS — a second window — still races; the
-     * unique temp name below prevents corruption, and a lost update self-heals
-     * on the next launch's reconcile. A cross-process lock is future work.)
+     * unique temp name below prevents file CORRUPTION, but a cross-process lost
+     * update can still drop an entry. Bounded: the worktree still exists on disk
+     * and is handled by close-driven cleanup / the manager panel. A cross-process
+     * lock is future work.)
      */
     private mutateRegistry (transform: (sets: WorktreeSet[]) => WorktreeSet[]): Promise<void> {
         const run = async (): Promise<void> => {
