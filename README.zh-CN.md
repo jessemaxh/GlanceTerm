@@ -15,7 +15,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-yellow.svg"></a>
-  <img alt="Platform" src="https://img.shields.io/badge/prebuilt-macOS%20Apple%20Silicon-lightgrey">
+  <img alt="Platforms" src="https://img.shields.io/badge/prebuilt-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
   <a href="https://github.com/jessemaxh/GlanceTerm/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/jessemaxh/GlanceTerm"></a>
   <img alt="Built on Tabby" src="https://img.shields.io/badge/built%20on-Tabby-blue">
   <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg">
@@ -207,14 +207,18 @@ GlanceTerm.app 拖进 `/Applications`。该构建已用 **Apple Developer ID 签
 未发现恶意软件"的确认 —— 这对任何下载的 app 都正常，点一次 **Open** 即可。（用
 Homebrew 安装连这一下都没有。）
 
-> **仅支持 Apple Silicon（arm64）。** 不支持 Intel（x64）Mac：GitHub 托管的 Intel
-> runner 太稀缺、没法用来构建，而且 arm64 程序无法在 Intel 上运行（Rosetta 只能
-> Intel→arm 单向）。每次版本号更新，发布版由 CI 自动构建、签名、公证并发布。
+> **macOS 仅支持 Apple Silicon（arm64）** —— 不支持 Intel Mac（GitHub 的 Intel
+> runner 太稀缺，且 arm64 跑不了 Intel）。Linux 和 Windows 是 x64。
 
-**Linux / Windows** —— **暂不提供预构建安装包。** 跨平台代码路径是存在的 —— hook
-处理器为 Windows 提供 PowerShell 变体、为 Linux 提供 POSIX `sh`，全部能编译 ——
-但都没做过冒烟测试。想在那上面试用，请从源码构建（见[开发 / 构建](#开发--构建)）。
-欢迎提"在我的发行版上能用"/"这里有问题、附上修复"的 PR，或贡献一个构建 workflow。
+**Linux（x64）** —— 从[最新发布版](../../releases/latest)下载：
+`.AppImage`（`chmod +x GlanceTerm-*.AppImage && ./GlanceTerm-*.AppImage`）、`.deb`
+（`sudo apt install ./GlanceTerm-*-linux-x64.deb`），或 `.rpm` / `.pacman` / `.tar.gz`。
+
+**Windows（x64）** —— 从[最新发布版](../../releases/latest)下载 `…-setup-x64.exe`
+安装包（或 `…-portable-x64.zip` 免安装）。⚠️ **未签名** —— SmartScreen 会弹
+"Windows protected your PC"，点 **More info → Run anyway**。（代码签名在计划中。）
+
+每个版本都由 CI 自动构建、跑启动冒烟（app 必须能无头启动）、并三平台一起发布。
 
 ## 开发 / 构建
 

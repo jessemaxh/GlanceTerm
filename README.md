@@ -15,7 +15,7 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-yellow.svg"></a>
-  <img alt="Platform" src="https://img.shields.io/badge/prebuilt-macOS%20Apple%20Silicon-lightgrey">
+  <img alt="Platforms" src="https://img.shields.io/badge/prebuilt-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
   <a href="https://github.com/jessemaxh/GlanceTerm/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/jessemaxh/GlanceTerm"></a>
   <img alt="Built on Tabby" src="https://img.shields.io/badge/built%20on-Tabby-blue">
   <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg">
@@ -222,17 +222,21 @@ macOS shows a one-time "downloaded from the Internet… Apple checked it for mal
 none found" confirmation the first time you open it; that's expected for any
 downloaded app — click **Open** once. (Homebrew installs skip even that.)
 
-> **Apple Silicon (arm64) only.** Intel (x64) Macs aren't supported: GitHub's
-> hosted Intel runners are too scarce to build on, and arm64 binaries can't run on
-> Intel (Rosetta only translates Intel→arm). Each release is built, signed,
-> notarized and published automatically by CI on every version bump.
+> **macOS is Apple Silicon (arm64) only** — Intel Macs aren't supported (GitHub's
+> hosted Intel runners are too scarce, and arm64 can't run on Intel). Linux and
+> Windows are x64.
 
-**Linux / Windows** — **no prebuilt installers.** The cross-platform code paths
-exist — the hook handler ships a PowerShell variant for Windows and POSIX `sh` for
-Linux, and everything compiles — but nothing has been smoke-tested. To try
-GlanceTerm there, build from source (see [Dev / Build](#dev--build)). PRs reporting
-"works on my distro" / "breaks here, fix attached" — or contributing a build
-workflow — are very welcome.
+**Linux (x64)** — download from the [latest release](../../releases/latest):
+`.AppImage` (`chmod +x GlanceTerm-*.AppImage && ./GlanceTerm-*.AppImage`), `.deb`
+(`sudo apt install ./GlanceTerm-*-linux-x64.deb`), or `.rpm` / `.pacman` / `.tar.gz`.
+
+**Windows (x64)** — download the `…-setup-x64.exe` installer (or the
+`…-portable-x64.zip`, no install) from the [latest release](../../releases/latest).
+⚠️ **Unsigned** — SmartScreen shows "Windows protected your PC"; click **More info →
+Run anyway**. (Code signing is on the roadmap.)
+
+Every release is built, smoke-tested (the app must actually launch headless in CI),
+and published automatically for all three platforms on each version bump.
 
 ## Dev / Build
 
