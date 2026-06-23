@@ -115,6 +115,13 @@ export class WorktreeActionsService {
             this.notifications.error(`Worktree isolation failed: ${err?.message ?? err}`)
             return null
         }
+        // Persist BEFORE opening the tab so a crash in between can't leave an
+        // unrecorded worktree (invisible to both re-attach and the reaper). The
+        // open-failure path below force-removes the set, which auto-forgets it.
+        await this.worktree.persistSet(set).catch(e => {
+            // eslint-disable-next-line no-console
+            console.warn('[glanceterm] worktree persistSet failed:', e?.message ?? e)
+        })
 
         // openTab can REJECT (unguarded profile/PTY init), not just return null —
         // both leave the freshly-created set orphaned on disk, so handle them the
@@ -140,12 +147,6 @@ export class WorktreeActionsService {
         // the split that now contains the leaf; `?? tab` covers the unwrapped case.
         const outer = this.app.getParentTab(tab) ?? tab
         this.lifecycle.register(outer, set, tab)
-        // Record for resume re-attach + the reaper. Best-effort: a registry write
-        // failure must not fail the open (the tab + worktree already exist).
-        await this.worktree.persistSet(set).catch(e => {
-            // eslint-disable-next-line no-console
-            console.warn('[glanceterm] worktree persistSet failed:', e?.message ?? e)
-        })
         if (aiTool) {
             this.scheduleAgentLaunch(tab, aiTool)
         }

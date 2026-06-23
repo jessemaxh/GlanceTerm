@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core'
 import * as fsSync from 'fs'
 import * as path from 'path'
-import { ConfigService, NotificationsService } from 'tabby-core'
+import { ConfigService } from 'tabby-core'
 
 import { TabMonitor } from './tab-monitor'
 import { WorktreeService, WorktreeSet } from './worktree.service'
@@ -10,17 +10,32 @@ import { WorktreeLifecycleService } from './worktree-lifecycle.service'
 /**
  * Delay after config-ready before the one-shot reconcile. Generous on purpose:
  * AutoResumeService warms every recovered tab's session and TabMonitor polls cwd
- * on an interval, so we wait for those to populate before deciding a worktree is
- * orphaned. The design's load-bearing order — re-attach recovered tabs FIRST,
- * reap only what's left — depends on cwds being known by now.
+ * on an interval, so we wait for those to populate before matching tabs to
+ * worktrees. Re-attach is the only timing-sensitive step now (see below).
  */
 const REAP_DELAY_MS = 10_000
 
-/** The persisted set a cwd belongs to: isolatedRoot === cwd, or cwd is inside it. Pure. */
-export function worktreeSetForCwd (cwd: string, sets: WorktreeSet[]): WorktreeSet | null {
-    const c = path.resolve(cwd)
+/** Best-effort canonical path (resolves symlinks) so a live tab's OS-resolved
+ *  cwd (`/private/var…`) matches an unresolved isolatedRoot. Falls back to a
+ *  plain resolve if the path doesn't exist / can't be realpath'd. */
+function canonical (p: string): string {
+    try {
+        return fsSync.realpathSync(p)
+    } catch {
+        return path.resolve(p)
+    }
+}
+
+/** The persisted set a cwd belongs to: isolatedRoot === cwd, or cwd is inside it.
+ *  `resolve` canonicalizes both sides (default = path.resolve, for pure tests). */
+export function worktreeSetForCwd (
+    cwd: string,
+    sets: WorktreeSet[],
+    resolve: (p: string) => string = path.resolve,
+): WorktreeSet | null {
+    const c = resolve(cwd)
     for (const s of sets) {
-        const root = path.resolve(s.isolatedRoot)
+        const root = resolve(s.isolatedRoot)
         if (c === root || c.startsWith(root + path.sep)) {
             return s
         }
@@ -28,48 +43,33 @@ export function worktreeSetForCwd (cwd: string, sets: WorktreeSet[]): WorktreeSe
     return null
 }
 
-/** Split persisted sets by whether a live tab cwd sits inside them. Pure. */
-export function partitionClaimed (
-    sets: WorktreeSet[],
-    liveCwds: string[],
-): { claimed: WorktreeSet[], orphans: WorktreeSet[] } {
-    const claimedRoots = new Set<string>()
-    for (const cwd of liveCwds) {
-        const s = worktreeSetForCwd(cwd, sets)
-        if (s) {
-            claimedRoots.add(s.isolatedRoot)
-        }
-    }
-    return {
-        claimed: sets.filter(s => claimedRoots.has(s.isolatedRoot)),
-        orphans: sets.filter(s => !claimedRoots.has(s.isolatedRoot)),
-    }
-}
-
 /**
  * Startup reconcile for worktrees persisted by a previous session. Crash-safe:
  * worktrees are on-disk git state that survives any app death, so cleanup is
- * purely (close-driven, already) + startup-driven here. Runs ONCE per window:
+ * (close-driven, already) + this startup pass. Runs ONCE per window:
  *   1. RE-ATTACH — every live tab whose cwd is inside a persisted worktree gets
  *      its lifecycle tracking (badge + close-time cleanup) restored.
- *   2. REAP — a persisted set with NO live tab is removed IF safe (clean + no
- *      unmerged commits), its registry entry dropped if its dir vanished
- *      out-of-band, else KEPT for the manager panel. Safe-only, so even a wrongly
- *      "orphaned" set (a tab that didn't warm in time) loses no data.
+ *   2. FORGET VANISHED — a persisted entry whose dir was removed out-of-band is
+ *      dropped from the registry (the dir is already gone — nothing to delete).
  *
- * Bounded scope (documented): per-window + by-cwd. A tab that cd'd entirely out
- * of its worktree, or a worktree claimed by a DIFFERENT window, can look
- * orphaned — but the safe-only gate caps the downside to tidying a clean/merged
- * (work-free) dir. Cross-window/process claim detection is future work.
+ * Deliberately CONSERVATIVE — it does NOT auto-delete an orphan whose dir still
+ * exists. Proving a worktree is truly unused is unsafe from here: a tab may not
+ * have warmed its cwd yet (→ looks orphaned while a live agent works in it), may
+ * have cd'd out, or may belong to ANOTHER window this process can't see.
+ * Auto-deleting a "clean" worktree out from under a live agent is real data
+ * loss, so existing-dir orphans are KEPT for the manager panel (P2c) /
+ * close-driven cleanup. Safe auto-reap (needs a robust cross-process/in-use
+ * claim signal) is future work. See the worktree-isolation design doc.
  */
 @Injectable()
 export class WorktreeReaperService {
+    private running = false
+
     constructor (
         config: ConfigService,
         private monitor: TabMonitor,
         private worktree: WorktreeService,
         private lifecycle: WorktreeLifecycleService,
-        private notifications: NotificationsService,
     ) {
         config.ready$.toPromise()
             .then(() => setTimeout(() => { void this.reconcile() }, REAP_DELAY_MS))
@@ -77,45 +77,37 @@ export class WorktreeReaperService {
     }
 
     async reconcile (): Promise<void> {
-        const sets = await this.worktree.loadPersistedSets()
-        if (!sets.length) {
-            return
+        if (this.running) {
+            return // reentrancy guard — never double-issue forgetSet on the same set
         }
-
-        // 1) Re-attach live tabs sitting in a persisted worktree.
-        const liveCwds: string[] = []
-        for (const st of this.monitor.current) {
-            if (!st.cwd) {
-                continue
+        this.running = true
+        try {
+            const sets = await this.worktree.loadPersistedSets()
+            if (!sets.length) {
+                return
             }
-            liveCwds.push(st.cwd)
-            const set = worktreeSetForCwd(st.cwd, sets)
-            if (set) {
-                this.lifecycle.register(st.outerTab, set, st.innerTab)
-            }
-        }
-
-        // 2) Reap the orphans (safe only) / drop vanished entries.
-        const { orphans } = partitionClaimed(sets, liveCwds)
-        let reaped = 0
-        let kept = 0
-        for (const set of orphans) {
-            try {
-                if (!fsSync.existsSync(set.isolatedRoot)) {
-                    await this.worktree.forgetSet(set) // dir removed out-of-band → drop stale entry
-                } else if (await this.worktree.isSetSafeToRemove(set)) {
-                    await this.worktree.removeSet(set) // safe orphan → tidy (auto-forgets)
-                    reaped++
-                } else {
-                    kept++ // has unsaved/unmerged work → leave for the manager
+            // 1) Re-attach live tabs sitting in a persisted worktree.
+            for (const st of this.monitor.current) {
+                if (!st.cwd) {
+                    continue
                 }
-            } catch {
-                // Never let one bad set abort the sweep.
+                const set = worktreeSetForCwd(st.cwd, sets, canonical)
+                if (set) {
+                    this.lifecycle.register(st.outerTab, set, st.innerTab)
+                }
             }
-        }
-        if (reaped > 0) {
-            const keptNote = kept ? ` · kept ${kept} with work` : ''
-            this.notifications.info(`Tidied ${reaped} orphaned worktree${reaped === 1 ? '' : 's'}${keptNote}`)
+            // 2) Drop registry entries whose worktree dir vanished out-of-band.
+            //    (Existing-dir orphans are intentionally KEPT — see class doc.)
+            for (const set of sets) {
+                if (!fsSync.existsSync(set.isolatedRoot)) {
+                    await this.worktree.forgetSet(set).catch(() => { /* */ })
+                }
+            }
+        } catch (e: any) {
+            // eslint-disable-next-line no-console
+            console.warn('[glanceterm] worktree reconcile failed:', e?.message ?? e)
+        } finally {
+            this.running = false
         }
     }
 }

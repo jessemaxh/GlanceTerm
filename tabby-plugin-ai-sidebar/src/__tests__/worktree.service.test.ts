@@ -56,7 +56,9 @@ describe('WorktreeService — multi-repo non-git root (real git)', () => {
         makeRepo(path.join(root, 'server'))
         fs.mkdirSync(path.join(root, 'scripts'))
         fs.writeFileSync(path.join(root, 'scripts', 'build.sh'), '#!/bin/sh\n')
-        svc = new WorktreeService()
+        // Inject a temp registry path so removeSet's auto-forgetSet never reads
+        // or rewrites the dogfooder's REAL ~/.glanceterm/worktrees/registry.json.
+        svc = new WorktreeService(path.join(root, '.gt-registry.json'))
     })
 
     afterEach(() => {

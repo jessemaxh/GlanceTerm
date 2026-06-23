@@ -3,10 +3,10 @@ import { Subject } from 'rxjs'
 import * as path from 'path'
 import * as fs from 'fs'
 
-import { WorktreeReaperService, worktreeSetForCwd, partitionClaimed } from '../worktree-reaper.service'
+import { WorktreeReaperService, worktreeSetForCwd } from '../worktree-reaper.service'
 import { WorktreeSet } from '../worktree.service'
 
-// existsSync decides reap-vs-forget for an orphan; control it per test.
+// existsSync decides whether an orphan entry is forgotten (dir gone) or kept.
 vi.mock('fs', async (importOriginal) => {
     const actual = await importOriginal<typeof import('fs')>()
     return { ...actual, existsSync: vi.fn(() => true) }
@@ -28,64 +28,47 @@ describe('worktreeSetForCwd (pure)', () => {
     it('matches a cwd INSIDE the worktree', () => expect(worktreeSetForCwd('/m/p-a/agent/client/src', [a, b])).toBe(a))
     it('returns null when nothing contains the cwd', () => expect(worktreeSetForCwd('/somewhere/else', [a, b])).toBeNull())
     it('a sibling-prefix path does NOT false-match', () => expect(worktreeSetForCwd('/m/p-a/agent-other', [a])).toBeNull())
-})
-
-describe('partitionClaimed (pure)', () => {
-    it('splits by whether a live cwd sits inside the set', () => {
-        const a = set('/m/p-a/agent')
-        const b = set('/m/p-b/agent')
-        const { claimed, orphans } = partitionClaimed([a, b], ['/m/p-a/agent/x'])
-        expect(claimed).toEqual([a])
-        expect(orphans).toEqual([b])
-    })
-    it('no live cwds → everything is an orphan', () => {
-        const a = set('/m/p-a/agent')
-        expect(partitionClaimed([a], []).orphans).toEqual([a])
+    it('honors a symlink-resolving `resolve` so /private/var matches /var', () => {
+        const s = set('/var/wt/agent')
+        const resolve = (p: string) => p.replace(/^\/private\/var/, '/var') // mimic realpath on macOS
+        expect(worktreeSetForCwd('/private/var/wt/agent', [s], resolve)).toBe(s)
+        expect(worktreeSetForCwd('/private/var/wt/agent', [s])).toBeNull() // without it → false orphan
     })
 })
 
-describe('WorktreeReaperService.reconcile', () => {
-    function make (sets: WorktreeSet[], states: any[], safe: boolean) {
+describe('WorktreeReaperService.reconcile (conservative — never deletes an existing dir)', () => {
+    function make (sets: WorktreeSet[], states: any[]) {
         const worktree = {
             loadPersistedSets: vi.fn().mockResolvedValue(sets),
-            isSetSafeToRemove: vi.fn().mockResolvedValue(safe),
+            isSetSafeToRemove: vi.fn().mockResolvedValue(true),
             removeSet: vi.fn().mockResolvedValue(undefined),
             forgetSet: vi.fn().mockResolvedValue(undefined),
         }
         const lifecycle = { register: vi.fn() }
         const monitor = { current: states }
-        const notifications = { info: vi.fn() }
-        const config = { ready$: new Subject() } // never completes → no scheduled timer; we call reconcile() directly
-        const svc = new WorktreeReaperService(config as any, monitor as any, worktree as any, lifecycle as any, notifications as any)
-        return { svc, worktree, lifecycle, notifications }
+        const config = { ready$: new Subject() } // never completes → no scheduled timer; call reconcile() directly
+        const svc = new WorktreeReaperService(config as any, monitor as any, worktree as any, lifecycle as any)
+        return { svc, worktree, lifecycle }
     }
 
     beforeEach(() => { (fs.existsSync as any).mockReturnValue(true) })
 
-    it('re-attaches a live tab in a worktree + reaps the safe orphan', async () => {
+    it('re-attaches a live tab + KEEPS an existing-dir orphan (never removeSet)', async () => {
         const a = set('/m/p-a/agent')
         const b = set('/m/p-b/agent')
         const outerA = {}; const innerA = {}
         const states = [{ cwd: '/m/p-a/agent', outerTab: outerA, innerTab: innerA }]
-        const { svc, worktree, lifecycle, notifications } = make([a, b], states, true)
+        const { svc, worktree, lifecycle } = make([a, b], states)
         await svc.reconcile()
         expect(lifecycle.register).toHaveBeenCalledWith(outerA, a, innerA) // claimed → re-attached
-        expect(worktree.removeSet).toHaveBeenCalledWith(b)                 // orphan b → reaped
-        expect(worktree.removeSet).not.toHaveBeenCalledWith(a)             // claimed a → never reaped
-        expect(notifications.info).toHaveBeenCalledWith(expect.stringMatching(/Tidied 1 orphaned worktree\b/))
+        expect(worktree.removeSet).not.toHaveBeenCalled()                  // NEVER auto-deletes
+        expect(worktree.forgetSet).not.toHaveBeenCalled()                  // dirs exist → entries kept
+        expect(worktree.isSetSafeToRemove).not.toHaveBeenCalled()
     })
 
-    it('an UNSAFE orphan (has work) is kept, not removed', async () => {
+    it('forgets a registry entry whose dir vanished out-of-band', async () => {
         const b = set('/m/p-b/agent')
-        const { svc, worktree, notifications } = make([b], [], false)
-        await svc.reconcile()
-        expect(worktree.removeSet).not.toHaveBeenCalled()
-        expect(notifications.info).not.toHaveBeenCalled() // nothing reaped → no toast
-    })
-
-    it('an orphan whose dir vanished out-of-band is forgotten, not removed', async () => {
-        const b = set('/m/p-b/agent')
-        const { svc, worktree } = make([b], [], true)
+        const { svc, worktree } = make([b], [])
         ;(fs.existsSync as any).mockReturnValue(false) // dir gone
         await svc.reconcile()
         expect(worktree.forgetSet).toHaveBeenCalledWith(b)
@@ -93,9 +76,17 @@ describe('WorktreeReaperService.reconcile', () => {
     })
 
     it('no persisted sets → does nothing', async () => {
-        const { svc, worktree, lifecycle } = make([], [], true)
+        const { svc, worktree, lifecycle } = make([], [])
         await svc.reconcile()
         expect(lifecycle.register).not.toHaveBeenCalled()
-        expect(worktree.isSetSafeToRemove).not.toHaveBeenCalled()
+        expect(worktree.forgetSet).not.toHaveBeenCalled()
+    })
+
+    it('reentrancy guard: a second concurrent reconcile is a no-op', async () => {
+        const b = set('/m/p-b/agent')
+        const { svc, worktree } = make([b], [])
+        ;(fs.existsSync as any).mockReturnValue(false)
+        await Promise.all([svc.reconcile(), svc.reconcile()]) // fire two at once
+        expect(worktree.loadPersistedSets).toHaveBeenCalledTimes(1) // second bailed at the guard
     })
 })

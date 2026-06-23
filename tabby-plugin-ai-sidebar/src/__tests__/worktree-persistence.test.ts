@@ -83,15 +83,32 @@ describe('WorktreeService persistence (registry)', () => {
         fs.writeFileSync(registry, JSON.stringify({ version: 1, sets: [good, foreign, { garbage: true }, null] }))
         expect(await svc.loadPersistedSets()).toEqual([good])
     })
+
+    it('drops a repos:[] entry (the MANAGED_ROOT mass-deletion landmine)', async () => {
+        const good = fakeSet('/ws/proj', 'agent/x')
+        const empty = { ...fakeSet('/ws/p', 'agent/y'), repos: [] }
+        fs.writeFileSync(registry, JSON.stringify({ version: 1, sets: [good, empty] }))
+        expect(await svc.loadPersistedSets()).toEqual([good])
+    })
+
+    it('serializes concurrent persists — no lost updates', async () => {
+        const sets = Array.from({ length: 8 }, (_, i) => fakeSet('/ws/p' + i, 'agent/' + i))
+        await Promise.all(sets.map(s => svc.persistSet(s)))
+        const loaded = await svc.loadPersistedSets()
+        expect(loaded).toHaveLength(8)
+        expect(new Set(loaded.map(s => s.branch))).toEqual(new Set(sets.map(s => s.branch)))
+        expect(fs.readdirSync(dir).filter(f => f.includes('.tmp'))).toEqual([]) // no temp leaked
+    })
 })
 
 describe('isWorktreeSet (pure)', () => {
     it('accepts a well-formed set', () => {
         expect(isWorktreeSet(fakeSet('/a', 'b'))).toBe(true)
     })
-    it('rejects null, missing fields, and malformed repos', () => {
+    it('rejects null, missing fields, malformed repos, and EMPTY repos', () => {
         expect(isWorktreeSet(null)).toBe(false)
         expect(isWorktreeSet({ root: '/a', isolatedRoot: '/b', branch: 'x' })).toBe(false) // no repos[]
+        expect(isWorktreeSet({ root: '/a', isolatedRoot: '/b', branch: 'x', repos: [] })).toBe(false) // empty → removeSet would fs.rm isolatedRoot with no anchor
         expect(isWorktreeSet({ root: '/a', isolatedRoot: '/b', branch: 'x', repos: [{ name: 'c' }] })).toBe(false) // repo missing base/paths
     })
 })

@@ -82,6 +82,12 @@ export function isWorktreeSet (x: any): x is WorktreeSet {
         && typeof x.isolatedRoot === 'string'
         && typeof x.branch === 'string'
         && Array.isArray(x.repos)
+        // MUST be non-empty: a zero-repo set makes removeSet skip all git and
+        // fall straight to fs.rm(isolatedRoot) with nothing to anchor it — a
+        // corrupt `{repos:[], isolatedRoot:<MANAGED_ROOT>}` would otherwise wipe
+        // every workspace's worktrees. isSetSafeToRemove also returns true
+        // vacuously for [] (the loop never runs), compounding it.
+        && x.repos.length > 0
         && x.repos.every((r: any) => !!r
             && typeof r.name === 'string'
             && typeof r.origPath === 'string'
@@ -102,6 +108,10 @@ export class WorktreeService {
     /** Where the resume/reaper registry lives. Default = under the managed root;
      *  overridable so unit tests don't touch the real ~/.glanceterm. */
     private readonly registryPath: string
+
+    /** Serializes registry read-modify-write so concurrent persist/forget in this
+     *  process can't lose updates. See mutateRegistry. */
+    private registryQueue: Promise<void> = Promise.resolve()
 
     constructor (registryPath: string = path.join(MANAGED_ROOT, 'registry.json')) {
         this.registryPath = registryPath
@@ -133,7 +143,9 @@ export class WorktreeService {
     private assertWithinManagedRoot (p: string): void {
         const resolved = path.resolve(p)
         const managed = path.resolve(MANAGED_ROOT)
-        if (resolved !== managed && !resolved.startsWith(managed + path.sep)) {
+        // Must be STRICTLY inside — refuse `=== managed` too, so a corrupt
+        // isolatedRoot of MANAGED_ROOT itself can never reach fs.rm(managed).
+        if (resolved === managed || !resolved.startsWith(managed + path.sep)) {
             throw new Error(`refusing to touch a path outside the managed worktree root: ${p}`)
         }
     }
@@ -393,9 +405,8 @@ export class WorktreeService {
 
     /** Record a set so a recovered tab can re-attach + the reaper knows its base. */
     async persistSet (set: WorktreeSet): Promise<void> {
-        const sets = (await this.loadPersistedSets()).filter(s => s.isolatedRoot !== set.isolatedRoot)
-        sets.push(set)
-        await this.writeRegistry(sets)
+        await this.mutateRegistry(sets =>
+            [...sets.filter(s => s.isolatedRoot !== set.isolatedRoot), set])
     }
 
     /** Drop a set from the registry. No-op if no registry exists yet (so engine
@@ -404,14 +415,40 @@ export class WorktreeService {
         if (!fsSync.existsSync(this.registryPath)) {
             return
         }
-        const sets = (await this.loadPersistedSets()).filter(s => s.isolatedRoot !== set.isolatedRoot)
-        await this.writeRegistry(sets)
+        await this.mutateRegistry(sets => sets.filter(s => s.isolatedRoot !== set.isolatedRoot))
+    }
+
+    /**
+     * Serialize every read-modify-write of the registry through one in-process
+     * queue, so concurrent persist/forget (rapid open/close) can't lose updates
+     * or interleave. `transform` runs against the freshly-loaded set inside the
+     * critical section. (Cross-PROCESS — a second window — still races; the
+     * unique temp name below prevents corruption, and a lost update self-heals
+     * on the next launch's reconcile. A cross-process lock is future work.)
+     */
+    private mutateRegistry (transform: (sets: WorktreeSet[]) => WorktreeSet[]): Promise<void> {
+        const run = async (): Promise<void> => {
+            const next = transform(await this.loadPersistedSets())
+            await this.writeRegistry(next)
+        }
+        // Chain regardless of the previous op's outcome so one failure doesn't
+        // wedge the queue. Swallow here; callers already treat persist as best-effort.
+        this.registryQueue = this.registryQueue.then(run, run)
+        return this.registryQueue
     }
 
     private async writeRegistry (sets: WorktreeSet[]): Promise<void> {
         await fs.mkdir(path.dirname(this.registryPath), { recursive: true })
-        const tmp = `${this.registryPath}.tmp`
-        await fs.writeFile(tmp, JSON.stringify({ version: 1, sets }, null, 2), 'utf-8')
-        await fs.rename(tmp, this.registryPath) // atomic: a crash mid-write can't corrupt the live file
+        // UNIQUE temp per write (pid + random): a shared `.tmp` would let two
+        // concurrent writers interleave bytes into the same file, then publish
+        // torn JSON via rename. With a private temp, rename is genuinely atomic.
+        const tmp = `${this.registryPath}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`
+        try {
+            await fs.writeFile(tmp, JSON.stringify({ version: 1, sets }, null, 2), 'utf-8')
+            await fs.rename(tmp, this.registryPath) // atomic: a crash mid-write can't corrupt the live file
+        } catch (e) {
+            await fs.rm(tmp, { force: true }).catch(() => {}) // don't leak a temp on failure
+            throw e
+        }
     }
 }
