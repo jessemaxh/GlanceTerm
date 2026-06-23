@@ -103,8 +103,38 @@ export class PTY {
         })
 
         this.pty.onData(data => this.outputQueue.push(Buffer.from(data)))
-        this.pty.onExit(() => {
+        this.pty.onExit((e?: { exitCode?: number, signal?: number }) => {
             this.exited = true
+            // Opt-in PTY-exit diagnostic. Records WHY each pty ended — exitCode +
+            // signal (1=SIGHUP→tab closed, 9=SIGKILL, 15=SIGTERM, code 0=normal
+            // exit), command, cwd, pid, time — to ~/.glanceterm/pty-exit-debug.log.
+            // For diagnosing tabs that vanish when an agent's pty dies; cross-
+            // reference the SessionEnd timestamps in ~/.glanceterm/hooks/*.log.
+            //
+            // OFF by default (it would otherwise log every shell's command line).
+            // Enable per-machine by creating the flag file — `touch
+            // ~/.glanceterm/pty-debug.flag` — matching the auto-approve.flag /
+            // permission-relay.flag convention. This has to live in the shipped
+            // (Developer-ID-signed) build, not a local one: macOS keys TCC
+            // permissions on the code signature, so only the signed release has
+            // stable permissions to reproduce the bug against.
+            try {
+                /* eslint-disable @typescript-eslint/no-var-requires */
+                const fs = require('fs'); const os = require('os'); const path = require('path')
+                const dir = path.join(os.homedir(), '.glanceterm')
+                if (!fs.existsSync(path.join(dir, 'pty-debug.flag'))) return
+                const file = (args as any[])[0]
+                const a = Array.isArray((args as any[])[1]) ? (args as any[])[1] : []
+                const opts = (args as any[])[2] || {}
+                const line = JSON.stringify({
+                    ts: new Date().toISOString(),
+                    pid: (this.pty as any)?.pid,
+                    exitCode: e?.exitCode, signal: e?.signal,
+                    cmd: `${file} ${a.join(' ')}`.slice(0, 200),
+                    cwd: opts.cwd,
+                }) + '\n'
+                fs.appendFileSync(path.join(dir, 'pty-exit-debug.log'), line)
+            } catch { /* never throw from a diagnostic */ }
         })
     }
 
