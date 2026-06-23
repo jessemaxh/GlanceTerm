@@ -65,6 +65,51 @@ jobs:
       - name: Build (${{ matrix.name }})
         run: node scripts/${{ matrix.script }}
 
+      # Launch smoke test: install/launch the built app HEADLESS and wait for it
+      # to answer on the Chrome DevTools port. If the asar shipped without
+      # node_modules (the macOS-only failure mode), the main process crashes
+      # before the renderer comes up and CDP never responds → this fails. Green
+      # here = "it actually launches", not just "it built".
+      - name: Linux — launch smoke (Electron up via CDP)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          set -euo pipefail
+          sudo apt-get install -y xvfb
+          sudo apt-get install -y ./dist/*.deb
+          BIN=$(find /opt -maxdepth 2 -type f -executable 2>/dev/null | grep -iE '/glanceterm$' | head -1)
+          echo "binary: ${BIN:-<not found>}"; test -n "$BIN"
+          xvfb-run -a "$BIN" --no-sandbox --remote-debugging-port=9222 > /tmp/app.log 2>&1 &
+          APP=$!; ok=0
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:9222/json/version >/dev/null 2>&1; then ok=1; break; fi
+            kill -0 "$APP" 2>/dev/null || break
+            sleep 2
+          done
+          echo "----- app log (tail) -----"; tail -30 /tmp/app.log || true
+          kill "$APP" 2>/dev/null || true
+          if grep -qi "cannot find module" /tmp/app.log; then echo "✗ asar/module crash"; exit 1; fi
+          if [ "$ok" != 1 ]; then echo "✗ Electron never answered on CDP"; exit 1; fi
+          echo "✓ Linux launch smoke passed"
+
+      - name: Windows — launch smoke (Electron up via CDP)
+        if: matrix.os == 'windows-2022'
+        shell: pwsh
+        run: |
+          $exe = "dist/win-unpacked/GlanceTerm.exe"
+          if (!(Test-Path $exe)) { $exe = (Get-ChildItem -Recurse dist -Filter GlanceTerm.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName }
+          Write-Host "launching: $exe"
+          if (-not $exe) { Write-Error "GlanceTerm.exe not found"; exit 1 }
+          $p = Start-Process -FilePath $exe -ArgumentList "--remote-debugging-port=9222","--no-sandbox" -PassThru
+          $ok = $false
+          for ($i=0; $i -lt 30; $i++) {
+            try { Invoke-WebRequest -UseBasicParsing http://localhost:9222/json/version -TimeoutSec 2 | Out-Null; $ok = $true; break } catch {}
+            if ($p.HasExited) { break }
+            Start-Sleep 2
+          }
+          try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
+          if (-not $ok) { Write-Error "Electron never answered on CDP"; exit 1 }
+          Write-Host "Windows launch smoke passed"
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
