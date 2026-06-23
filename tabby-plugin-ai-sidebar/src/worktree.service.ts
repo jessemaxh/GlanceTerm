@@ -64,7 +64,12 @@ export function isolatedRootFor (root: string, branch: string): string {
     const absRoot = path.resolve(root)
     const name = (path.basename(absRoot) || 'workspace').replace(/[^\w.-]/g, '_')
     const hash = crypto.createHash('sha1').update(absRoot).digest('hex').slice(0, 10)
-    const leaf = encodeURIComponent(branch).replace(/\./g, '%2E')
+    let leaf = encodeURIComponent(branch).replace(/\./g, '%2E')
+    // A git-valid branch can encode past the 255-byte filename-component limit
+    // (`/`→`%2F` etc.); cap it and append a hash of the full branch for uniqueness.
+    if (leaf.length > 200) {
+        leaf = leaf.slice(0, 188) + '-' + crypto.createHash('sha1').update(branch).digest('hex').slice(0, 10)
+    }
     return path.join(MANAGED_ROOT, `${name}-${hash}`, leaf)
 }
 
@@ -123,6 +128,11 @@ export class WorktreeService {
      * Discover the git repos to isolate. If `root` is itself a repo toplevel →
      * single-repo case (`[root]`). Otherwise scan its direct children for repo
      * toplevels — the multi-repo non-git-root workspace.
+     *
+     * BY DESIGN: depth-1 only (a nested `client/frontend/.git` under a non-repo
+     * `client/` is not found), and a child that is a SYMLINK to a repo is treated
+     * as shared content (not isolated), since `Dirent.isDirectory()` is false for a
+     * symlink. Both keep discovery predictable; revisit if real workspaces need them.
      */
     async discoverSubRepos (root: string): Promise<SubRepo[]> {
         if (this.isRepoToplevel(root)) {
@@ -175,6 +185,18 @@ export class WorktreeService {
         // a worktree per repo under isolatedRoot + symlink the non-isolated siblings.
         const singleRepo = repos.length === 1 && path.resolve(repos[0].repoPath) === path.resolve(root)
         await fs.mkdir(path.dirname(isolatedRoot), { recursive: true })
+        // Multi-repo: claim isolatedRoot atomically with a NON-recursive mkdir. If it
+        // already exists (a concurrent create, or a stale leftover from a crash) abort
+        // WITHOUT entering the try below, so we never roll back + fs.rm a dir another
+        // set owns. (single-repo's `git worktree add` already fails on a non-empty
+        // target, so it's protected too.)
+        if (!singleRepo) {
+            try {
+                await fs.mkdir(isolatedRoot)
+            } catch {
+                throw new Error(`worktree dir already exists (concurrent create / stale leftover): ${isolatedRoot}`)
+            }
+        }
 
         const created: WorktreeRepo[] = []
         try {
@@ -185,27 +207,45 @@ export class WorktreeService {
                 await this.git(r.repoPath, ['worktree', 'add', isolatedRoot, '-b', branch])
                 created.push({ name: r.name, origPath: r.repoPath, worktreePath: isolatedRoot, base })
             } else {
-                await fs.mkdir(isolatedRoot, { recursive: true })
                 for (const r of repos) {
                     const base = await this.baseCommit(r.repoPath)
                     const worktreePath = path.join(isolatedRoot, r.name)
                     await this.git(r.repoPath, ['worktree', 'add', worktreePath, '-b', branch])
                     created.push({ name: r.name, origPath: r.repoPath, worktreePath, base })
                 }
-                // Symlink every root entry that ISN'T an isolated repo (non-git
-                // content + repos the user left unchecked) → shared.
+                // Symlink every root entry that ISN'T an isolated repo (non-git content
+                // + unchecked repos) → shared. Surface failures instead of swallowing
+                // them — an agent must not silently run missing its shared content.
+                // lstat (not existsSync) so a stale BROKEN link is replaced; a Windows
+                // directory needs a junction (a plain symlink needs privilege there).
                 const selected = new Set(repos.map(r => r.name))
                 let entries: fsSync.Dirent[] = []
                 try { entries = await fs.readdir(root, { withFileTypes: true }) } catch { /* */ }
+                const failed: string[] = []
                 for (const e of entries) {
                     if (selected.has(e.name)) continue
                     const link = path.join(isolatedRoot, e.name)
-                    if (fsSync.existsSync(link)) continue
-                    try { await fs.symlink(path.join(root, e.name), link) } catch { /* best-effort */ }
+                    let present = true
+                    try { fsSync.lstatSync(link) } catch { present = false }
+                    if (present) continue
+                    try {
+                        const type = process.platform === 'win32' && e.isDirectory() ? 'junction' : undefined
+                        await fs.symlink(path.join(root, e.name), link, type)
+                    } catch (err: any) {
+                        failed.push(`${e.name} (${err?.code ?? 'symlink failed'})`)
+                    }
+                }
+                if (failed.length) {
+                    throw new Error(`could not share non-git content into the worktree: ${failed.join(', ')}`)
                 }
             }
         } catch (err) {
             await this.removeSet({ root, isolatedRoot, branch, repos: created }, { force: true }).catch(() => {})
+            // Prune EVERY attempted repo (not just `created`) — the repo whose
+            // `worktree add` failed can leave a dangling worktree admin entry.
+            for (const r of repos) {
+                try { await this.git(r.repoPath, ['worktree', 'prune']) } catch { /* */ }
+            }
             throw err
         }
         return { root, isolatedRoot, branch, repos: created }

@@ -39,6 +39,10 @@ describe('isolatedRootFor (pure)', () => {
     it('a trailing slash on the root is irrelevant (path is resolved)', () => {
         expect(isolatedRootFor('/Users/x/my-project/', 'b')).toBe(isolatedRootFor('/Users/x/my-project', 'b'))
     })
+    it('caps an over-long branch leaf under the filename-component limit', () => {
+        const p = isolatedRootFor('/x/p', 'feature/' + 'a'.repeat(400))
+        expect(path.basename(p).length).toBeLessThanOrEqual(200)
+    })
 })
 
 describe('WorktreeService — multi-repo non-git root (real git)', () => {
@@ -163,5 +167,14 @@ describe('WorktreeService — multi-repo non-git root (real git)', () => {
         expect(fs.existsSync(clean.worktreePath)).toBe(true)                                // clean SIBLING worktree kept
         expect(git(clean.origPath, 'branch', '--list', 'agent/dirty')).toContain('agent/dirty') // sibling branch NOT deleted
         await svc.removeSet(set, { force: true }) // cleanup
+    })
+
+    it('aborts WITHOUT rollback if the isolated dir already exists (concurrent / stale)', async () => {
+        const repos = await svc.discoverSubRepos(root)
+        const dir = isolatedRootFor(root, 'agent/dup')
+        fs.mkdirSync(dir, { recursive: true }) // simulate a concurrent / stale claim
+        await expect(svc.createSet(root, repos, 'agent/dup')).rejects.toThrow(/already exists/)
+        expect(fs.existsSync(dir)).toBe(true) // NOT deleted — we don't own it
+        fs.rmSync(dir, { recursive: true, force: true })
     })
 })
