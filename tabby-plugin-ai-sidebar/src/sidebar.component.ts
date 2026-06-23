@@ -510,6 +510,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             flex: none;
         }
         .sb-header .sb-logo { width: 22px; height: 22px; flex: none; display: inline-flex; }
+        .sb-header .sb-logo svg { width: 22px; height: 22px; flex: none; } /* pin (see .action-btn svg) */
         .sb-header .sb-title { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; color: var(--gt-text); white-space: nowrap; }
         .sb-header .sb-title b { color: var(--gt-accent); font-weight: 600; }
         .sb-header .sb-grow { flex: 1; }
@@ -661,6 +662,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
         }
         .row.active .num { color: var(--gt-text-dim); }
         .subicon { color: var(--gt-ghost); flex: none; display: inline-flex; }
+        .subicon svg { width: 12px; height: 12px; flex: none; } /* pin (see .action-btn svg) */
 
         /* shell rows recede — nearly invisible until hovered */
         .row[data-status="no_ai"] { opacity: 0.5; }
@@ -1142,7 +1144,17 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             border-color: rgba(255, 170, 85, 0.55);
             color: var(--gt-accent);
         }
-        .action-btn svg { flex: none; }
+        /* Pin EXPLICIT SVG dimensions. The inline width/height attributes alone
+           get inflated to the SVG's content box (observed ~200px) when a late
+           stylesheet / OS-event relayout strips intrinsic sizing — the footer
+           was fine at launch then "deformed" after a display change / returning
+           from System Settings. Same defect the .pin-mark sizing guards. The
+           per-icon class overrides have higher specificity, so order is moot:
+           camera 16, caret 9, split-shell + gear 17, menu check 14. */
+        .action-btn svg { flex: none; width: 17px; height: 17px; }
+        .action-btn.split-main svg { width: 16px; height: 16px; }
+        .action-btn.split-caret svg { width: 9px; height: 9px; }
+        .action-menu-item svg { flex: none; width: 14px; height: 14px; }
 
         /* Split-button group: the main action sits flush against a narrow
            caret that opens a popover menu. We keep the visual footprint close
