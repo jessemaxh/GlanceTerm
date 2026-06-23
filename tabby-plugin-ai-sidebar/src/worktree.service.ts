@@ -398,13 +398,14 @@ export class WorktreeService {
      * caller must have confirmed (dirty-guard lives in the UI). Best-effort: a
      * repo already gone is fine.
      */
-    async removeSet (set: WorktreeSet, opts: { force?: boolean } = {}): Promise<void> {
+    async removeSet (set: WorktreeSet, opts: { force?: boolean } = {}): Promise<boolean> {
         // ATOMIC non-force: if ANY repo in the set is unsafe (dirty / unmerged),
         // remove NOTHING — otherwise a multi-repo set is half torn down (a clean
         // sibling's worktree + branch deleted while the dirty one is kept). force =
         // the UI dirty-guard already confirmed the discard, so skip this gate.
+        // Returns whether the isolated root was actually removed (false = kept).
         if (!opts.force && !(await this.isSetSafeToRemove(set))) {
-            return
+            return false
         }
 
         // 1) Remove every worktree dir. `force` ONLY relaxes git's dirty check.
@@ -438,6 +439,30 @@ export class WorktreeService {
             // The set is gone → drop it from the resume/reaper registry. (A non-force
             // KEEP returned early above, so a kept-because-dirty set stays recorded.)
             await this.forgetSet(set)
+            return true
+        }
+        return false // worktree dir(s) survived (non-force, something left) → not removed
+    }
+
+    /**
+     * Best-effort: is any live process cwd'd inside this set's isolated root? A
+     * cross-PROCESS safety net for the manager's manual remove — WorktreeLifecycle
+     * only sees THIS window's tabs, so a worktree open in another window (or a tab
+     * not yet re-attached at startup) would otherwise look like a removable orphan.
+     * darwin/linux via `lsof`; returns false when it can't tell (win32 / lsof
+     * missing / timeout) — there the in-memory live check is the only backstop.
+     */
+    async isInUse (set: WorktreeSet): Promise<boolean> {
+        if (process.platform === 'win32') {
+            return false
+        }
+        try {
+            // `lsof -t +D <dir>`: pids with any open file (incl. a shell's cwd)
+            // under the isolated root. Exits 1 with empty output when none match.
+            const { stdout } = await execFileAsync('lsof', ['-t', '+D', set.isolatedRoot], { timeout: 4000 })
+            return stdout.trim() !== ''
+        } catch {
+            return false // can't determine → don't block (liveIsolatedRoots backstops same-window)
         }
     }
 

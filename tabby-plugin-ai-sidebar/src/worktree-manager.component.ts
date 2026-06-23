@@ -12,8 +12,14 @@ interface Row {
     live: boolean
     /** Two-step guard: a dirty/unmerged remove turns the button into Force-discard. */
     confirming: boolean
+    /** When Force-discard was armed — gates against a fast double-click. */
+    armedAt?: number
     busy: boolean
 }
+
+/** Ignore a Force-discard 2nd click within this window of arming, so a fast
+ *  double-click can't blow past the confirm step. */
+const CONFIRM_MIN_MS = 350
 
 /**
  * Worktree manager (P2c). Lists every persisted worktree set with its live git
@@ -80,7 +86,17 @@ export class WorktreeManagerComponent {
         private platform: PlatformService,
         private notifications: NotificationsService,
     ) {
-        void this.refresh()
+        this.refresh().catch(e => this.notifications.error(`Could not load worktrees: ${e?.message ?? e}`))
+    }
+
+    /** In use = a live tab in THIS window OR (cross-process, best-effort) a live
+     *  process cwd'd inside the worktree. Re-checked at click time because the
+     *  row's `live` snapshot from refresh() can be stale. */
+    private async inUse (r: Row): Promise<boolean> {
+        if (this.lifecycle.liveIsolatedRoots().has(r.set.isolatedRoot)) {
+            return true
+        }
+        return this.worktree.isInUse(r.set)
     }
 
     async refresh (): Promise<void> {
@@ -128,18 +144,39 @@ export class WorktreeManagerComponent {
     }
 
     async remove (r: Row): Promise<void> {
-        if (r.live || r.busy) {
+        if (r.busy) {
             return
         }
         if (!r.status.safe && !r.confirming) {
             r.confirming = true // first click on an unsafe set → arm Force-discard
+            r.armedAt = Date.now()
+            return
+        }
+        // Defeat a fast double-click: require the armed state to have been visible
+        // for a beat before the second (destructive) click counts.
+        if (r.confirming && r.armedAt && Date.now() - r.armedAt < CONFIRM_MIN_MS) {
+            return
+        }
+        // Re-check in-use AT CLICK TIME — `r.live` from refresh() can be stale (a
+        // tab opened/recovered into this worktree since) and never saw another
+        // window's tab. Never delete a worktree in use, esp. on the force path.
+        if (await this.inUse(r)) {
+            this.notifications.error(`${r.set.branch} is in use by an open tab — close it first`)
+            r.confirming = false
+            void this.refresh()
             return
         }
         r.busy = true
         try {
-            await this.worktree.removeSet(r.set, { force: !r.status.safe })
-            this.rows = this.rows.filter(x => x !== r)
-            this.notifications.info(`Removed worktree ${r.set.branch}`)
+            const removed = await this.worktree.removeSet(r.set, { force: !r.status.safe })
+            if (removed) {
+                this.rows = this.rows.filter(x => x !== r)
+                this.notifications.info(`Removed worktree ${r.set.branch}`)
+            } else {
+                // non-force no-op (became dirty/unmerged since refresh) → keep + re-sync.
+                this.notifications.info(`Kept ${r.set.branch} — it has unsaved or unmerged work`)
+                void this.refresh()
+            }
         } catch (e: any) {
             r.busy = false
             r.confirming = false
@@ -149,15 +186,26 @@ export class WorktreeManagerComponent {
 
     async tidyAllSafe (): Promise<void> {
         const targets = this.rows.filter(r => !r.live && r.status.safe)
+        let removed = 0
         for (const r of targets) {
+            if (await this.inUse(r)) {
+                continue // went live since refresh → skip (don't delete an in-use worktree)
+            }
             r.busy = true
             try {
-                await this.worktree.removeSet(r.set) // non-force: safe only
-                this.rows = this.rows.filter(x => x !== r)
+                if (await this.worktree.removeSet(r.set)) { // non-force: safe only
+                    this.rows = this.rows.filter(x => x !== r)
+                    removed++
+                } else {
+                    r.busy = false
+                }
             } catch { r.busy = false }
         }
-        if (targets.length) {
-            this.notifications.info(`Tidied ${targets.length} worktree${targets.length === 1 ? '' : 's'}`)
+        if (removed) {
+            this.notifications.info(`Tidied ${removed} worktree${removed === 1 ? '' : 's'}`)
+        }
+        if (removed < targets.length) {
+            void this.refresh() // some skipped (in use / became dirty) → re-sync the list
         }
     }
 
