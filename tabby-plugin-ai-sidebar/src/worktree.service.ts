@@ -5,6 +5,7 @@ import * as fs from 'fs/promises'
 import * as fsSync from 'fs'
 import * as path from 'path'
 import * as os from 'os'
+import * as crypto from 'crypto'
 
 const execFileAsync = promisify(execFile)
 
@@ -37,7 +38,7 @@ export interface WorktreeRepo {
     name: string
     origPath: string       // the original repo
     worktreePath: string   // the isolated worktree
-    base: string           // the branch this worktree was forked from
+    base: string           // the commit SHA this worktree was forked from (the safety anchor)
 }
 
 /** The worktree set backing one agent tab. Persisted with the tab for resume. */
@@ -50,10 +51,21 @@ export interface WorktreeSet {
 
 // ── pure helpers (no IO — unit-testable) ─────────────────────────────────────
 
-/** Where a worktree set lives on disk. Pure. */
+/** Where a worktree set lives on disk. Pure.
+ *
+ *  Globally unique per (absolute root, branch): the dir name carries a stable hash
+ *  of the ABSOLUTE root path, so two different workspaces that merely share a
+ *  basename (`/a/project` and `/b/project`) never collide onto the same dir — which
+ *  would let one set's `fs.rm` delete another's. The branch becomes ONE leaf-safe
+ *  path segment: encodeURIComponent collapses any `/` (no nesting, so `agent` and
+ *  `agent/x` can't become a parent/child removal hazard) and we also escape `.` so
+ *  the segment can never resolve to `.`/`..`. */
 export function isolatedRootFor (root: string, branch: string): string {
-    const name = path.basename(root.replace(/[/\\]+$/, '')) || 'workspace'
-    return path.join(MANAGED_ROOT, name, branch)
+    const absRoot = path.resolve(root)
+    const name = (path.basename(absRoot) || 'workspace').replace(/[^\w.-]/g, '_')
+    const hash = crypto.createHash('sha1').update(absRoot).digest('hex').slice(0, 10)
+    const leaf = encodeURIComponent(branch).replace(/\./g, '%2E')
+    return path.join(MANAGED_ROOT, `${name}-${hash}`, leaf)
 }
 
 /** "Safe to remove" decision from raw git output: clean working tree AND no
@@ -127,8 +139,13 @@ export class WorktreeService {
         return out
     }
 
-    private async currentBranch (repo: string): Promise<string> {
-        return (await this.git(repo, ['rev-parse', '--abbrev-ref', 'HEAD'])).trim()
+    /** The commit a worktree's "ahead of base" is measured against — the repo's
+     *  current HEAD commit SHA, NOT the branch name. `rev-parse --abbrev-ref HEAD`
+     *  returns "HEAD" on a detached HEAD, and `rev-list HEAD..HEAD` is always empty,
+     *  so a worktree with real commits would be misjudged "safe to remove". A SHA is
+     *  correct in detached state too. */
+    private async baseCommit (repo: string): Promise<string> {
+        return (await this.git(repo, ['rev-parse', 'HEAD'])).trim()
     }
 
     private async branchExists (repo: string, branch: string): Promise<boolean> {
@@ -163,14 +180,14 @@ export class WorktreeService {
         try {
             if (singleRepo) {
                 const r = repos[0]
-                const base = await this.currentBranch(r.repoPath)
+                const base = await this.baseCommit(r.repoPath)
                 // `worktree add` creates isolatedRoot itself — no symlinks, no subdir.
                 await this.git(r.repoPath, ['worktree', 'add', isolatedRoot, '-b', branch])
                 created.push({ name: r.name, origPath: r.repoPath, worktreePath: isolatedRoot, base })
             } else {
                 await fs.mkdir(isolatedRoot, { recursive: true })
                 for (const r of repos) {
-                    const base = await this.currentBranch(r.repoPath)
+                    const base = await this.baseCommit(r.repoPath)
                     const worktreePath = path.join(isolatedRoot, r.name)
                     await this.git(r.repoPath, ['worktree', 'add', worktreePath, '-b', branch])
                     created.push({ name: r.name, origPath: r.repoPath, worktreePath, base })
@@ -235,5 +252,7 @@ export class WorktreeService {
         // Guard the only unconditional destructive op against a corrupted set.
         this.assertWithinManagedRoot(set.isolatedRoot)
         await fs.rm(set.isolatedRoot, { recursive: true, force: true }).catch(() => {})
+        // Best-effort: drop the now-empty per-workspace parent (<name>-<hash>/).
+        try { await fs.rmdir(path.dirname(set.isolatedRoot)) } catch { /* not empty / gone */ }
     }
 }

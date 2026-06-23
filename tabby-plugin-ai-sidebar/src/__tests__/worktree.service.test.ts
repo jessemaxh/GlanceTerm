@@ -27,12 +27,17 @@ describe('decideSafeToRemove (pure)', () => {
 })
 
 describe('isolatedRootFor (pure)', () => {
-    it('lands under the managed worktree root, keyed by root name + branch', () => {
+    it('is under the managed root, namespaced by root, branch as one safe segment', () => {
         const p = isolatedRootFor('/Users/x/my-project', 'agent/login')
-        expect(p).toContain(path.join('.glanceterm', 'worktrees', 'my-project', 'agent', 'login'))
+        expect(p).toContain(path.join('.glanceterm', 'worktrees'))
+        expect(p).toMatch(/my-project-[0-9a-f]{6,}/)       // basename + stable hash of abs root
+        expect(path.basename(p)).toBe('agent%2Flogin')     // branch = single encoded segment (no nesting)
     })
-    it('tolerates a trailing slash', () => {
-        expect(isolatedRootFor('/Users/x/my-project/', 'b')).toContain(path.join('my-project', 'b'))
+    it('same basename but different absolute root → DIFFERENT dir (no collision)', () => {
+        expect(isolatedRootFor('/tmp/a/project', 'b')).not.toBe(isolatedRootFor('/tmp/c/project', 'b'))
+    })
+    it('a trailing slash on the root is irrelevant (path is resolved)', () => {
+        expect(isolatedRootFor('/Users/x/my-project/', 'b')).toBe(isolatedRootFor('/Users/x/my-project', 'b'))
     })
 })
 
@@ -131,5 +136,18 @@ describe('WorktreeService — multi-repo non-git root (real git)', () => {
         await svc.removeSet(set, { force: true })
         // committed work survives: the branch still exists in the ORIGINAL repo
         expect(git(client.repoPath, 'branch', '--list', 'agent/work')).toContain('agent/work')
+    })
+
+    it('detached-HEAD base: a worktree with a commit is NOT judged safe to remove', async () => {
+        const client = path.join(root, 'client')
+        git(client, 'checkout', '-q', '--detach') // base via abbrev-ref would be "HEAD"
+        const set = await svc.createSet(client, await svc.discoverSubRepos(client), 'agent/d')
+        expect(await svc.isSetSafeToRemove(set)).toBe(true) // fresh worktree → safe
+        // a real commit on the worktree branch
+        fs.writeFileSync(path.join(set.isolatedRoot, 'x.txt'), 'x')
+        git(set.isolatedRoot, 'add', '.'); git(set.isolatedRoot, 'commit', '-qm', 'c')
+        // base is the SHA (not "HEAD"), so the commit IS detected → unsafe
+        expect(await svc.isSetSafeToRemove(set)).toBe(false)
+        await svc.removeSet(set, { force: true })
     })
 })
