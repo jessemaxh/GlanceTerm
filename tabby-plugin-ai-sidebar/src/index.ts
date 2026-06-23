@@ -198,9 +198,9 @@ export default class AiSidebarModule {
         // Eager-inject so the remote update check schedules itself at launch
         // (first check + interval) without waiting for any UI consumer.
         _uc: UpdateCheckService,
-        // Eager-inject so the worktree auto-cleanup subscribes to tabRemoved$ at
-        // startup — otherwise closing a worktree tab before the sidebar UI ever
-        // touched the service would leak the worktree.
+        // Eager-inject so the single worktree-lifecycle instance exists from
+        // startup (cleanup is per-tab via inner.destroyed$, registered when a
+        // worktree tab opens; this just pins the shared singleton).
         _wl: WorktreeLifecycleService,
     ) {
         // eslint-disable-next-line no-console

@@ -13,6 +13,14 @@ import { TerminalService } from 'tabby-local'
 import { WorktreeService, WorktreeSet } from './worktree.service'
 import { WorktreeLifecycleService } from './worktree-lifecycle.service'
 import { WorktreePickerComponent, WorktreePickerResult } from './worktree-picker.component'
+import { TabMonitor, AiTool } from './tab-monitor'
+
+/**
+ * Delay before typing the agent's launch command into the fresh worktree shell,
+ * so the shell has printed its prompt first. Mirrors AutoResumeService's
+ * RESUME_DELAY_MS (2s) — the proven value for typing into a just-opened tab.
+ */
+const LAUNCH_DELAY_MS = 2_000
 
 /**
  * UI glue for optional git-worktree isolation: "Open agent in worktree…" opens a
@@ -33,7 +41,32 @@ export class WorktreeActionsService {
         private notifications: NotificationsService,
         private ngbModal: NgbModal,
         private app: AppService,
+        private monitor: TabMonitor,
     ) { }
+
+    /** The AI agent running in the source tab, if any — its bare command name
+     *  ('claude'/'codex'/…) is what we auto-launch in the worktree. Prefer an
+     *  inner-leaf match (the right pane) over the wrapping split. */
+    private detectAiTool (tab: BaseTabComponent): AiTool | null {
+        const states = this.monitor.current
+        return (states.find(s => s.innerTab === tab) ?? states.find(s => s.outerTab === tab))?.aiTool ?? null
+    }
+
+    /** Type the agent's bare command into the fresh worktree shell once it's
+     *  ready. The tool name is a fixed lowercase token (shell-safe); a fresh
+     *  session, no inherited flags (chosen behaviour). Best-effort — a closed
+     *  tab / dead session just no-ops. */
+    private scheduleAgentLaunch (tab: BaseTabComponent, tool: AiTool): void {
+        const term = tab as unknown as { sendInput?: (data: string) => void }
+        setTimeout(() => {
+            try {
+                term.sendInput?.(`${tool}\r`)
+            } catch (e: any) {
+                // eslint-disable-next-line no-console
+                console.warn('[glanceterm] worktree agent auto-launch failed:', e?.message ?? e)
+            }
+        }, LAUNCH_DELAY_MS)
+    }
 
     /** The tab's live working directory (the agent's cwd), else $HOME. */
     private async resolveCwd (tab: BaseTabComponent): Promise<string> {
@@ -63,6 +96,7 @@ export class WorktreeActionsService {
      */
     async openInWorktree (rootTab: BaseTabComponent): Promise<WorktreeSet | null> {
         const root = await this.resolveCwd(rootTab)
+        const aiTool = this.detectAiTool(rootTab)
         const repos = await this.worktree.discoverSubRepos(root)
         if (!repos.length) {
             this.notifications.error(`No git repository found under ${root}`)
@@ -106,7 +140,11 @@ export class WorktreeActionsService {
         // the split that now contains the leaf; `?? tab` covers the unwrapped case.
         const outer = this.app.getParentTab(tab) ?? tab
         this.lifecycle.register(outer, set, tab)
-        this.notifications.info(`Isolated worktree ${choice.branch} — ${choice.repos.map(r => r.name).join(', ')}`)
+        if (aiTool) {
+            this.scheduleAgentLaunch(tab, aiTool)
+        }
+        const launching = aiTool ? ` · launching ${aiTool}` : ''
+        this.notifications.info(`Isolated worktree ${choice.branch} — ${choice.repos.map(r => r.name).join(', ')}${launching}`)
         return set
     }
 }
