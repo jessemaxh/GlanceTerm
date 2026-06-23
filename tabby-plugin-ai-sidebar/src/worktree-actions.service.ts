@@ -140,6 +140,12 @@ export class WorktreeActionsService {
         // the split that now contains the leaf; `?? tab` covers the unwrapped case.
         const outer = this.app.getParentTab(tab) ?? tab
         this.lifecycle.register(outer, set, tab)
+        // Record for resume re-attach + the reaper. Best-effort: a registry write
+        // failure must not fail the open (the tab + worktree already exist).
+        await this.worktree.persistSet(set).catch(e => {
+            // eslint-disable-next-line no-console
+            console.warn('[glanceterm] worktree persistSet failed:', e?.message ?? e)
+        })
         if (aiTool) {
             this.scheduleAgentLaunch(tab, aiTool)
         }

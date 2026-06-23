@@ -64,6 +64,9 @@ export class WorktreeLifecycleService {
      * @param inner the inner terminal leaf whose session owns the isolated cwd
      */
     register (outer: BaseTabComponent, set: WorktreeSet, inner: BaseTabComponent): void {
+        // Idempotent: the startup reaper may re-attach a tab already tracked this
+        // session — tear down the old subscription so we never double-subscribe.
+        this.tracked.get(outer)?.sub.unsubscribe()
         const sub = inner.destroyed$.subscribe(() => { void this.onTabGone(outer) })
         this.tracked.set(outer, { set, inner, sub })
     }

@@ -34,6 +34,7 @@ import { ImagePasteHookService } from './image-paste-hook.service'
 import { SplitShellService } from './split-shell.service'
 import { WorktreeService } from './worktree.service'
 import { WorktreeLifecycleService } from './worktree-lifecycle.service'
+import { WorktreeReaperService } from './worktree-reaper.service'
 import { WorktreeActionsService, WorktreeContextMenu } from './worktree-actions.service'
 import { WorktreePickerComponent } from './worktree-picker.component'
 import { EscInterruptService } from './esc-interrupt.service'
@@ -144,6 +145,7 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
         SplitShellService,
         WorktreeService,
         WorktreeLifecycleService,
+        WorktreeReaperService,
         WorktreeActionsService,
         EscInterruptService,
         UpdateCheckService,
@@ -202,6 +204,9 @@ export default class AiSidebarModule {
         // startup (cleanup is per-tab via inner.destroyed$, registered when a
         // worktree tab opens; this just pins the shared singleton).
         _wl: WorktreeLifecycleService,
+        // Eager-inject so the reaper schedules its one-shot startup reconcile
+        // (re-attach recovered worktree tabs + reap safe orphans) at launch.
+        _wr: WorktreeReaperService,
     ) {
         // eslint-disable-next-line no-console
         console.log('[glanceterm] plugin loaded')

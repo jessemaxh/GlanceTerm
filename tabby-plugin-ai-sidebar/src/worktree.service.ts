@@ -73,6 +73,22 @@ export function isolatedRootFor (root: string, branch: string): string {
     return path.join(MANAGED_ROOT, `${name}-${hash}`, leaf)
 }
 
+/** Structural validator for a persisted registry entry. Pure. Rejects anything
+ *  that isn't a fully-formed WorktreeSet so a corrupt/hand-edited registry can't
+ *  feed garbage (or a path) into the reaper. */
+export function isWorktreeSet (x: any): x is WorktreeSet {
+    return !!x
+        && typeof x.root === 'string'
+        && typeof x.isolatedRoot === 'string'
+        && typeof x.branch === 'string'
+        && Array.isArray(x.repos)
+        && x.repos.every((r: any) => !!r
+            && typeof r.name === 'string'
+            && typeof r.origPath === 'string'
+            && typeof r.worktreePath === 'string'
+            && typeof r.base === 'string')
+}
+
 /** "Safe to remove" decision from raw git output: clean working tree AND no
  *  commits ahead of base (nothing to lose). Pure. */
 export function decideSafeToRemove (statusPorcelain: string, revListAhead: string): boolean {
@@ -83,6 +99,14 @@ export function decideSafeToRemove (statusPorcelain: string, revListAhead: strin
 
 @Injectable()
 export class WorktreeService {
+    /** Where the resume/reaper registry lives. Default = under the managed root;
+     *  overridable so unit tests don't touch the real ~/.glanceterm. */
+    private readonly registryPath: string
+
+    constructor (registryPath: string = path.join(MANAGED_ROOT, 'registry.json')) {
+        this.registryPath = registryPath
+    }
+
     private async git (cwd: string, args: string[]): Promise<string> {
         const { stdout } = await execFileAsync('git', ['-C', cwd, ...args], { encoding: 'utf-8' })
         return stdout
@@ -334,6 +358,60 @@ export class WorktreeService {
             await fs.rm(set.isolatedRoot, { recursive: true, force: true }).catch(() => {})
             // Best-effort: drop the now-empty per-workspace parent (<name>-<hash>/).
             try { await fs.rmdir(path.dirname(set.isolatedRoot)) } catch { /* not empty / gone */ }
+            // The set is gone → drop it from the resume/reaper registry. (A non-force
+            // KEEP returned early above, so a kept-because-dirty set stays recorded.)
+            await this.forgetSet(set)
         }
+    }
+
+    // ── persistence: resume re-attach + the startup reaper ───────────────────
+    //
+    // A sidecar registry (MANAGED_ROOT/registry.json) records every live set so
+    // that after a restart/crash a recovered tab can re-attach (badge + cleanup)
+    // and the reaper knows each worktree's base SHA for the safe-to-remove check.
+    // The in-memory lifecycle map dies with the process; this is the durable copy.
+    // persistSet is called by the UI AFTER the tab opens; removeSet auto-forgets.
+
+    /** Load persisted sets (for resume + reaper). Returns [] on any error — a
+     *  missing/corrupt registry must never crash startup — and drops malformed or
+     *  out-of-managed-root entries so a hand-edited file can't steer the reaper's
+     *  fs.rm at a foreign path. */
+    async loadPersistedSets (): Promise<WorktreeSet[]> {
+        let parsed: any
+        try {
+            parsed = JSON.parse(await fs.readFile(this.registryPath, 'utf-8'))
+        } catch {
+            return []
+        }
+        const sets: unknown[] = Array.isArray(parsed?.sets) ? parsed.sets : []
+        const managed = path.resolve(MANAGED_ROOT)
+        return sets.filter(isWorktreeSet).filter(s => {
+            const r = path.resolve(s.isolatedRoot)
+            return r === managed || r.startsWith(managed + path.sep)
+        })
+    }
+
+    /** Record a set so a recovered tab can re-attach + the reaper knows its base. */
+    async persistSet (set: WorktreeSet): Promise<void> {
+        const sets = (await this.loadPersistedSets()).filter(s => s.isolatedRoot !== set.isolatedRoot)
+        sets.push(set)
+        await this.writeRegistry(sets)
+    }
+
+    /** Drop a set from the registry. No-op if no registry exists yet (so engine
+     *  paths that never persisted — e.g. open-failure rollback — write nothing). */
+    async forgetSet (set: WorktreeSet): Promise<void> {
+        if (!fsSync.existsSync(this.registryPath)) {
+            return
+        }
+        const sets = (await this.loadPersistedSets()).filter(s => s.isolatedRoot !== set.isolatedRoot)
+        await this.writeRegistry(sets)
+    }
+
+    private async writeRegistry (sets: WorktreeSet[]): Promise<void> {
+        await fs.mkdir(path.dirname(this.registryPath), { recursive: true })
+        const tmp = `${this.registryPath}.tmp`
+        await fs.writeFile(tmp, JSON.stringify({ version: 1, sets }, null, 2), 'utf-8')
+        await fs.rename(tmp, this.registryPath) // atomic: a crash mid-write can't corrupt the live file
     }
 }
