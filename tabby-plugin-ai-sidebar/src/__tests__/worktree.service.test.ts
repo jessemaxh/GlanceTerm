@@ -150,4 +150,16 @@ describe('WorktreeService — multi-repo non-git root (real git)', () => {
         expect(await svc.isSetSafeToRemove(set)).toBe(false)
         await svc.removeSet(set, { force: true })
     })
+
+    it('non-force removeSet on a dirty worktree PRESERVES the work (no fs.rm)', async () => {
+        const repos = await svc.discoverSubRepos(root)
+        const set = await svc.createSet(root, repos, 'agent/dirty')
+        const wt = set.repos[0].worktreePath
+        fs.writeFileSync(path.join(wt, 'uncommitted.txt'), 'precious')
+        // non-force: git refuses to remove a worktree with untracked files — the
+        // unconditional fs.rm must NOT then delete the very work git protected.
+        await svc.removeSet(set)
+        expect(fs.existsSync(path.join(wt, 'uncommitted.txt'))).toBe(true)
+        await svc.removeSet(set, { force: true }) // cleanup
+    })
 })

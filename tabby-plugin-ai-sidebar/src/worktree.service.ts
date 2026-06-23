@@ -216,9 +216,15 @@ export class WorktreeService {
     async isSetSafeToRemove (set: WorktreeSet): Promise<boolean> {
         for (const r of set.repos) {
             if (!fsSync.existsSync(r.worktreePath)) continue // already gone
-            const status = await this.git(r.worktreePath, ['status', '--porcelain'])
-            const ahead = await this.git(r.worktreePath, ['rev-list', `${r.base}..HEAD`])
-            if (!decideSafeToRemove(status, ahead)) return false
+            try {
+                const status = await this.git(r.worktreePath, ['status', '--porcelain'])
+                const ahead = await this.git(r.worktreePath, ['rev-list', `${r.base}..HEAD`])
+                if (!decideSafeToRemove(status, ahead)) return false
+            } catch {
+                // Can't determine (e.g. base SHA gone) → conservatively NOT safe;
+                // keep the worktree rather than risk auto-removing live work.
+                return false
+            }
         }
         return true
     }
@@ -249,10 +255,17 @@ export class WorktreeService {
             } catch { /* base/branch gone — ignore */ }
             try { await this.git(r.origPath, ['worktree', 'prune']) } catch { /* */ }
         }
-        // Guard the only unconditional destructive op against a corrupted set.
-        this.assertWithinManagedRoot(set.isolatedRoot)
-        await fs.rm(set.isolatedRoot, { recursive: true, force: true }).catch(() => {})
-        // Best-effort: drop the now-empty per-workspace parent (<name>-<hash>/).
-        try { await fs.rmdir(path.dirname(set.isolatedRoot)) } catch { /* not empty / gone */ }
+        // Only nuke the isolated root if force, OR every worktree dir is actually
+        // gone. A NON-force `worktree remove` that git REFUSED (dirty / untracked
+        // files) leaves the worktree dir in place — `fs.rm`-ing it here would
+        // delete the very uncommitted work git just protected. force = the caller
+        // (UI dirty-guard) already confirmed the discard.
+        const anyWorktreeLeft = set.repos.some(r => fsSync.existsSync(r.worktreePath))
+        if (opts.force || !anyWorktreeLeft) {
+            this.assertWithinManagedRoot(set.isolatedRoot)
+            await fs.rm(set.isolatedRoot, { recursive: true, force: true }).catch(() => {})
+            // Best-effort: drop the now-empty per-workspace parent (<name>-<hash>/).
+            try { await fs.rmdir(path.dirname(set.isolatedRoot)) } catch { /* not empty / gone */ }
+        }
     }
 }
