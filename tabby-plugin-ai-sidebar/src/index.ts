@@ -10,6 +10,7 @@ import {
     SidebarService,
     ToolbarButtonProvider,
     ToolbarButton,
+    TabContextMenuItemProvider,
 } from 'tabby-core'
 import { IMAGE_PASTE_HOOK } from 'tabby-terminal'
 
@@ -32,6 +33,7 @@ import { ScreenshotPasteService } from './screenshot/paste.service'
 import { ImagePasteHookService } from './image-paste-hook.service'
 import { SplitShellService } from './split-shell.service'
 import { WorktreeService } from './worktree.service'
+import { WorktreeActionsService, WorktreeContextMenu } from './worktree-actions.service'
 import { EscInterruptService } from './esc-interrupt.service'
 import { UpdateCheckService } from './update-check.service'
 import { UpdateForceModalComponent } from './update-force-modal.component'
@@ -139,12 +141,14 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
         ImagePasteHookService,
         SplitShellService,
         WorktreeService,
+        WorktreeActionsService,
         EscInterruptService,
         UpdateCheckService,
         { provide: SidebarProvider,       useClass: AiSidebarContribProvider,      multi: true },
         { provide: ToolbarButtonProvider, useClass: ToggleAiSidebarButtonProvider, multi: true },
         { provide: HotkeyProvider,        useClass: AiSidebarHotkeyProvider,       multi: true },
         { provide: ConfigProvider,        useClass: AiSidebarConfigProvider,       multi: true },
+        { provide: TabContextMenuItemProvider, useClass: WorktreeContextMenu,       multi: true },
         // Hook into BaseTerminalTabComponent.paste() so a PNG on the system
         // clipboard turns into a temp-file path typed into the focused terminal.
         // Hook lives in our plugin; the vendored conditional in
