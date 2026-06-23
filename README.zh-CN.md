@@ -9,16 +9,15 @@
 </p>
 
 <p align="center">
-  <strong>并行运行多个 AI 编程 agent 的终端。</strong>在一个窗口里运行、监控、切换
-  <strong>Claude&nbsp;Code</strong>、<strong>Codex</strong>、<strong>Gemini&nbsp;CLI</strong>、<strong>opencode</strong> 的多个 session —— 时刻知道哪个在跑、哪个完成了、哪个在等你。
+  <strong>并行运行多个 AI 编程 agent</strong> 的终端 ——
+  <strong>Claude&nbsp;Code</strong>、<strong>Codex</strong>、<strong>Gemini&nbsp;CLI</strong>、<strong>opencode</strong>。
 </p>
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-yellow.svg"></a>
-  <img alt="Platforms" src="https://img.shields.io/badge/prebuilt-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
+  <img alt="Platforms" src="https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
   <a href="https://github.com/jessemaxh/GlanceTerm/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/jessemaxh/GlanceTerm"></a>
   <img alt="Built on Tabby" src="https://img.shields.io/badge/built%20on-Tabby-blue">
-  <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg">
 </p>
 
 <p align="center">
@@ -28,242 +27,102 @@
 ---
 
 <p align="center">
-  <img src="assets/screenshots/sidebar.png" alt="GlanceTerm 侧边栏 —— 每个 AI agent 标签页的实时状态" width="820">
-  <br>
-  <em>所有 agent 标签页集中在一个侧边栏，每个配实时状态点 —— 点一行直接跳过去。</em>
+  <img src="assets/screenshots/sidebar.png" alt="GlanceTerm 侧栏 —— 每个 AI agent 标签页的实时状态" width="820">
 </p>
 
-<p align="center">
-  <img src="assets/screenshots/token-usage.png" alt="GlanceTerm Token 用量面板" width="820">
-  <br>
-  <em>内置 Token 用量统计 —— 跨所有会话的 in / cache / out，可按 agent / 会话 / 项目拆分，支持 CSV 导出。</em>
-</p>
+同时开着 5+ 个 **Claude Code / Codex / Gemini / opencode** 会话?别再 Cmd-Tab 一个个翻、
+盯着标题栏猜哪个跑完了。GlanceTerm 把每个标签页放进一个 **实时状态侧栏** ——
+🟢 工作中 · 🔵 完成待你 · 🟠 需要授权 —— **点一下就跳到那个在等你的标签页**。
 
-如果你同时开着 5 个以上的 Claude Code / Codex / Gemini / opencode 会话，分散
-在不同标签页里，你大概干过这种事：Cmd-Tab 一个个切过去，盯着标题栏眯眼辨认，
-想搞清楚哪个已经做完、可以接下一个任务了。
+## ✨ 亮点
 
-GlanceTerm 解决的就是这个。它把每个标签页放进一个侧边栏，配一个实时状态点 ——
-AI 在干活时是绿色，做完等你时是蓝色，在请求权限时是琥珀色。点一行 → 直接跳到
-那个标签页。
-
-**你能得到什么**
-
-- 🟢 **每个标签页的实时状态** —— working / done / needs-permission，由 agent
-  自己的 hook 事件驱动（零轮询、零抓屏、零误报）。
-- 🎯 **点击即跳转** —— 一键直达那个在等你的标签页。
-- 🔄 **重启无忧** —— 关掉再打开 GlanceTerm，agent 标签页会自动回来，而且每个都
-  恢复到它*上一次的精确会话*（`claude --resume`、`codex resume`、`opencode
-  --session`），不是新开一个空对话。
-- 🤖 **多 agent** —— Claude Code 一等公民且已测试；Codex / Gemini / opencode
-  适配器也都提供（[支持矩阵](docs/feature-matrix.md)）。
-- 🧩 **无需改习惯** —— 照常敲 `claude`，hook 首次启动自动接好。
-- 🛡️ **可选的自动批准** —— 不必再切窗口点 "Allow"；每次操作都有审计日志。
-  默认关闭（开启前请先读 ⚠️ 警告）。
-- 📸 **截图 → 粘贴 & 分屏** —— 直接截进当前 agent，或在它的工作目录开个 shell。
+- 🟢 **每个标签页实时状态** —— 工作中 / 完成 / 等你,来自每个 agent **自己的 hook 事件**(不轮询、不抓屏、零误判)
+- 🎯 **点击即跳** 到正在等你的那个标签页
+- 🔄 **重启不丢** —— 重开后每个 agent 恢复到它**之前那个**会话(`claude --resume`、`codex resume`、`opencode --session`)
+- 🤖 **多 agent** —— Claude Code 一等公民且已测试;Codex / Gemini CLI / opencode 也有 adapter
+- 🧩 **零工作流改动** —— 照样敲 `claude`,hook 首次启动自动装
+- 📊 **Token 用量** —— in / cache / out 按 agent · 会话 · 项目拆分,支持 CSV 导出
+- 🛡️ **可选自动批准**(有审计日志,**默认关**)· 📸 **截图直接粘给 agent** · 旁边开 shell
 
 ```
 ┌────────────────┬──────────────────────────────────┐
-│  AI TABS       │                                  │
-│                │   you@host ~/work/api $          │
+│  AI TABS       │   you@host ~/work/api $          │
 │ ● ai-backend   │   > what does this function do?  │
-│   working      │                                  │
-│   CLAUDE  3s   │   ⏺ Reading src/handler.ts…      │
+│   working      │   ⏺ Reading src/handler.ts…      │
 │ ○ ai-frontend  │                                  │
 │   ready  •     │                                  │
-│   CLAUDE  2m   │                                  │
 │ ◐ ai-tests     │                                  │
 │   needs you    │                                  │
-│   CLAUDE  4s   │                                  │
 └────────────────┴──────────────────────────────────┘
 ```
 
-## Agent 与平台支持
-
-GlanceTerm 能用到什么程度,取决于 agent。**Claude Code 是一等公民、日常使用中
-已验证;Codex 的状态检测已验证;Gemini 和 opencode 提供了适配器,但还没端到端
-测试过。**
-
-| 能力 | Claude Code | Codex | Gemini CLI | opencode |
-|---|:---:|:---:|:---:|:---:|
-| 实时状态 —— working / done / 等你 | ✅ | ✅ \* | 🧪 ¶ | 🧪 |
-| 自动批准权限弹窗 | ✅ | 🧪 | ❌ † | ❌ |
-| 重启后恢复精确会话 | ✅ | 🧪 | ❌ ‡ | 🧪 |
-| 子 agent + 后台任务徽标 | ✅ | ❌ | ❌ ‖ | ❌ |
-| 模型 + token 用量展示 | 🧪 | 🧪 | 🧪 § | 🧪 |
-
-**✅ 在真实安装上已测试** · **🧪 已实现、但尚未在该 agent 上测试** ·
-**❌ 不可用**(未实现,或该 agent 的 hook 无法表达此能力)
-
-<sub>\* Codex 的 working→done 已验证;"等你"(权限)状态已实现但未实测。
-† Gemini 的 hook 只能 *拒绝*、不能自动放行 —— 所以自动批准是不可能,而非没写。
-‡ Gemini CLI 没有启动时按 id 恢复会话的参数,所以恢复的标签页只能开新会话。
-§ Gemini 只显示 token 用量,不显示模型名。¶ Gemini 没有"等你"(权限)状态。
-‖ Gemini 未实现子 agent 徽标 —— 只有未测试的启发式后台任务徽标。</sub>
-
-截图粘贴、分屏 shell、置顶都与 agent 无关,四个 agent 表现一致。完整的逐事件
-拆解(以及哪些在架构上就不可行)见
-[docs/feature-matrix.md](docs/feature-matrix.md)。
-
-**平台 —— 目前仅 macOS。** GlanceTerm 只在 **macOS** 上验证过;Linux(`/proc`
-+ POSIX `sh`)和 Windows(PowerShell)的代码路径都写了,但**从未运行过**。所以
-**只提供 macOS 的 `.dmg`,暂不提供预构建的 Linux/Windows 安装包**。在这两个平台
-上请从源码构建(见[开发 / 构建](#开发--构建)),并欢迎反馈哪里坏了。
-
-## 仓库状态
-
-**v0.2 —— 基于 hook 的架构，自用打磨中。** 构建于
-[Tabby](https://github.com/Eugeny/tabby) 之上，在其内核中加入了一个极简的
-`SidebarProvider` 扩展点。侧边栏本身是一个插件。
-
-```
-ai-terminal/
-├── glanceterm/                 forked Tabby with the SidebarProvider extension
-│   └── tabby-core/src/
-│       ├── api/sidebarProvider.ts        ← new extension point
-│       ├── services/sidebar.service.ts   ← visibility + width state
-│       └── components/appRoot.component.* ← renders the slot
-│
-└── tabby-plugin-ai-sidebar/    the actual sidebar
-    └── src/
-        ├── hook-adapters/      pluggable per-agent hook integrations
-        │   ├── adapter.ts      HookAdapter interface
-        │   ├── claude.ts       Claude Code adapter (first-class)
-        │   ├── codex.ts        Codex adapter
-        │   ├── gemini.ts       Gemini CLI adapter
-        │   └── opencode.ts     opencode adapter
-        ├── hook-watcher.service.ts  fs.watch on ~/.glanceterm/hooks/
-        ├── tab-monitor.ts      ties tabs ↔ hook events ↔ status
-        ├── sidebar.component.ts the rendered UI
-        └── index.ts            NgModule + SidebarProvider impl
-```
-
-## 工作原理
-
-每个 Tabby 标签页在 PTY 启动时都会被注入一个唯一的 `GLANCETERM_TAB_ID`
-环境变量。从该 shell 派生出的任何进程 —— 包括 `claude`、`codex`、`gemini`
-—— 都会继承它。
-
-对于受支持的 agent（目前是 **Claude Code**），GlanceTerm 会在 agent 首次启动
-时往它的配置文件里安装一个 hook。该 hook 在生命周期事件（`UserPromptSubmit`、
-`Stop`、`PermissionRequest`、`SessionEnd`）上触发，往 `~/.glanceterm/hooks/<tab-id>.json`
-写一个极小的状态文件。
-
-侧边栏监听那个目录，实时更新每个标签页的状态。同一个项目里开了多个 Claude
-会话？每个都有自己的 `GLANCETERM_TAB_ID`，所以它们各自独立显示状态。零轮询、
-零抓屏、零误报。
-
-**各 agent 的支持情况**记录在
-[docs/feature-matrix.md](docs/feature-matrix.md) —— 完整列出哪些功能在
-Claude / Codex / Gemini CLI / opencode 上可用、哪些已测试 vs 已实现但未测试、
-哪些在架构上就不可行。一句话路线图：Claude 一等公民，Codex 适配器状态检测已
-验证（自动批准未测），Gemini 和 opencode 提供了适配器但未端到端验证。
-
-## ⚠️ 自动批准权限（需手动开启，危险）
-
-GlanceTerm 可以替你自动批准 Claude Code 的权限弹窗 —— 当你在照看大量 agent、
-不想每 30 秒就切窗口点一次"Allow"时很有用。**默认是关闭的。**
-
-开启后（点侧边栏底部工具栏的盾牌图标，再确认警告对话框），GlanceTerm 会对每个
-Claude 的 `PermissionRequest` 回复 `allow`。此后 Claude 可以执行任何命令 ——
-包括 `rm -rf` 或 `curl … | sh` 这类破坏性命令 —— 都不再询问。
-
-- **审计日志**：每一次自动批准的操作都会追加到
-  `~/.glanceterm/auto-approve.log`（制表符分隔：时间戳、标签页 id、工具名、
-  工作目录）。
-- **标志文件**：`~/.glanceterm/auto-approve.flag` 存的是 `1`（开）或 `0`
-  （关）。删掉它或设为 `0`，Claude 在下一次请求时就回退到交互式弹窗 ——
-  当你想在不打开 app 的情况下一键关停时很有用。
-- **关闭**：再点一次盾牌。关闭时按钮是灰色，开启时是琥珀色。
-
-**不要在这些地方开启**：你的主仓库、含有凭据或生产访问权限的目录、或任何
-`sudo` 无需密码就能用的 shell。请在容器、临时目录或一次性虚拟机里用。出了事
-后果自负 —— 那个确认对话框的存在正是为了这个。
-
-## 与其他多 agent 终端对比
-
-| | GlanceTerm | hiveterm.com | Agent Deck |
-|--|--|--|--|
-| 形态 | 带侧边栏的 GUI 终端 | 带分屏的 GUI 终端 | tmux + TUI |
-| 安装 | 打开 app，允许 hook 安装 | 装 app + 写 `hive.yml` | 装二进制 + 每个会话 `agent-deck add` |
-| 习惯改变 | 无 —— 照常敲 `claude` | 需学新布局 | 每个会话都得用 `agent-deck` 启动 |
-| 改动 AI 配置文件 | 仅 agent 的 hook 条目 | 无 | 是 —— 每个工具的 hook 条目 |
-| 价格 | 免费，MIT | $99/年 Pro | 免费（二进制） |
-
 ## 安装
 
-**macOS · Apple Silicon —— Homebrew（推荐）**
+**macOS**(Apple Silicon)—— Homebrew:
 
 ```sh
 brew install --cask jessemaxh/glanceterm/glanceterm
 ```
 
-Homebrew 会拉取[最新发布版](../../releases/latest)，把 GlanceTerm 放进
-`/Applications`，并自动去掉隔离标记 —— 打开时**不会**弹"从互联网下载"的提示。
+…或从[最新发布版](../../releases/latest)下载**签名 + 公证的 `.dmg`**。
 
-**或下载 `.dmg`** —— 从[最新发布版](../../releases/latest)下载，打开后把
-GlanceTerm.app 拖进 `/Applications`。该构建已用 **Apple Developer ID 签名并公证**，
-双击即可。直接下载 dmg 时，macOS 首次打开会弹一次"已从互联网下载…… Apple 已检查、
-未发现恶意软件"的确认 —— 这对任何下载的 app 都正常，点一次 **Open** 即可。（用
-Homebrew 安装连这一下都没有。）
+**Linux**(x64)—— 从[最新发布版](../../releases/latest)下载:`.AppImage` · `.deb` · `.rpm` · `.pacman` · `.tar.gz`。
 
-> **macOS 仅支持 Apple Silicon（arm64）** —— 不支持 Intel Mac（GitHub 的 Intel
-> runner 太稀缺，且 arm64 跑不了 Intel）。Linux 和 Windows 是 x64。
+**Windows**(x64)—— 从[最新发布版](../../releases/latest)下载 `…-setup-x64.exe` 或免安装 `.zip`。⚠️ 未签名 → SmartScreen 点 "More info → Run anyway"。
 
-**Linux（x64）** —— 从[最新发布版](../../releases/latest)下载：
-`.AppImage`（`chmod +x GlanceTerm-*.AppImage && ./GlanceTerm-*.AppImage`）、`.deb`
-（`sudo apt install ./GlanceTerm-*-linux-x64.deb`），或 `.rpm` / `.pacman` / `.tar.gz`。
+<sub>每个版本都由 CI **自动构建 + 启动冒烟测试** 全三平台。macOS 仅 Apple Silicon;Linux/Windows 是 x64。</sub>
 
-**Windows（x64）** —— 从[最新发布版](../../releases/latest)下载 `…-setup-x64.exe`
-安装包（或 `…-portable-x64.zip` 免安装）。⚠️ **未签名** —— SmartScreen 会弹
-"Windows protected your PC"，点 **More info → Run anyway**。（代码签名在计划中。）
+## Agent 支持
 
-每个版本都由 CI 自动构建、跑启动冒烟（app 必须能无头启动）、并三平台一起发布。
+**Claude Code 是一等公民、日常使用中验证过。** Codex 的状态检测已验证;Gemini CLI
+和 opencode 的 adapter 尚未端到端测试。
 
-## 开发 / 构建
+| 能力 | Claude&nbsp;Code | Codex | Gemini&nbsp;CLI | opencode |
+|---|:---:|:---:|:---:|:---:|
+| 实时状态(工作中 / 完成 / 等你) | ✅ | ✅ | 🧪 | 🧪 |
+| 自动批准权限 | ✅ | 🧪 | ❌ | ❌ |
+| 重启恢复原会话 | ✅ | 🧪 | ❌ | 🧪 |
+| 子 agent + 后台任务角标 | ✅ | ❌ | ❌ | ❌ |
 
-前置：macOS、Node 22、[yarn](https://yarnpkg.com)、[Homebrew](https://brew.sh)。
+**✅ 已测试 · 🧪 已实现但该 agent 上未测 · ❌ 不支持。** 完整逐事件对照见
+[docs/feature-matrix.md](docs/feature-matrix.md)。
+
+## 工作原理
+
+每个标签页在 PTY 启动时注入唯一的 `GLANCETERM_TAB_ID`,`claude`(及其他)都继承它。
+首次启动时 GlanceTerm 往 agent 的配置里装一个轻量 **hook**,在每个生命周期事件把一个
+JSON 状态文件写到 `~/.glanceterm/hooks/<tab-id>`。侧栏监视该目录、实时刷新每个标签页的
+状态 —— **不轮询、不抓屏、零误判。**
+
+## ⚠️ 自动批准(可选,危险)
+
+GlanceTerm 能替你对每个 Claude Code 权限请求自动回 `allow` —— 看管很多 agent 时省事。
+**默认关。** 开启后 Claude 可以**不问就执行任何命令** —— 包括 `rm -rf`、`curl … | sh`。
+
+- 每次自动批准都记到 `~/.glanceterm/auto-approve.log`;用侧栏盾牌图标切换,或用
+  `~/.glanceterm/auto-approve.flag` 文件做急停开关。
+- **别在**主仓库、有凭证的目录、或 `sudo` 免密的 shell 里开。用容器 / 临时目录 / 一次性 VM。
+
+## 与其他工具对比
+
+| | GlanceTerm | HiveTerm | Agent&nbsp;Deck |
+|--|--|--|--|
+| 形态 | GUI 终端 + 侧栏 | GUI 终端 + 分屏 | tmux + TUI |
+| 配置 | 打开 app、允许装 hook | 装 app + 写 `hive.yml` | 每个会话 `agent-deck add` |
+| 工作流改动 | **无** —— 照样敲 `claude` | 要学新布局 | 每个会话都得用工具启动 |
+| 价格 | **免费,MIT** | $99/年 Pro | 免费 |
+
+## 从源码构建
+
+前置:Node 22、[yarn](https://yarnpkg.com)。
 
 ```bash
-# 1. fork — 安装 + 构建（首次较重）
-cd glanceterm
-yarn
-npm run build
-
-# 2. 插件
-cd tabby-plugin-ai-sidebar
-npm install
-npm run build
-
-# 3. 启动
-cd ..
-./dev.sh
+cd glanceterm && yarn && npm run build
+cd tabby-plugin-ai-sidebar && npm install && npm run build
+cd .. && ./dev.sh        # 用 :9222 远程调试启动 fork
 ```
-
-`dev.sh` 会重新构建插件，然后用指向它的 `TABBY_PLUGINS=` 启动 fork，并在
-9222 端口开启远程调试 —— 方便用 CDP 驱动 UI 测试。
-
-## 已知限制（v0.2）
-
-- **只有 Claude Code 被完整 hook 并测试过。** Codex 的适配器在真实安装上验证了
-  状态检测；其自动批准路径经源码确认但未测试。Gemini 和 opencode 提供了适配器
-  但尚未端到端验证。精确的逐功能拆解见
-  [docs/feature-matrix.md](docs/feature-matrix.md)，如何贡献一个适配器见
-  [HACKING-glanceterm.md](HACKING-glanceterm.md#adding-a-new-agent-adapter)。
-- **仅在 macOS 上验证过。** Linux 和 Windows 的代码路径都存在 —— hook 处理器
-  同时提供 POSIX `sh` 和 PowerShell 两种形式 —— 但还没人端到端跑过。求帮忙。
-- **Windows 构建未签名。** macOS 构建已用 Developer ID 签名并公证（双击即开）。
-  Windows 构建暂无 Authenticode 签名，首次运行会触发 SmartScreen 警告。
-- **自动更新只在 macOS / Windows 上可用。** Tabby 内置的更新器被原样继承，
-  现已指向本仓库的 releases。Linux 的 electron-updater 被上游 Tabby 禁用了 ——
-  你需要手动更新。（在 Windows 签名之前，Windows 更新会和首次安装一样触发
-  SmartScreen 警告。）
 
 ## 致谢
 
-构建于 [Tabby](https://github.com/Eugeny/tabby) v1.0.234 之上，作者 Eugene
-Pankov。fork 中加入的 `SidebarProvider` 扩展点意在回馈上游 —— 如果你在自己的
-Tabby 插件里也用得上，PR 正在路上。
-
-GlanceTerm 采用 MIT 许可，与 Tabby 相同。许可文本见 [LICENSE](LICENSE)，相对
-上游 Tabby 的完整改动清单见 [NOTICE](NOTICE)。
+基于 Eugene Pankov 的 [Tabby](https://github.com/Eugeny/tabby) 构建。MIT 协议(同 Tabby)
+—— 见 [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。fork 里加的 `SidebarProvider` 扩展点计划上游。

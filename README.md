@@ -9,16 +9,15 @@
 </p>
 
 <p align="center">
-  <strong>The terminal for running multiple AI coding agents in parallel.</strong> Run, monitor, and switch between
-  <strong>Claude&nbsp;Code</strong>, <strong>Codex</strong>, <strong>Gemini&nbsp;CLI</strong>, and <strong>opencode</strong> sessions — and never miss the one that's done or waiting on you.
+  The terminal for running <strong>multiple AI coding agents in parallel</strong> —
+  <strong>Claude&nbsp;Code</strong>, <strong>Codex</strong>, <strong>Gemini&nbsp;CLI</strong>, <strong>opencode</strong>.
 </p>
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-yellow.svg"></a>
-  <img alt="Platforms" src="https://img.shields.io/badge/prebuilt-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
+  <img alt="Platforms" src="https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-lightgrey">
   <a href="https://github.com/jessemaxh/GlanceTerm/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/jessemaxh/GlanceTerm"></a>
   <img alt="Built on Tabby" src="https://img.shields.io/badge/built%20on-Tabby-blue">
-  <img alt="PRs welcome" src="https://img.shields.io/badge/PRs-welcome-brightgreen.svg">
 </p>
 
 <p align="center">
@@ -29,268 +28,106 @@
 
 <p align="center">
   <img src="assets/screenshots/sidebar.png" alt="GlanceTerm sidebar — live status for every AI agent tab" width="820">
-  <br>
-  <em>Every agent tab in one side panel with a live status dot — click a row to jump straight to it.</em>
 </p>
 
-<p align="center">
-  <img src="assets/screenshots/token-usage.png" alt="GlanceTerm Token Usage panel" width="820">
-  <br>
-  <em>Built-in token usage — in / cache / out across every session, broken down by agent / session / project, with CSV export.</em>
-</p>
+Running 5+ **Claude Code / Codex / Gemini / opencode** sessions across tabs? Stop
+Cmd-Tabbing to figure out which one is done. GlanceTerm puts every tab in one
+**live-status side panel** — 🟢 working · 🔵 done & waiting · 🟠 needs permission —
+and **one click jumps you to the tab that needs you**.
 
-If you have 5+ Claude Code / Codex / Gemini / opencode sessions running in
-different tabs, you've probably done this dance: Cmd-Tab through them all,
-squinting at the title bar, trying to figure out which one is done and ready
-for the next task.
+## ✨ Highlights
 
-GlanceTerm fixes that. It puts every tab in a side panel with a live status
-dot — green when the AI is working, blue when it's done and waiting for you,
-amber when it's asking permission. Click a row → jump straight to that tab.
-
-**What you get**
-
-- 🟢 **Live status per tab** — working / done / needs-permission, driven by the
-  agent's own hook events (zero polling, zero screen-scraping, zero false positives).
-- 🎯 **Click to jump** — one click takes you straight to the tab that needs you.
-- 🔄 **Restart-safe** — close & reopen GlanceTerm and your agent tabs come back,
-  each resumed into its *exact* prior session (`claude --resume`, `codex resume`,
-  `opencode --session`), not a fresh one.
-- 🤖 **Multi-agent** — Claude Code is first-class and tested; Codex / Gemini /
-  opencode adapters ship too ([support matrix](docs/feature-matrix.md)).
-- 🧩 **No habit change** — keep typing `claude`; the hook wires itself up on first launch.
-- 🛡️ **Opt-in auto-approve** — stop alt-tabbing to click "Allow"; every action is
-  audit-logged. Off by default (read the ⚠️ warning before enabling).
-- 📸 **Screenshot → paste & split shell** — capture straight into the focused
-  agent, or open a shell in its working directory.
+- 🟢 **Live status per tab** — working / done / needs-you, from each agent's **own hook events** (no polling, no screen-scraping, no false positives)
+- 🎯 **Click to jump** straight to the tab waiting on you
+- 🔄 **Restart-safe** — reopen and every agent resumes its *exact* prior session (`claude --resume`, `codex resume`, `opencode --session`)
+- 🤖 **Multi-agent** — Claude Code first-class & tested; Codex / Gemini CLI / opencode adapters too
+- 🧩 **Zero workflow change** — keep typing `claude`; the hook self-installs on first launch
+- 📊 **Token usage** — in / cache / out per agent · session · project, with CSV export
+- 🛡️ **Opt-in auto-approve** (audit-logged, **off by default**) · 📸 **screenshot-to-paste** · split shell
 
 ```
 ┌────────────────┬──────────────────────────────────┐
-│  AI TABS       │                                  │
-│                │   you@host ~/work/api $          │
+│  AI TABS       │   you@host ~/work/api $          │
 │ ● ai-backend   │   > what does this function do?  │
-│   working      │                                  │
-│   CLAUDE  3s   │   ⏺ Reading src/handler.ts…      │
+│   working      │   ⏺ Reading src/handler.ts…      │
 │ ○ ai-frontend  │                                  │
 │   ready  •     │                                  │
-│   CLAUDE  2m   │                                  │
 │ ◐ ai-tests     │                                  │
 │   needs you    │                                  │
-│   CLAUDE  4s   │                                  │
 └────────────────┴──────────────────────────────────┘
 ```
 
-## Agent & platform support
-
-How much of GlanceTerm works depends on the agent. **Claude Code is
-first-class and validated in daily use; Codex's status detection is verified;
-Gemini and opencode ship adapters that aren't tested end-to-end yet.**
-
-| Capability | Claude Code | Codex | Gemini CLI | opencode |
-|---|:---:|:---:|:---:|:---:|
-| Live status — working / done / needs-you | ✅ | ✅ \* | 🧪 ¶ | 🧪 |
-| Auto-approve permission prompts | ✅ | 🧪 | ❌ † | ❌ |
-| Resume exact session on restart | ✅ | 🧪 | ❌ ‡ | 🧪 |
-| Subagent + background-job badges | ✅ | ❌ | ❌ ‖ | ❌ |
-| Model + token-usage display | 🧪 | 🧪 | 🧪 § | 🧪 |
-
-**✅ tested** on a real install · **🧪 implemented, not yet tested** with this
-agent · **❌ not available** (not built, or the agent's hooks can't express it)
-
-<sub>\* Codex working→done is verified; the *needs-you* permission state is
-implemented but untested live. † Gemini's hook can only *deny*, never
-auto-allow — auto-approve is impossible, not just unwritten. ‡ Gemini CLI has
-no launch-time resume-by-id flag, so a restored tab starts fresh. § Gemini
-shows token usage but not the model name. ¶ Gemini has no *needs-you*
-(permission) state. ‖ Gemini's subagent badge isn't implemented — only an
-untested heuristic background-job badge.</sub>
-
-Screenshot-to-paste, split-shell, and pin-to-top are agent-agnostic and behave
-the same across all four. The full per-event breakdown (and what's
-architecturally blocked) lives in
-[docs/feature-matrix.md](docs/feature-matrix.md).
-
-**Platforms — macOS only for now.** GlanceTerm is validated on **macOS**; the
-Linux (`/proc` + POSIX `sh`) and Windows (PowerShell) code paths are written
-but have **never been run**. So **only the macOS `.dmg` is shipped — there are
-no prebuilt Linux/Windows installers yet**. Build from source on those
-platforms ([Dev / Build](#dev--build)) and please report what breaks.
-
-## Status of this repo
-
-**v0.2 — hook-based architecture, dogfooding.** Built on top of
-[Tabby](https://github.com/Eugeny/tabby) with a minimal `SidebarProvider`
-extension point added to the core. The sidebar lives in a plugin.
-
-```
-ai-terminal/
-├── glanceterm/                 forked Tabby with the SidebarProvider extension
-│   └── tabby-core/src/
-│       ├── api/sidebarProvider.ts        ← new extension point
-│       ├── services/sidebar.service.ts   ← visibility + width state
-│       └── components/appRoot.component.* ← renders the slot
-│
-└── tabby-plugin-ai-sidebar/    the actual sidebar
-    └── src/
-        ├── hook-adapters/      pluggable per-agent hook integrations
-        │   ├── adapter.ts      HookAdapter interface
-        │   ├── claude.ts       Claude Code adapter (first-class)
-        │   ├── codex.ts        Codex adapter
-        │   ├── gemini.ts       Gemini CLI adapter
-        │   └── opencode.ts     opencode adapter
-        ├── hook-watcher.service.ts  fs.watch on ~/.glanceterm/hooks/
-        ├── tab-monitor.ts      ties tabs ↔ hook events ↔ status
-        ├── sidebar.component.ts the rendered UI
-        └── index.ts            NgModule + SidebarProvider impl
-```
-
-## How it works
-
-Every Tabby tab gets a unique `GLANCETERM_TAB_ID` env var injected at PTY
-spawn time. Any process spawned from that shell — including `claude`,
-`codex`, `gemini` — inherits it.
-
-For supported agents (currently **Claude Code**), GlanceTerm installs a hook
-in the agent's settings file on first launch. The hook fires on lifecycle
-events (`UserPromptSubmit`, `Stop`, `PermissionRequest`, `SessionEnd`) and
-writes a tiny JSON status file under `~/.glanceterm/hooks/<tab-id>.json`.
-
-The sidebar watches that directory and updates each tab's status in
-real-time. Multiple Claude sessions in the same project? Each has its own
-`GLANCETERM_TAB_ID`, so they show independent status. Zero polling, zero
-screen-scraping, zero false positives.
-
-**Per-agent support** is tracked in [docs/feature-matrix.md](docs/feature-matrix.md)
-— full table of which features work with Claude / Codex / Gemini CLI /
-opencode, what's tested vs implemented-but-untested, and
-what's architecturally blocked. Roadmap in one line: Claude is
-first-class, Codex's adapter has status detection verified (auto-approve
-untested), Gemini and opencode ship adapters that are untested end-to-end.
-
-## ⚠️ Auto-approve permissions (opt-in, dangerous)
-
-GlanceTerm can auto-approve Claude Code permission prompts on your behalf —
-useful if you're babysitting many agents and don't want to alt-tab to click
-"Allow" every 30 seconds. **It's off by default.**
-
-When enabled (click the shield icon in the sidebar's bottom toolbar, then
-confirm the warning dialog), GlanceTerm responds `allow` to every Claude
-`PermissionRequest`. Claude can then run any command — including destructive
-ones like `rm -rf` or `curl … | sh` — without asking.
-
-- **Audit log**: every auto-approved action is appended to
-  `~/.glanceterm/auto-approve.log` (tab-separated: timestamp, tab id, tool
-  name, working directory).
-- **Flag file**: `~/.glanceterm/auto-approve.flag` holds `1` (on) or `0`
-  (off). Delete it or set to `0` and Claude falls back to interactive prompts
-  on the next request — useful if you ever want to kill-switch the feature
-  without opening the app.
-- **Disable**: click the shield again. The button is grey when off, amber
-  when on.
-
-**Don't enable this** in your main repo, in directories with credentials or
-production access, or in any shell where `sudo` works without a password.
-Use it in a container, scratch directory, or disposable VM. If something
-goes wrong, you own it — the confirm dialog exists for exactly this reason.
-
-## Compared to other multi-agent terminals
-
-| | GlanceTerm | hiveterm.com | Agent Deck |
-|--|--|--|--|
-| Form factor | GUI terminal w/ sidebar | GUI terminal w/ split panes | tmux + TUI |
-| Setup | Open app, allow hook install | Install app + write `hive.yml` | Install binary + `agent-deck add` per session |
-| Habit change | None — keep typing `claude` | New layout to learn | Must launch every session via `agent-deck` |
-| AI config files modified | Only the agent's hook entry | None | Yes — each tool's hook entry |
-| Cost | Free, MIT | $99/yr Pro | Free (binary) |
-
 ## Install
 
-**macOS · Apple Silicon — Homebrew (recommended)**
+**macOS** (Apple Silicon) — Homebrew:
 
 ```sh
 brew install --cask jessemaxh/glanceterm/glanceterm
 ```
 
-Homebrew grabs the [latest release](../../releases/latest), drops GlanceTerm into
-`/Applications`, and strips the quarantine flag — so it opens with no "downloaded
-from the Internet" prompt.
+…or grab the **signed + notarized `.dmg`** from the [latest release](../../releases/latest).
 
-**Or download the `.dmg`** from the [latest release](../../releases/latest), open
-it, and drag GlanceTerm.app into `/Applications`. The build is **signed with an
-Apple Developer ID and notarized** — a normal double-click. On a direct download,
-macOS shows a one-time "downloaded from the Internet… Apple checked it for malware,
-none found" confirmation the first time you open it; that's expected for any
-downloaded app — click **Open** once. (Homebrew installs skip even that.)
+**Linux** (x64) — from the [latest release](../../releases/latest): `.AppImage` · `.deb` · `.rpm` · `.pacman` · `.tar.gz`.
 
-> **macOS is Apple Silicon (arm64) only** — Intel Macs aren't supported (GitHub's
-> hosted Intel runners are too scarce, and arm64 can't run on Intel). Linux and
-> Windows are x64.
+**Windows** (x64) — `…-setup-x64.exe` or portable `.zip` from the [latest release](../../releases/latest). ⚠️ Unsigned → SmartScreen "More info → Run anyway".
 
-**Linux (x64)** — download from the [latest release](../../releases/latest):
-`.AppImage` (`chmod +x GlanceTerm-*.AppImage && ./GlanceTerm-*.AppImage`), `.deb`
-(`sudo apt install ./GlanceTerm-*-linux-x64.deb`), or `.rpm` / `.pacman` / `.tar.gz`.
+<sub>Every release builds **and** launch-smoke-tests all three platforms in CI automatically. macOS is Apple Silicon only; Linux/Windows are x64.</sub>
 
-**Windows (x64)** — download the `…-setup-x64.exe` installer (or the
-`…-portable-x64.zip`, no install) from the [latest release](../../releases/latest).
-⚠️ **Unsigned** — SmartScreen shows "Windows protected your PC"; click **More info →
-Run anyway**. (Code signing is on the roadmap.)
+## Agent support
 
-Every release is built, smoke-tested (the app must actually launch headless in CI),
-and published automatically for all three platforms on each version bump.
+**Claude Code is first-class and validated in daily use.** Codex's status detection
+is verified; Gemini CLI and opencode ship adapters not yet tested end-to-end.
 
-## Dev / Build
+| Capability | Claude&nbsp;Code | Codex | Gemini&nbsp;CLI | opencode |
+|---|:---:|:---:|:---:|:---:|
+| Live status (working / done / needs-you) | ✅ | ✅ | 🧪 | 🧪 |
+| Auto-approve permissions | ✅ | 🧪 | ❌ | ❌ |
+| Resume exact session on restart | ✅ | 🧪 | ❌ | 🧪 |
+| Subagent + background-job badges | ✅ | ❌ | ❌ | ❌ |
 
-Prereqs: macOS, Node 22, [yarn](https://yarnpkg.com), [Homebrew](https://brew.sh).
+**✅ tested · 🧪 implemented, untested with this agent · ❌ not available.** Full
+per-event breakdown: [docs/feature-matrix.md](docs/feature-matrix.md).
+
+## How it works
+
+Each tab gets a unique `GLANCETERM_TAB_ID` at PTY spawn; `claude` (and others)
+inherit it. On first launch GlanceTerm installs a tiny **hook** in the agent's
+settings that writes a JSON status file to `~/.glanceterm/hooks/<tab-id>` on each
+lifecycle event. The sidebar watches that directory and repaints each tab's status
+in real time — **zero polling, zero screen-scraping, zero false positives.**
+
+## ⚠️ Auto-approve (opt-in, dangerous)
+
+GlanceTerm can auto-answer `allow` to every Claude Code permission prompt — handy
+when babysitting many agents. **Off by default.** When on, Claude can run
+**anything** — including `rm -rf` or `curl … | sh` — without asking.
+
+- Every action is logged to `~/.glanceterm/auto-approve.log`; toggle via the shield
+  icon, or the `~/.glanceterm/auto-approve.flag` kill-switch file.
+- **Don't enable** in your main repo, near credentials, or where `sudo` is
+  passwordless. Use a container / scratch dir / disposable VM.
+
+## Compared to others
+
+| | GlanceTerm | HiveTerm | Agent&nbsp;Deck |
+|--|--|--|--|
+| Form | GUI terminal + sidebar | GUI terminal + split panes | tmux + TUI |
+| Setup | open app, allow hook | install + write `hive.yml` | `agent-deck add` per session |
+| Workflow change | **none** — keep typing `claude` | new layout | launch every session via the tool |
+| Cost | **Free, MIT** | $99/yr Pro | Free |
+
+## Build from source
+
+Prereqs: Node 22, [yarn](https://yarnpkg.com).
 
 ```bash
-# 1. fork — install + build (heavy first time)
-cd glanceterm
-yarn
-npm run build
-
-# 2. plugin
-cd tabby-plugin-ai-sidebar
-npm install
-npm run build
-
-# 3. launch
-cd ..
-./dev.sh
+cd glanceterm && yarn && npm run build
+cd tabby-plugin-ai-sidebar && npm install && npm run build
+cd .. && ./dev.sh        # launches the fork with remote debugging on :9222
 ```
-
-`dev.sh` rebuilds the plugin, then launches the fork with
-`TABBY_PLUGINS=` pointed at it and remote debugging on port 9222 — handy
-for CDP-driven UI testing.
-
-## Known limitations (v0.2)
-
-- **Only Claude Code is fully hooked and tested.** Codex's adapter has
-  status detection verified on a real install; its auto-approve path is
-  source-confirmed but untested. Gemini and opencode ship adapters that
-  are not yet validated end-to-end. See
-  [docs/feature-matrix.md](docs/feature-matrix.md) for the
-  precise per-feature breakdown and
-  [HACKING-glanceterm.md](HACKING-glanceterm.md#adding-a-new-agent-adapter)
-  for how to contribute an adapter.
-- **Validated on macOS only.** Code paths for Linux and Windows exist —
-  the hook handler ships in both POSIX `sh` and PowerShell forms — but no
-  one has driven them end-to-end yet. Help wanted.
-- **Windows builds are unsigned.** macOS builds are Developer ID-signed and
-  notarized (double-click to open). Windows builds carry no Authenticode
-  signature yet, so SmartScreen will warn on first run.
-- **Auto-update only on macOS / Windows.** Tabby's built-in updater is
-  inherited as-is, now pointed at this repo's releases. Linux's
-  electron-updater is disabled by upstream Tabby — you'll need to update
-  manually. (Windows updates carry the same SmartScreen warning as the first
-  install, until the Windows build is signed.)
 
 ## Credits
 
-Built on [Tabby](https://github.com/Eugeny/tabby) v1.0.234 by Eugene Pankov.
-The `SidebarProvider` extension point added in the fork is intended to
-upstream — if you'd find it useful in your own Tabby plugin, the PR is on
-the way.
-
-GlanceTerm is MIT-licensed, same as Tabby. See [LICENSE](LICENSE) for the
-license text and [NOTICE](NOTICE) for the full list of modifications on top
-of upstream Tabby.
+Built on [Tabby](https://github.com/Eugeny/tabby) by Eugene Pankov. MIT-licensed,
+same as Tabby — see [LICENSE](LICENSE) and [NOTICE](NOTICE). The `SidebarProvider`
+extension point added in the fork is intended to upstream.
