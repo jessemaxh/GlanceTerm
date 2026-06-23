@@ -4,7 +4,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { WorktreeService, decideSafeToRemove, isolatedRootFor } from '../worktree.service'
+import { WorktreeService, decideSafeToRemove, isolatedRootFor, summarizeSetStatus } from '../worktree.service'
 
 const git = (cwd: string, ...args: string[]) =>
     execFileSync('git', args, { cwd, encoding: 'utf-8' })
@@ -196,5 +196,60 @@ describe('WorktreeService — multi-repo non-git root (real git)', () => {
         expect(fs.existsSync(path.join(set.isolatedRoot, 'scripts'))).toBe(true) // non-git → symlinked
         expect(fs.existsSync(path.join(set.isolatedRoot, 'server'))).toBe(false) // unselected git repo → absent
         await svc.removeSet(set, { force: true })
+    })
+
+    it('inspectSet reports clean → dirty → ahead status (manager panel)', async () => {
+        const repos = await svc.discoverSubRepos(root)
+        const set = await svc.createSet(root, repos, 'agent/status')
+
+        let st = await svc.inspectSet(set)
+        expect(st.safe).toBe(true)
+        expect(st.dirty).toBe(false)
+        expect(st.ahead).toBe(0)
+
+        // uncommitted change in one repo → dirty + unsafe
+        fs.writeFileSync(path.join(set.repos[0].worktreePath, 'wip.txt'), 'x')
+        st = await svc.inspectSet(set)
+        expect(st.dirty).toBe(true)
+        expect(st.safe).toBe(false)
+        expect(st.repos.find(r => r.name === set.repos[0].name)!.dirtyFiles).toBeGreaterThan(0)
+
+        // a real commit in the other repo → ahead + unsafe
+        const other = set.repos[1]
+        fs.writeFileSync(path.join(other.worktreePath, 'f.txt'), 'y')
+        git(other.worktreePath, 'add', '.'); git(other.worktreePath, 'commit', '-qm', 'c')
+        st = await svc.inspectSet(set)
+        expect(st.ahead).toBeGreaterThanOrEqual(1)
+        expect(st.safe).toBe(false)
+
+        await svc.removeSet(set, { force: true })
+    })
+})
+
+describe('summarizeSetStatus (pure)', () => {
+    const r = (o: Partial<{ exists: boolean; ok: boolean; dirtyFiles: number; ahead: number }> = {}) =>
+        ({ name: 'x', exists: true, ok: true, dirtyFiles: 0, ahead: 0, ...o })
+
+    it('all clean+merged existing repos → safe', () => {
+        expect(summarizeSetStatus([r(), r()]).safe).toBe(true)
+    })
+    it('a dirty repo → dirty + unsafe', () => {
+        const s = summarizeSetStatus([r(), r({ dirtyFiles: 2 })])
+        expect(s.dirty).toBe(true)
+        expect(s.safe).toBe(false)
+    })
+    it('ahead commits → unsafe, ahead summed across repos', () => {
+        const s = summarizeSetStatus([r({ ahead: 2 }), r({ ahead: 1 })])
+        expect(s.ahead).toBe(3)
+        expect(s.safe).toBe(false)
+    })
+    it('a git-unreadable (ok:false) repo → unsafe', () => {
+        expect(summarizeSetStatus([r({ ok: false })]).safe).toBe(false)
+    })
+    it('a gone repo is skipped — never counts dirty / ahead / unsafe', () => {
+        const s = summarizeSetStatus([r({ exists: false, ok: false, dirtyFiles: 9, ahead: 9 })])
+        expect(s.safe).toBe(true)
+        expect(s.dirty).toBe(false)
+        expect(s.ahead).toBe(0)
     })
 })

@@ -56,6 +56,23 @@ export interface WorktreeSet {
     repos: WorktreeRepo[]
 }
 
+/** Live git status of one repo's worktree, for the manager panel. */
+export interface WorktreeRepoStatus {
+    name: string
+    exists: boolean    // the worktree dir is present on disk
+    ok: boolean        // git status/rev-list succeeded (false → treated as unsafe)
+    dirtyFiles: number // `git status --porcelain` line count
+    ahead: number      // commits ahead of base (`rev-list base..HEAD`)
+}
+
+/** Aggregate status of a worktree set, for the manager panel. */
+export interface WorktreeSetStatus {
+    repos: WorktreeRepoStatus[]
+    dirty: boolean     // any existing repo has uncommitted changes
+    ahead: number      // total commits ahead of base across repos
+    safe: boolean      // clean + no commits ahead everywhere (mirrors isSetSafeToRemove)
+}
+
 // ── pure helpers (no IO — unit-testable) ─────────────────────────────────────
 
 /** Where a worktree set lives on disk. Pure.
@@ -106,6 +123,16 @@ export function isWorktreeSet (x: any): x is WorktreeSet {
  *  commits ahead of base (nothing to lose). Pure. */
 export function decideSafeToRemove (statusPorcelain: string, revListAhead: string): boolean {
     return statusPorcelain.trim() === '' && revListAhead.trim() === ''
+}
+
+/** Aggregate per-repo statuses into a set summary. Pure. `safe` mirrors
+ *  isSetSafeToRemove: a gone/absent repo is skipped; an unreadable (ok=false),
+ *  dirty, or ahead repo makes the set unsafe to auto-remove. */
+export function summarizeSetStatus (repos: WorktreeRepoStatus[]): WorktreeSetStatus {
+    const dirty = repos.some(r => r.exists && r.dirtyFiles > 0)
+    const ahead = repos.reduce((n, r) => n + (r.exists ? r.ahead : 0), 0)
+    const safe = repos.every(r => !r.exists || (r.ok && r.dirtyFiles === 0 && r.ahead === 0))
+    return { repos, dirty, ahead, safe }
 }
 
 // ── service ──────────────────────────────────────────────────────────────────
@@ -336,6 +363,32 @@ export class WorktreeService {
             }
         }
         return true
+    }
+
+    /** Live git status of a set for the manager panel — read-only, mutates nothing.
+     *  A missing worktree dir reads as exists:false; a git failure as ok:false
+     *  (→ unsafe), mirroring isSetSafeToRemove's conservative stance. */
+    async inspectSet (set: WorktreeSet): Promise<WorktreeSetStatus> {
+        const repos: WorktreeRepoStatus[] = []
+        for (const r of set.repos) {
+            if (!fsSync.existsSync(r.worktreePath)) {
+                repos.push({ name: r.name, exists: false, ok: true, dirtyFiles: 0, ahead: 0 })
+                continue
+            }
+            let ok = true
+            let dirtyFiles = 0
+            let ahead = 0
+            try {
+                const status = await this.git(r.worktreePath, ['status', '--porcelain'])
+                dirtyFiles = status.split('\n').filter(l => l.trim() !== '').length
+                const a = await this.git(r.worktreePath, ['rev-list', `${r.base}..HEAD`])
+                ahead = a.split('\n').filter(l => l.trim() !== '').length
+            } catch {
+                ok = false
+            }
+            repos.push({ name: r.name, exists: true, ok, dirtyFiles, ahead })
+        }
+        return summarizeSetStatus(repos)
     }
 
     /**

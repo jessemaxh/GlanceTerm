@@ -37,6 +37,7 @@ import { WorktreeLifecycleService } from './worktree-lifecycle.service'
 import { WorktreeReaperService } from './worktree-reaper.service'
 import { WorktreeActionsService, WorktreeContextMenu } from './worktree-actions.service'
 import { WorktreePickerComponent } from './worktree-picker.component'
+import { WorktreeManagerComponent } from './worktree-manager.component'
 import { EscInterruptService } from './esc-interrupt.service'
 import { UpdateCheckService } from './update-check.service'
 import { UpdateForceModalComponent } from './update-force-modal.component'
@@ -126,7 +127,7 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
 
 @NgModule({
     imports: [CommonModule, NgbTooltipModule],
-    declarations: [AiSidebarComponent, UpdateForceModalComponent, TokenStatsTabComponent, WorktreePickerComponent],
+    declarations: [AiSidebarComponent, UpdateForceModalComponent, TokenStatsTabComponent, WorktreePickerComponent, WorktreeManagerComponent],
     providers: [
         HookAdapterRegistry,
         HookRuntimeService,

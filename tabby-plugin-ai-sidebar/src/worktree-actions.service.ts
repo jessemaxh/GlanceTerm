@@ -14,6 +14,7 @@ import { TerminalService } from 'tabby-local'
 import { WorktreeService, WorktreeSet } from './worktree.service'
 import { WorktreeLifecycleService } from './worktree-lifecycle.service'
 import { WorktreePickerComponent, WorktreePickerResult } from './worktree-picker.component'
+import { WorktreeManagerComponent } from './worktree-manager.component'
 import { TabMonitor, AiTool } from './tab-monitor'
 
 /**
@@ -154,6 +155,11 @@ export class WorktreeActionsService {
         const launching = aiTool ? ` · launching ${aiTool}` : ''
         this.notifications.info(`Isolated worktree ${choice.branch} — ${choice.repos.map(r => r.name).join(', ')}${launching}`)
         return set
+    }
+
+    /** Open the worktree manager panel (list + remove orphans). */
+    openManager (): void {
+        this.ngbModal.open(WorktreeManagerComponent, { size: 'lg' })
     }
 }
 

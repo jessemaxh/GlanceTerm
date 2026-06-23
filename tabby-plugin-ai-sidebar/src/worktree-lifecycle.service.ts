@@ -77,6 +77,13 @@ export class WorktreeLifecycleService {
         return this.tracked.get(tab)?.set.branch ?? null
     }
 
+    /** isolatedRoots of every set with a live tab this session — the manager
+     *  panel uses this to mark a set "in use" (don't offer to remove it; close
+     *  the tab instead) vs an orphan it can safely clean up. */
+    liveIsolatedRoots (): Set<string> {
+        return new Set([...this.tracked.values()].map(t => t.set.isolatedRoot))
+    }
+
     private async onTabRemoved (outer: BaseTabComponent): Promise<void> {
         const entry = this.tracked.get(outer)
         if (!entry) {

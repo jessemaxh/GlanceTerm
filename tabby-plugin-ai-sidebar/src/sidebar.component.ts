@@ -363,6 +363,13 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                         </div>
                         <button type="button" class="gt-section-btn" (click)="openTokenStats(); $event.stopPropagation()" aria-label="Open Token usage">Open…</button>
                     </div>
+                    <div class="gt-setting-row gt-setting-row-action" (click)="openWorktreeManager()">
+                        <div class="gt-setting-text">
+                            <div class="gt-setting-title">Worktrees</div>
+                            <div class="gt-setting-desc">Manage the isolated git worktrees agents run in — see each one's status (clean / dirty / unmerged), remove orphans, and reclaim disk.</div>
+                        </div>
+                        <button type="button" class="gt-section-btn" (click)="openWorktreeManager(); $event.stopPropagation()" aria-label="Open Worktrees manager">Open…</button>
+                    </div>
 
                     <!-- Plugin-contributed sections (currently:
                          tabby-plugin-mobile-bridge). Rendered as a row with
@@ -1650,6 +1657,10 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
      *  NgbModal path the plugin "Configure…" sections use). Lives in our sidebar
      *  settings, not Tabby's global Settings. `xl` + scrollable for the tables.
      *  Guarded so a rapid double-click doesn't stack two modals. */
+    openWorktreeManager (): void {
+        this.worktreeActions.openManager()
+    }
+
     openTokenStats (): void {
         if (this.tokenStatsOpen) return
         let ref
