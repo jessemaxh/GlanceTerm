@@ -120,6 +120,16 @@ export class AttentionNotifierService implements OnDestroy {
                 continue
             }
 
+            // Resumed working (e.g. the agent started another turn, or a
+            // background shell flipped the row back to working) → it's no longer
+            // "done and unseen", so clear the toolbar / dock badge instead of
+            // letting it stick. markReady only re-fires on the NEXT stable
+            // working→idle, so this can't flicker on a brief flap.
+            if (s.status === TabStatus.Working) {
+                this.unread.clearForWorking(s.innerTab)
+                continue
+            }
+
             // working → idle: fire immediately. The 3 s "is the agent really
             // done?" debounce lives upstream in TabMonitor's idle-stability
             // gate now, so any working → idle we see here has already been

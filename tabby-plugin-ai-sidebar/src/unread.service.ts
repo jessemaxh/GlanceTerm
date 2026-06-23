@@ -86,6 +86,17 @@ export class UnreadService implements OnDestroy {
         this.armInteractionListener(innerTab)
     }
 
+    /**
+     * The tab left the done state — it resumed working. The badge means "AI
+     * finished, you haven't looked"; a tab that's actively working again isn't
+     * waiting on the user, so drop it from the count instead of letting the
+     * badge stick until the user happens to scroll/click that terminal. No-op if
+     * not unread. (Same effect as a content interaction — see clearOnInteraction.)
+     */
+    clearForWorking (innerTab: BaseTabComponent): void {
+        this.clearOnInteraction(innerTab)
+    }
+
     /** Sync check used by the sidebar template's red-dot binding. */
     isUnread (innerTab: BaseTabComponent): boolean {
         return this.unread.has(innerTab)
