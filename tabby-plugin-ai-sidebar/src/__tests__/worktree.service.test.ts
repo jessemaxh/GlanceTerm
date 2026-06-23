@@ -177,4 +177,22 @@ describe('WorktreeService — multi-repo non-git root (real git)', () => {
         expect(fs.existsSync(dir)).toBe(true) // NOT deleted — we don't own it
         fs.rmSync(dir, { recursive: true, force: true })
     })
+
+    it('single-repo: existing isolated dir aborts WITHOUT deleting it', async () => {
+        const client = path.join(root, 'client')
+        const dir = isolatedRootFor(client, 'agent/s')
+        fs.mkdirSync(dir, { recursive: true })
+        await expect(svc.createSet(client, await svc.discoverSubRepos(client), 'agent/s')).rejects.toThrow(/already exists/)
+        expect(fs.existsSync(dir)).toBe(true) // foreign dir NOT deleted by rollback
+        fs.rmSync(dir, { recursive: true, force: true })
+    })
+
+    it('an UNSELECTED git repo is not mounted (only selected repos + non-git content)', async () => {
+        const only = (await svc.discoverSubRepos(root)).filter(r => r.name === 'client')
+        const set = await svc.createSet(root, only, 'agent/partial')
+        expect(fs.existsSync(path.join(set.isolatedRoot, 'client'))).toBe(true)  // selected → worktree
+        expect(fs.existsSync(path.join(set.isolatedRoot, 'scripts'))).toBe(true) // non-git → symlinked
+        expect(fs.existsSync(path.join(set.isolatedRoot, 'server'))).toBe(false) // unselected git repo → absent
+        await svc.removeSet(set, { force: true })
+    })
 })

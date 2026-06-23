@@ -185,14 +185,21 @@ export class WorktreeService {
         // a worktree per repo under isolatedRoot + symlink the non-isolated siblings.
         const singleRepo = repos.length === 1 && path.resolve(repos[0].repoPath) === path.resolve(root)
         await fs.mkdir(path.dirname(isolatedRoot), { recursive: true })
-        // Multi-repo: claim isolatedRoot atomically with a NON-recursive mkdir. If it
-        // already exists (a concurrent create, or a stale leftover from a crash) abort
-        // WITHOUT entering the try below, so we never roll back + fs.rm a dir another
-        // set owns. (single-repo's `git worktree add` already fails on a non-empty
-        // target, so it's protected too.)
-        if (!singleRepo) {
+        // Atomically claim isolatedRoot so the destructive rollback below never
+        // fs.rm's a dir we don't own — `ownsIsolatedRoot` gates that fs.rm.
+        //   multi-repo: a NON-recursive mkdir IS the claim (EEXIST → abort here).
+        //   single-repo: `git worktree add` creates the dir, so we pre-check it's
+        //   absent and mark ownership only AFTER git creates it — a TOCTOU create by
+        //   another process makes worktree-add fail with ownership still false → no rm.
+        let ownsIsolatedRoot = false
+        if (singleRepo) {
+            if (fsSync.existsSync(isolatedRoot)) {
+                throw new Error(`worktree dir already exists (concurrent create / stale leftover): ${isolatedRoot}`)
+            }
+        } else {
             try {
                 await fs.mkdir(isolatedRoot)
+                ownsIsolatedRoot = true
             } catch {
                 throw new Error(`worktree dir already exists (concurrent create / stale leftover): ${isolatedRoot}`)
             }
@@ -205,6 +212,7 @@ export class WorktreeService {
                 const base = await this.baseCommit(r.repoPath)
                 // `worktree add` creates isolatedRoot itself — no symlinks, no subdir.
                 await this.git(r.repoPath, ['worktree', 'add', isolatedRoot, '-b', branch])
+                ownsIsolatedRoot = true // git created isolatedRoot
                 created.push({ name: r.name, origPath: r.repoPath, worktreePath: isolatedRoot, base })
             } else {
                 for (const r of repos) {
@@ -224,6 +232,10 @@ export class WorktreeService {
                 const failed: string[] = []
                 for (const e of entries) {
                     if (selected.has(e.name)) continue
+                    // Do NOT mount an UNSELECTED git repo — symlinking it would let the
+                    // agent edit the original repo the user chose not to isolate. Only
+                    // non-git content is shared; unselected repos are absent here.
+                    if (e.isDirectory() && this.isRepoToplevel(path.join(root, e.name))) continue
                     const link = path.join(isolatedRoot, e.name)
                     let present = true
                     try { fsSync.lstatSync(link) } catch { present = false }
@@ -240,11 +252,20 @@ export class WorktreeService {
                 }
             }
         } catch (err) {
-            await this.removeSet({ root, isolatedRoot, branch, repos: created }, { force: true }).catch(() => {})
-            // Prune EVERY attempted repo (not just `created`) — the repo whose
-            // `worktree add` failed can leave a dangling worktree admin entry.
+            // Inline rollback: remove the created worktrees + their freshly-created
+            // branches, prune every attempted repo, and fs.rm isolatedRoot ONLY if we
+            // created it (never delete a dir another set / a stale leftover owns).
+            for (const r of created) {
+                try { await this.git(r.origPath, ['worktree', 'remove', '--force', r.worktreePath]) } catch { /* */ }
+                try { await this.git(r.origPath, ['branch', '-D', branch]) } catch { /* */ }
+            }
             for (const r of repos) {
                 try { await this.git(r.repoPath, ['worktree', 'prune']) } catch { /* */ }
+            }
+            if (ownsIsolatedRoot) {
+                this.assertWithinManagedRoot(isolatedRoot)
+                await fs.rm(isolatedRoot, { recursive: true, force: true }).catch(() => {})
+                try { await fs.rmdir(path.dirname(isolatedRoot)) } catch { /* */ }
             }
             throw err
         }
