@@ -5,6 +5,7 @@ import {
     BaseTabComponent,
     MenuItemOptions,
     NotificationsService,
+    SplitTabComponent,
     TabContextMenuItemProvider,
 } from 'tabby-core'
 import { BaseTerminalTabComponent } from 'tabby-terminal'
@@ -166,12 +167,33 @@ export class WorktreeContextMenu extends TabContextMenuItemProvider {
     }
 
     async getItems (tab: BaseTabComponent): Promise<MenuItemOptions[]> {
-        if (!(tab instanceof BaseTerminalTabComponent)) {
+        // The terminal to act on. Right-clicking the terminal CONTENT passes the
+        // leaf directly; right-clicking the TAB HEADER passes the top-level tab,
+        // which for a terminal is a SplitTabComponent wrapper — unwrap it to its
+        // focused (else first) terminal leaf, else the item is missing on the
+        // header (the most natural place to right-click).
+        const terminal = this.resolveTerminalTab(tab)
+        if (!terminal) {
             return []
         }
         return [{
             label: 'Open agent in worktree…',
-            click: () => { void this.worktreeActions.openInWorktree(tab) },
+            click: () => { void this.worktreeActions.openInWorktree(terminal) },
         }]
+    }
+
+    private resolveTerminalTab (tab: BaseTabComponent): BaseTerminalTabComponent<any> | null {
+        if (tab instanceof BaseTerminalTabComponent) {
+            return tab
+        }
+        if (tab instanceof SplitTabComponent) {
+            const focused = tab.getFocusedTab()
+            if (focused instanceof BaseTerminalTabComponent) {
+                return focused
+            }
+            const firstTerminal = tab.getAllTabs().find(t => t instanceof BaseTerminalTabComponent)
+            return (firstTerminal as BaseTerminalTabComponent<any> | undefined) ?? null
+        }
+        return null
     }
 }
