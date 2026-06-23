@@ -11,6 +11,7 @@ import { ScreenshotService } from './screenshot/screenshot.service'
 import { ScreenshotPasteService } from './screenshot/paste.service'
 import { SplitShellService } from './split-shell.service'
 import { WorktreeLifecycleService } from './worktree-lifecycle.service'
+import { WorktreeActionsService } from './worktree-actions.service'
 import { AutoApproveService } from './auto-approve.service'
 import { SidebarSettingsRegistry, SidebarSettingsSection } from './sidebar-settings-registry.service'
 import { TokenStatsTabComponent } from './token-stats-tab.component'
@@ -1493,6 +1494,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         private screenshotPaste: ScreenshotPasteService,
         private splitShell: SplitShellService,
         private worktreeLifecycle: WorktreeLifecycleService,
+        private worktreeActions: WorktreeActionsService,
         private config: ConfigService,
         private notifications: NotificationsService,
         private zone: NgZone,
@@ -2553,6 +2555,13 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
                 label: 'New tab in this directory',
                 click: () => {
                     void this.app.duplicateTab(s.outerTab)
+                },
+            },
+            { type: 'separator' },
+            {
+                label: 'Open agent in worktree…',
+                click: () => {
+                    void this.worktreeActions.openInWorktree(s.innerTab)
                 },
             },
         ]
