@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { execFileSync } from 'child_process'
+import { execFileSync, spawn } from 'child_process'
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
@@ -223,6 +223,25 @@ describe('WorktreeService — multi-repo non-git root (real git)', () => {
         expect(st.safe).toBe(false)
 
         await svc.removeSet(set, { force: true })
+    })
+
+    it('isInUse: true while a process is cwd\'d inside, false otherwise (lsof exit-1 quirk)', async () => {
+        if (process.platform === 'win32') return // the lsof path is darwin/linux only
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-inuse-'))
+        const set = { root: dir, isolatedRoot: dir, branch: 'x', repos: [] } as any
+        try {
+            expect(await svc.isInUse(set)).toBe(false) // nobody cwd'd here yet
+            const child = spawn('sleep', ['30'], { cwd: dir })
+            try {
+                await new Promise(r => setTimeout(r, 400)) // let the child + its cwd register
+                // lsof finds the child but EXITS 1 — the e.stdout recovery must still see it.
+                expect(await svc.isInUse(set)).toBe(true)
+            } finally {
+                child.kill('SIGKILL')
+            }
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true })
+        }
     })
 })
 

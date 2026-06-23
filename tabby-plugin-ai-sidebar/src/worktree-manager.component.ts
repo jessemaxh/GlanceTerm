@@ -65,7 +65,7 @@ const CONFIRM_MIN_MS = 350
             </div>
         </div>
         <div class="modal-footer" style="justify-content:space-between;">
-            <button class="btn btn-secondary" (click)="tidyAllSafe()" [disabled]="loading || safeOrphanCount() === 0">
+            <button class="btn btn-secondary" (click)="tidyAllSafe()" [disabled]="loading || tidying || safeOrphanCount() === 0">
                 Tidy all safe ({{ safeOrphanCount() }})
             </button>
             <span>
@@ -78,6 +78,7 @@ const CONFIRM_MIN_MS = 350
 export class WorktreeManagerComponent {
     rows: Row[] = []
     loading = true
+    tidying = false
 
     constructor (
         private modal: NgbActiveModal,
@@ -157,17 +158,16 @@ export class WorktreeManagerComponent {
         if (r.confirming && r.armedAt && Date.now() - r.armedAt < CONFIRM_MIN_MS) {
             return
         }
-        // Re-check in-use AT CLICK TIME — `r.live` from refresh() can be stale (a
-        // tab opened/recovered into this worktree since) and never saw another
-        // window's tab. Never delete a worktree in use, esp. on the force path.
-        if (await this.inUse(r)) {
-            this.notifications.error(`${r.set.branch} is in use by an open tab — close it first`)
-            r.confirming = false
-            void this.refresh()
-            return
-        }
-        r.busy = true
+        r.busy = true // claim BEFORE any await so a 2nd click can't re-enter and double-remove
         try {
+            // Re-check in-use AT CLICK TIME — `r.live` from refresh() can be stale (a
+            // tab opened/recovered into this worktree since) and never saw another
+            // window's tab. Never delete a worktree in use, esp. on the force path.
+            if (await this.inUse(r)) {
+                this.notifications.error(`${r.set.branch} is in use by an open tab — close it first`)
+                void this.refresh()
+                return
+            }
             const removed = await this.worktree.removeSet(r.set, { force: !r.status.safe })
             if (removed) {
                 this.rows = this.rows.filter(x => x !== r)
@@ -178,34 +178,43 @@ export class WorktreeManagerComponent {
                 void this.refresh()
             }
         } catch (e: any) {
+            this.notifications.error(`Could not remove ${r.set.branch}: ${e?.message ?? e}`)
+        } finally {
             r.busy = false
             r.confirming = false
-            this.notifications.error(`Could not remove ${r.set.branch}: ${e?.message ?? e}`)
         }
     }
 
     async tidyAllSafe (): Promise<void> {
-        const targets = this.rows.filter(r => !r.live && r.status.safe)
-        let removed = 0
-        for (const r of targets) {
-            if (await this.inUse(r)) {
-                continue // went live since refresh → skip (don't delete an in-use worktree)
-            }
-            r.busy = true
-            try {
-                if (await this.worktree.removeSet(r.set)) { // non-force: safe only
-                    this.rows = this.rows.filter(x => x !== r)
-                    removed++
-                } else {
-                    r.busy = false
+        if (this.tidying) {
+            return
+        }
+        this.tidying = true
+        try {
+            const targets = this.rows.filter(r => !r.live && r.status.safe)
+            let removed = 0
+            for (const r of targets) {
+                if (await this.inUse(r)) {
+                    continue // went live since refresh → skip (don't delete an in-use worktree)
                 }
-            } catch { r.busy = false }
-        }
-        if (removed) {
-            this.notifications.info(`Tidied ${removed} worktree${removed === 1 ? '' : 's'}`)
-        }
-        if (removed < targets.length) {
-            void this.refresh() // some skipped (in use / became dirty) → re-sync the list
+                r.busy = true
+                try {
+                    if (await this.worktree.removeSet(r.set)) { // non-force: safe only
+                        this.rows = this.rows.filter(x => x !== r)
+                        removed++
+                    } else {
+                        r.busy = false
+                    }
+                } catch { r.busy = false }
+            }
+            if (removed) {
+                this.notifications.info(`Tidied ${removed} worktree${removed === 1 ? '' : 's'}`)
+            }
+            if (removed < targets.length) {
+                void this.refresh() // some skipped (in use / became dirty) → re-sync the list
+            }
+        } finally {
+            this.tidying = false
         }
     }
 

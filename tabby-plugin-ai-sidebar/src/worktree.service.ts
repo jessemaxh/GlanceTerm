@@ -458,11 +458,16 @@ export class WorktreeService {
         }
         try {
             // `lsof -t +D <dir>`: pids with any open file (incl. a shell's cwd)
-            // under the isolated root. Exits 1 with empty output when none match.
+            // under the isolated root.
             const { stdout } = await execFileAsync('lsof', ['-t', '+D', set.isolatedRoot], { timeout: 4000 })
             return stdout.trim() !== ''
-        } catch {
-            return false // can't determine → don't block (liveIsolatedRoots backstops same-window)
+        } catch (e: any) {
+            // CRITICAL: lsof EXITS 1 even when it DID find occupants (it prints the
+            // pids to stdout), so execFile *rejects* on a real match. Recover the
+            // pid from e.stdout: non-empty → in use. A true no-match is exit 1 with
+            // EMPTY stdout; a missing binary / timeout-kill has no stdout → false
+            // (best-effort; liveIsolatedRoots backstops the same window).
+            return typeof e?.stdout === 'string' && e.stdout.trim() !== ''
         }
     }
 
