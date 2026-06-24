@@ -19,8 +19,9 @@ name: Release
 # review on main" blocks CI from direct-pushing a version bump, but a PR the
 # maintainer approves + merges is exactly the supported path.
 #
-# Platforms (all x64 unless noted): macOS arm64 (Apple Silicon, signed +
-# notarized), Linux x64 (AppImage/deb/rpm/pacman/tar.gz, unsigned), Windows x64
+# Platforms (all x64 unless noted): macOS arm64 + macOS x64 (both Apple-signed +
+# notarized; x64 is CROSS-COMPILED on the arm64 runner), Linux x64
+# (AppImage/deb/rpm/pacman/tar.gz, unsigned), Windows x64
 # (NSIS .exe + portable .zip, UNSIGNED → SmartScreen "unknown publisher" warning).
 # RELEASE=1 stamps the release-please-bumped app/package.json version. Each
 # non-macOS build is gated by a headless launch smoke test (Electron must come up)
@@ -28,12 +29,14 @@ name: Release
 # macOS needs no separate smoke: build-macos.mjs's afterPack asar self-check
 # already catches the "shipped without node_modules" crash at build time.
 #
+# Intel macOS (x64): RE-ADDED 2026-06-24 by CROSS-COMPILING on the arm64 runner
+# (ARCH=x86_64) — sidesteps the scarce/deprecated hosted Intel runners (macos-13)
+# that made us drop it on 2026-06-22. node-pty ships darwin-x64 prebuilds, keytar
+# et al. rebuild for x64; verified launching under Rosetta locally. Best-effort:
+# NOT yet tested on real Intel hardware (no Intel Mac on hand). The Homebrew cask
+# stays arm64-only for now — Intel users grab the macos-x86_64.dmg directly.
+#
 # ── Planned (DEFERRED) ────────────────────────────────────────────────────
-# Intel macOS (x64): DROPPED. GitHub's hosted Intel runners (macos-13) are a
-# scarce, being-deprecated pool — x64 jobs sat queued 30+ min with no pickup. arm64
-# binaries can't run on Intel (Rosetta translates Intel->arm only), so macOS ships
-# Apple Silicon only. To revisit: cross-build x64/universal on an arm64 runner
-# (verify native modules on a real Intel Mac) or a self-hosted Intel runner.
 # Windows pinned to windows-2022 (windows-latest ships VS 18, which node-gyp 11.x
 # can't detect). Windows code-signing + Linux/Windows arm64 are still TODO.
 
@@ -65,6 +68,13 @@ jobs:
         include:
           - name: macOS arm64
             os: macos-latest
+            arch: arm64
+          # Intel mac, CROSS-COMPILED on the same arm64 runner (no scarce Intel
+          # runner needed) — verified locally under Rosetta. Best-effort: not
+          # tested on real Intel hardware.
+          - name: macOS x64
+            os: macos-latest
+            arch: x86_64
           - name: Linux x64
             os: ubuntu-latest
           - name: Windows x64
@@ -96,7 +106,7 @@ jobs:
 
       - name: Build macOS (signed + notarized when secrets present)
         if: matrix.os == 'macos-latest'
-        run: RELEASE=1 npm run dmg:mac
+        run: RELEASE=1 ARCH=${{ matrix.arch }} npm run dmg:mac
         env:
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
