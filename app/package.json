@@ -47,9 +47,9 @@
     "windows-native-registry": "^3.2.1"
   },
   "devDependencies": {
-    "@ngx-translate/core": "^14.0.0",
-    "@types/mz": "2.7.4",
-    "@types/node": "20.3.1"
+    "@ngx-translate/core": "^18.0.0",
+    "@types/mz": "2.7.9",
+    "@types/node": "26.0.1"
   },
   "peerDependencies": {
     "tabby-community-color-schemes": "*",
