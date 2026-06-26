@@ -37,6 +37,7 @@ module.exports = {
     },
     externals: [
         'fs', 'path', 'os', 'child_process',
+        'electron',
         '@electron/remote',
         /^@angular/,
         /^@ng-bootstrap/,

@@ -40,6 +40,7 @@ import { WorktreePickerComponent } from './worktree-picker.component'
 import { WorktreeManagerComponent } from './worktree-manager.component'
 import { EscInterruptService } from './esc-interrupt.service'
 import { UpdateCheckService } from './update-check.service'
+import { AutoUpdateService } from './auto-update.service'
 import { UpdateForceModalComponent } from './update-force-modal.component'
 import { DebugLogService } from './debug-log.service'
 import { TokenStatsTabComponent } from './token-stats-tab.component'
@@ -150,6 +151,7 @@ class ToggleAiSidebarButtonProvider extends ToolbarButtonProvider {
         WorktreeActionsService,
         EscInterruptService,
         UpdateCheckService,
+        AutoUpdateService,
         { provide: SidebarProvider,       useClass: AiSidebarContribProvider,      multi: true },
         { provide: ToolbarButtonProvider, useClass: ToggleAiSidebarButtonProvider, multi: true },
         { provide: HotkeyProvider,        useClass: AiSidebarHotkeyProvider,       multi: true },
@@ -201,6 +203,10 @@ export default class AiSidebarModule {
         // Eager-inject so the remote update check schedules itself at launch
         // (first check + interval) without waiting for any UI consumer.
         _uc: UpdateCheckService,
+        // Eager-inject so electron-updater is polled from launch — the main
+        // process only checks when the renderer asks, so this driver must be
+        // alive even while the sidebar panel is hidden.
+        _au: AutoUpdateService,
         // Eager-inject so the single worktree-lifecycle instance exists from
         // startup (cleanup is per-tab via inner.destroyed$, registered when a
         // worktree tab opens; this just pins the shared singleton).

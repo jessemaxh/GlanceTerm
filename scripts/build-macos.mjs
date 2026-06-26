@@ -354,13 +354,23 @@ builder({
             notarize: !!process.env.APPLE_TEAM_ID,
         },
         npmRebuild: process.env.ARCH !== 'arm64',
-        publish: process.env.KEYGEN_TOKEN ? [
-            vars.keygenConfig,
+        // Always configure the GitHub provider so electron-builder bakes
+        // `app-update.yml` into the .app and emits `latest-${ARCH}-mac.yml`
+        // plus the update `.zip`/`.blockmap` that installed apps poll to
+        // auto-update. Generation needs only owner/repo — NOT a token; the
+        // top-level `publish: 'never'` (below) keeps electron-builder from
+        // uploading, and the release workflow attaches the artifacts itself
+        // via `gh release upload`. The Keygen feed is layered on only when its
+        // token is present.
+        publish: [
+            ...(process.env.KEYGEN_TOKEN ? [vars.keygenConfig] : []),
             {
                 provider: 'github',
+                owner: 'jessemaxh',
+                repo: 'GlanceTerm',
                 channel: `latest-${process.env.ARCH}`,
             },
-        ] : undefined,
+        ],
     },
     publish: (process.env.KEYGEN_TOKEN && isTag) ? 'always' : 'never',
 }).then(async () => {
