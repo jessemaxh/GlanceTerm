@@ -64,10 +64,19 @@ export class AutoUpdateService implements OnDestroy {
 
         this.ipc.on('updater:update-downloaded', () =>
             this.zone.run(() => void this.onDownloaded()))
-        this.ipc.on('updater:error', (_e: any, err: any) => {
-            // Fail-open: log for diagnosis, surface nothing to the user.
-            // eslint-disable-next-line no-console
-            console.warn('[glanceterm] auto-update check failed:', err?.message ?? err)
+        this.ipc.on('updater:error', (_e: any, message: string, integrity?: boolean) => {
+            // Fail-open: never disrupt normal use. But split a security-relevant
+            // integrity/signature failure (possible tampering — main classifies
+            // it) from a benign network/feed error, so the former isn't buried
+            // in the noise of expected offline ticks. Both land in
+            // ~/.glanceterm/debug.log via DebugLogService's console tee.
+            if (integrity) {
+                // eslint-disable-next-line no-console
+                console.error('[glanceterm] auto-update INTEGRITY/signature failure (possible tampering):', message)
+            } else {
+                // eslint-disable-next-line no-console
+                console.warn('[glanceterm] auto-update check failed (benign — network/feed):', message)
+            }
         })
 
         this.firstCheck = setTimeout(() => this.check(), FIRST_CHECK_DELAY_MS)

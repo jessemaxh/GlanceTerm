@@ -520,7 +520,17 @@ export class Window {
         // the user sees exactly one restart prompt no matter how many are open.
         autoUpdater.on('update-available', () => app.sendToActiveWindow('updater:update-available'))
         autoUpdater.on('update-not-available', () => app.sendToActiveWindow('updater:update-not-available'))
-        autoUpdater.on('error', err => app.sendToActiveWindow('updater:error', err))
+        autoUpdater.on('error', err => {
+            // A checksum/signature/integrity failure is security-relevant (a
+            // possibly tampered feed or artifact) and must be distinguishable
+            // from a benign network/404 (offline, or feed not yet published).
+            // Classify HERE, where the full Error is intact — `.code`/`.message`
+            // are lossy once structured-cloned across IPC. Pass a plain message
+            // string + an `integrity` flag.
+            const msg = String((err && err.message) || err)
+            const integrity = /sha512|checksum|signature|not signed|integrity|tamper/i.test(msg)
+            app.sendToActiveWindow('updater:error', msg, integrity)
+        })
         // Track whether an update is actually staged, so a stray
         // `updater:quit-and-install` (any window can send it) is a no-op rather
         // than registering a dangling native listener on each call.
