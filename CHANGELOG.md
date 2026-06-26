@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.0](https://github.com/jessemaxh/GlanceTerm/compare/v0.2.0...v0.3.0) (2026-06-26)
+
+
+### Features
+
+* **updater:** GitHub-driven in-app auto-update ([aa45519](https://github.com/jessemaxh/GlanceTerm/commit/aa45519f131c5aae6ead26ab43b03b0d0bcd3987))
+
+
+### Bug Fixes
+
+* **updater:** address second adversarial review (real defects) ([9f6f4c8](https://github.com/jessemaxh/GlanceTerm/commit/9f6f4c86f68d860c473823a6827f00b3b016bfa1))
+* **updater:** distinguish integrity errors from benign network errors ([bfcffab](https://github.com/jessemaxh/GlanceTerm/commit/bfcffab032d7c2c9b6e15db886e2e81ee28cc295))
+* **updater:** feed/upload ordering + lint (review) ([c6318cc](https://github.com/jessemaxh/GlanceTerm/commit/c6318cc1c769ff8e559b82634f4abafb7b658454))
+* **updater:** make auto-update actually work + harden (review fixes) ([e45f5df](https://github.com/jessemaxh/GlanceTerm/commit/e45f5df54742be5eec2fb934973901baa4b1330a))
+
+
+### Miscellaneous Chores
+
+* release 0.3.0 ([c0abcfa](https://github.com/jessemaxh/GlanceTerm/commit/c0abcfa2f62d879464c225337c0be1131cbd6a36))
+
 ## [0.2.0](https://github.com/jessemaxh/GlanceTerm/compare/v0.1.2...v0.2.0) (2026-06-23)
 
 
