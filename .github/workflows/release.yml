@@ -174,18 +174,66 @@ jobs:
           if ($alive) { Write-Host "✓ Windows launch smoke passed (launched, stayed alive — no asar crash)"; exit 0 }
           Write-Error "✗ app exited early (likely an asar/startup crash)"; exit 1
 
+      # macOS only: stash THIS arch's latest-mac.yml as a CI artifact. Both arch
+      # jobs emit a file with the same name, so they can't go straight to the
+      # release (they'd clobber each other). The publish-mac-feed job below
+      # merges the two into one feed listing both arches' zips.
+      - name: Stash macOS update manifest (merged later)
+        if: startsWith(matrix.os, 'macos')
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-feed-${{ matrix.arch }}
+          path: dist/latest-mac.yml
+          if-no-files-found: error
+
       - name: Attach installers to the release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           shopt -s nullglob
-          # macOS: .dmg for humans PLUS the electron-updater trio — the mac
-          # update .zip (Squirrel.Mac updates from the zip, not the dmg), its
-          # .blockmap, and latest-*-mac.yml. The per-arch `channel` keeps the
-          # arm64/x64 ymls from colliding on the same release. The mac zip is
+          # macOS: .dmg for humans PLUS the electron-updater zip (Squirrel.Mac
+          # updates from the zip, not the dmg) and its .blockmap. The mac zip is
           # `*-macos-*.zip`, distinct from Windows' `*-portable-*.zip`.
+          # NOTE: latest-mac.yml is deliberately NOT uploaded here — each arch
+          # emits one with the same name; they're stashed as artifacts above and
+          # combined into a single feed by the publish-mac-feed job.
           # Linux: all package formats. Windows: setup .exe + portable .zip.
-          files=(dist/*.dmg dist/*-macos-*.zip dist/*-macos-*.zip.blockmap dist/latest*.yml dist/*.AppImage dist/*.deb dist/*.rpm dist/*.pacman dist/*.tar.gz dist/*.exe dist/*-portable-*.zip)
+          files=(dist/*.dmg dist/*-macos-*.zip dist/*-macos-*.zip.blockmap dist/*.AppImage dist/*.deb dist/*.rpm dist/*.pacman dist/*.tar.gz dist/*.exe dist/*-portable-*.zip)
           echo "uploading: ${files[*]}"
           gh release upload "${{ needs.release-please.outputs.tag_name }}" "${files[@]}" --clobber
+
+  # Combine the per-arch latest-mac.yml artifacts (stashed by the mac build jobs)
+  # into ONE latest-mac.yml listing both arches' zips, and attach it to the
+  # release. electron-updater's GitHub provider only ever fetches latest-mac.yml;
+  # its MacUpdater then selects arm64 vs x64 by the filename. Runs after the
+  # whole matrix so both arch artifacts exist.
+  publish-mac-feed:
+    name: Publish merged macOS update feed
+    needs: [release-please, build]
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-feed-arm64
+          path: feeds/arm64
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-feed-x86_64
+          path: feeds/x86_64
+      - name: Merge per-arch latest-mac.yml into one feed
+        run: |
+          npm install js-yaml@4 --no-save --no-audit --no-fund
+          node scripts/merge-mac-feed.mjs feeds/arm64/latest-mac.yml feeds/x86_64/latest-mac.yml > latest-mac.yml
+          echo "----- merged latest-mac.yml -----"; cat latest-mac.yml
+      - name: Attach merged feed to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" latest-mac.yml --clobber

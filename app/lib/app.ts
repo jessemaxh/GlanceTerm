@@ -141,6 +141,16 @@ export class Application {
         return window
     }
 
+    /** Send to a SINGLE window — focused, else main, else first. For
+     *  process-global notifications (e.g. the auto-updater) that must surface
+     *  exactly once regardless of how many windows are open. */
+    sendToActiveWindow (event: string, ...args: any[]): void {
+        const target = this.windows.find(x => x.isFocused())
+            ?? this.windows.find(x => x.isMainWindow)
+            ?? this.windows[0]
+        target?.send(event, ...args)
+    }
+
     onGlobalHotkey (): void {
         let isPresent = this.windows.some(x => x.isFocused() && x.isVisible())
         const isDockedOnTop = this.windows.some(x => x.isDockedOnTop())

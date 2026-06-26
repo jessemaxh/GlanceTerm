@@ -488,33 +488,45 @@ export class Window {
         })
     }
 
+    // `autoUpdater` (electron-updater) is a process-global singleton, but
+    // setupUpdater() runs in every Window constructor. Without this guard, N
+    // windows register N copies of each listener — one update-downloaded then
+    // fires N restart prompts, and any one window's quitAndInstall yanks the
+    // app out from under the others. Wire the global exactly once.
+    private static updaterWired = false
+
     private setupUpdater () {
+        // Only macOS is code-signed and ships a baked update feed (see
+        // scripts/build-macos.mjs). On unsigned Windows/Linux there is no
+        // app-update.yml, so checks could only ever error — and turning the
+        // updater on there without signing would be an unsigned-RCE footgun.
+        if (process.platform !== 'darwin') {
+            return
+        }
+        if (Window.updaterWired) {
+            return
+        }
+        Window.updaterWired = true
+
+        const app = this.application
         autoUpdater.autoDownload = true
         autoUpdater.autoInstallOnAppQuit = true
+        // Never silently apply an OLDER build than the one running (rollback /
+        // botched-release protection). Explicit because electron-updater can
+        // flip this on for some channel configurations.
+        autoUpdater.allowDowngrade = false
 
-        autoUpdater.on('update-available', () => {
-            this.send('updater:update-available')
-        })
+        // Route lifecycle events to a SINGLE window (focused → main → first) so
+        // the user sees exactly one restart prompt no matter how many are open.
+        autoUpdater.on('update-available', () => app.sendToActiveWindow('updater:update-available'))
+        autoUpdater.on('update-not-available', () => app.sendToActiveWindow('updater:update-not-available'))
+        autoUpdater.on('error', err => app.sendToActiveWindow('updater:error', err))
+        autoUpdater.on('update-downloaded', () => app.sendToActiveWindow('updater:update-downloaded'))
 
-        autoUpdater.on('update-not-available', () => {
-            this.send('updater:update-not-available')
-        })
-
-        autoUpdater.on('error', err => {
-            this.send('updater:error', err)
-        })
-
-        autoUpdater.on('update-downloaded', () => {
-            this.send('updater:update-downloaded')
-        })
-
-        this.on('updater:check-for-updates', () => {
-            autoUpdater.checkForUpdates()
-        })
-
-        this.on('updater:quit-and-install', () => {
-            autoUpdater.quitAndInstall()
-        })
+        // App-global actions — register on ipcMain once so ANY window can drive
+        // them (not via this.on, which is scoped to one window's sender).
+        ipcMain.on('updater:check-for-updates', () => autoUpdater.checkForUpdates())
+        ipcMain.on('updater:quit-and-install', () => autoUpdater.quitAndInstall())
     }
 
     private destroy () {

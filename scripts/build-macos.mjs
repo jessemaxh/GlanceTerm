@@ -355,20 +355,28 @@ builder({
         },
         npmRebuild: process.env.ARCH !== 'arm64',
         // Always configure the GitHub provider so electron-builder bakes
-        // `app-update.yml` into the .app and emits `latest-${ARCH}-mac.yml`
-        // plus the update `.zip`/`.blockmap` that installed apps poll to
-        // auto-update. Generation needs only owner/repo — NOT a token; the
-        // top-level `publish: 'never'` (below) keeps electron-builder from
-        // uploading, and the release workflow attaches the artifacts itself
-        // via `gh release upload`. The Keygen feed is layered on only when its
-        // token is present.
+        // `app-update.yml` into the .app and emits `latest-mac.yml` plus the
+        // update `.zip`/`.blockmap` that installed apps poll to auto-update.
+        //
+        // NO per-arch `channel`: electron-updater's GitHub provider only ever
+        // requests `latest-mac.yml` for a stable release — it ignores the baked
+        // channel (GitHubProvider.getDefaultChannelName hardcodes "latest"), so
+        // a `latest-arm64-mac.yml` would 404 and updates would silently never
+        // apply. Each arch build therefore emits a standard `latest-mac.yml`
+        // listing that arch's zip; the release workflow MERGES the two arches'
+        // `files` into one `latest-mac.yml` (electron-updater's MacUpdater then
+        // selects by the "arm64" substring in the filename).
+        //
+        // Generation needs only owner/repo, NOT a token; the top-level
+        // `publish: 'never'` (below) keeps electron-builder from uploading — the
+        // release workflow attaches artifacts via `gh release upload`. The
+        // Keygen feed is layered on only when its token is present.
         publish: [
             ...(process.env.KEYGEN_TOKEN ? [vars.keygenConfig] : []),
             {
                 provider: 'github',
                 owner: 'jessemaxh',
                 repo: 'GlanceTerm',
-                channel: `latest-${process.env.ARCH}`,
             },
         ],
     },

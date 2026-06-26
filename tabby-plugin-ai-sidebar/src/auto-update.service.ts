@@ -33,10 +33,12 @@ export class AutoUpdateService implements OnDestroy {
     private ipc: any | null = null
     private timer?: ReturnType<typeof setInterval>
     private firstCheck?: ReturnType<typeof setTimeout>
-    /** Guards against stacking a second dialog if `update-downloaded` re-fires
-     *  (or the prompt is still open on the next emit). */
+    /** Guards against stacking a second dialog while one is still open. NOT a
+     *  once-ever latch: electron-updater fires `update-downloaded` once per
+     *  downloaded version, so dropping the latch lets a NEWER build (downloaded
+     *  later in a long-running session) re-prompt — which is the whole point of
+     *  the 6h re-check cadence. */
     private prompting = false
-    private prompted = false
 
     constructor (
         private zone: NgZone,
@@ -77,9 +79,8 @@ export class AutoUpdateService implements OnDestroy {
     }
 
     private async onDownloaded (): Promise<void> {
-        if (this.prompting || this.prompted) return
+        if (this.prompting) return
         this.prompting = true
-        this.prompted = true
         try {
             const r = await this.platform.showMessageBox({
                 // Tabby's MessageBoxOptions only allows 'warning' | 'error';
