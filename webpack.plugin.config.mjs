@@ -58,7 +58,21 @@ export default options => {
             cacheDirectory: path.resolve(options.dirname, 'node_modules', '.webpack-cache'),
         },
         resolve: {
-            alias: options.alias ?? {},
+            alias: {
+                ...(options.alias ?? {}),
+                // npm@6 (an app dependency) drags https-proxy-agent@2 + agent-base@4 into
+                // app/node_modules, which sits BEFORE the root node_modules on
+                // resolve.modules below. When a bundled lib does require('https-proxy-agent')
+                // — axios started doing so at >=1.18 — webpack grabs that ancient v2 copy,
+                // whose top-level `util.inherits(HttpsProxyAgent, Agent)` throws at module
+                // load because agent-base@4's export does not survive bundling. That kills
+                // plugin load and hangs the app forever on the splash (shipped as 0.3.0).
+                // These Node proxy agents are inert in the renderer anyway (axios uses the
+                // XHR adapter there), so resolve them to empty modules.
+                'https-proxy-agent': false,
+                'http-proxy-agent': false,
+                'socks-proxy-agent': false,
+            },
             modules: ['.', 'src', 'node_modules', '../app/node_modules', '../node_modules'].map(x => path.join(options.dirname, x)),
             extensions: ['.ts', '.js'],
             mainFields: ['esm2015', 'browser', 'module', 'main'],
