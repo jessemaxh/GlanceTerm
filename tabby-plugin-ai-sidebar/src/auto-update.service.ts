@@ -88,7 +88,9 @@ export class AutoUpdateService implements OnDestroy {
     }
 
     private async onDownloaded (): Promise<void> {
-        if (this.prompting) return
+        if (this.prompting) {
+            return
+        }
         this.prompting = true
         try {
             const r = await this.platform.showMessageBox({

@@ -179,18 +179,6 @@ jobs:
           if ($alive) { Write-Host "✓ Windows launch smoke passed (launched, stayed alive — no asar crash)"; exit 0 }
           Write-Error "✗ app exited early (likely an asar/startup crash)"; exit 1
 
-      # macOS only: stash THIS arch's latest-mac.yml as a CI artifact. Both arch
-      # jobs emit a file with the same name, so they can't go straight to the
-      # release (they'd clobber each other). The publish-mac-feed job below
-      # merges the two into one feed listing both arches' zips.
-      - name: Stash macOS update manifest (merged later)
-        if: startsWith(matrix.os, 'macos')
-        uses: actions/upload-artifact@v4
-        with:
-          name: mac-feed-${{ matrix.arch }}
-          path: dist/latest-mac.yml
-          if-no-files-found: error
-
       - name: Attach installers to the release
         shell: bash
         env:
@@ -201,12 +189,27 @@ jobs:
           # updates from the zip, not the dmg) and its .blockmap. The mac zip is
           # `*-macos-*.zip`, distinct from Windows' `*-portable-*.zip`.
           # NOTE: latest-mac.yml is deliberately NOT uploaded here — each arch
-          # emits one with the same name; they're stashed as artifacts above and
-          # combined into a single feed by the publish-mac-feed job.
+          # emits one with the same name; it's stashed as an artifact AFTER this
+          # step and merged into a single feed by the publish-mac-feed job.
           # Linux: all package formats. Windows: setup .exe + portable .zip.
           files=(dist/*.dmg dist/*-macos-*.zip dist/*-macos-*.zip.blockmap dist/*.AppImage dist/*.deb dist/*.rpm dist/*.pacman dist/*.tar.gz dist/*.exe dist/*-portable-*.zip)
           echo "uploading: ${files[*]}"
           gh release upload "${{ needs.release-please.outputs.tag_name }}" "${files[@]}" --clobber
+
+      # macOS only: stash THIS arch's latest-mac.yml as a CI artifact for the
+      # publish-mac-feed job to merge. CRITICAL ordering: this runs AFTER the
+      # upload above, so if `gh release upload` fails (network/perms/GitHub), the
+      # job stops here and the artifact is never produced — publish-mac-feed then
+      # can't publish a feed pointing at zips that never reached the release
+      # (which would 404 → broken auto-update). Both arch jobs emit the same
+      # filename, hence the per-arch artifact + later merge.
+      - name: Stash macOS update manifest (only after installers upload)
+        if: startsWith(matrix.os, 'macos')
+        uses: actions/upload-artifact@v4
+        with:
+          name: mac-feed-${{ matrix.arch }}
+          path: dist/latest-mac.yml
+          if-no-files-found: error
 
   # Combine the per-arch latest-mac.yml artifacts (stashed by the mac build jobs)
   # into ONE latest-mac.yml listing both arches' zips, and attach it to the
