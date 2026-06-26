@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.1...v0.3.2) (2026-06-26)
+
+
+### Features
+
+* **sidebar:** remote-tab-awareness — connection chip for remote tabs ([06caf3b](https://github.com/jessemaxh/GlanceTerm/commit/06caf3bd501951c022b3678d085d45b759bcc990))
+
 ## [0.3.1](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.0...v0.3.1) (2026-06-26)
 
 
