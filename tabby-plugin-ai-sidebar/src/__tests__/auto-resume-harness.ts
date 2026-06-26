@@ -94,6 +94,8 @@ export function makeTabState (tab: FakeTab, overrides: FakeStateOverrides = {}):
         aiPid: overrides.aiTool ? 1234 : null,
         aiCommandLine: overrides.aiCommandLine ?? null,
         cwd: overrides.cwd ?? null,
+        remoteKind: null,
+        remoteTarget: null,
         status: overrides.aiTool ? TabStatus.Working : TabStatus.NoAi,
         lastActiveMs: null,
         awaitingFirstEvent: false,

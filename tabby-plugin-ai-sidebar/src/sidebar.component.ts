@@ -160,9 +160,19 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                             <span class="usage tokens" [title]="tokensTitle(s)"><span class="tk"><span class="tk-l">in:</span><span class="tk-v">{{ fmtTokens(s.tokensIn) }}</span></span><span class="tk tk-cache" *ngIf="s.tokensCacheRead"><span class="tk-l">cache:</span><span class="tk-v">{{ fmtTokens(s.tokensCacheRead) }}</span></span><span class="tk"><span class="tk-l">out:</span><span class="tk-v">{{ fmtTokens(s.tokensOut) }}</span></span></span>
                         </div>
 
-                        <!-- line2 (shell) — cwd · age -->
-                        <div class="line2" *ngIf="!s.aiTool && s.cwd">
-                            <span class="usage shell-cwd" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
+                        <!-- line2 (shell) — remote connection chip · cwd · age.
+                             For an SSH/docker/k8s/manual-ssh tab the chip names
+                             the protocol + target (100% zero remote config —
+                             sourced from the tab profile or the local process
+                             tree); cwd is the remote shell's reported path when
+                             it emits OSC 7 / OSC 1337. -->
+                        <div class="line2" *ngIf="!s.aiTool && (s.remoteKind || s.cwd)">
+                            <span *ngIf="s.remoteKind" class="conn-chip" [attr.data-remote]="s.remoteKind" [attr.title]="connTitle(s)">
+                                <span class="conn-kind">{{ remoteKindLabel(s.remoteKind) }}</span>
+                                <span *ngIf="s.remoteTarget" class="conn-sep" aria-hidden="true">·</span>
+                                <span *ngIf="s.remoteTarget" class="conn-target">{{ s.remoteTarget }}</span>
+                            </span>
+                            <span class="usage shell-cwd" *ngIf="s.cwd" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
                             <span class="l2-sp"></span>
                             <span class="age" *ngIf="s.lastActiveMs !== null">{{ ageStr(s.lastActiveMs) }}</span>
                         </div>
@@ -915,6 +925,45 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             min-width: 0;
             flex: 0 1 auto;
             opacity: 0.85;
+        }
+        /* ---- remote connection chip (L0) ----
+           Names the protocol + target for a tab whose work runs OFF the local
+           process tree (SSH / docker / k8s / manual-ssh). Same pill shape as the
+           agent pill but tinted per protocol via [data-remote]. This is
+           CONNECTION metadata, not agent status, so it never borrows a status
+           hue (green/red/orange). 100% zero remote config. */
+        .conn-chip {
+            --rk: var(--gt-meta-tx);
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            max-width: 100%;
+            min-width: 0;
+            font-family: var(--gt-mono);
+            font-size: 12.5px;
+            line-height: 1;
+            padding: 3px 7px;
+            border-radius: 5px;
+            background: color-mix(in srgb, var(--rk) 12%, var(--gt-meta-bg));
+            border: 1px solid color-mix(in srgb, var(--rk) 28%, transparent);
+            white-space: nowrap;
+            flex: none;
+        }
+        .conn-chip[data-remote="ssh"],
+        .conn-chip[data-remote="mosh"],
+        .conn-chip[data-remote="telnet"] { --rk: #5EB1BF; }
+        .conn-chip[data-remote="serial"]  { --rk: #9AA0A6; }
+        .conn-chip[data-remote="docker"]  { --rk: #2496ED; }
+        .conn-chip[data-remote="podman"]  { --rk: #892CA0; }
+        .conn-chip[data-remote="kubectl"] { --rk: #326CE5; }
+        .conn-chip[data-remote="tsh"]     { --rk: #651FFF; }
+        .conn-chip .conn-kind { font-weight: 600; color: var(--rk); flex: none; }
+        .conn-chip .conn-sep { color: var(--gt-text-faint); flex: none; }
+        .conn-chip .conn-target {
+            color: var(--gt-text-faint);
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
         /* Token usage chip ("in: 27k out: 284k") — label-first: dimmed label
            with trailing colon, bright value (weight 600), in the neutral
@@ -2330,6 +2379,27 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         }
         const eff = this.effStatus(s)
         return `${s.title} — ${a11y[eff] || eff}`
+    }
+
+    /** Short label for the remote connection chip ("SSH", "Docker", "k8s", …). */
+    remoteKindLabel (kind: string | null): string {
+        const labels: Record<string, string> = {
+            ssh: 'SSH',
+            mosh: 'Mosh',
+            telnet: 'Telnet',
+            serial: 'Serial',
+            docker: 'Docker',
+            podman: 'Podman',
+            kubectl: 'k8s',
+            tsh: 'Teleport',
+        }
+        return kind ? (labels[kind] ?? kind) : ''
+    }
+
+    /** Tooltip for the connection chip — "Connected via SSH to user@host". */
+    connTitle (s: TabState): string {
+        const label = this.remoteKindLabel(s.remoteKind)
+        return s.remoteTarget ? `Connected via ${label} to ${s.remoteTarget}` : `Connected via ${label}`
     }
 
     /** Full agent name for the chip on line2. */

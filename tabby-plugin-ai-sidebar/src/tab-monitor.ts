@@ -220,6 +220,106 @@ export function detectAiToolFromCommand (command: string): AiTool | null {
     return match?.tool ?? null
 }
 
+/**
+ * Remote-entry commands typed into a LOCAL shell tab (manual `ssh`, `docker
+ * exec`, `kubectl exec`, …). Mirrors AI_PATTERNS and is matched against the
+ * SAME `realCmds` we already fetch for AI detection in makeState — so it's
+ * free. Managed SSH/Telnet/Serial tabs do NOT go through here (Tabby dials the
+ * remote itself; there's no local `ssh` process to detect) — they read their
+ * `profile` instead, see remoteFromProfile().
+ *
+ * Display-only ("connected to a remote, via X"). Never affects status.
+ */
+export type RemoteKind = 'ssh' | 'telnet' | 'serial' | 'mosh' | 'docker' | 'podman' | 'kubectl' | 'tsh'
+
+// ORDER MATTERS: first match wins (detectRemoteFromCommand uses Array.find),
+// and the literal `ssh` is a substring of compound launchers like `tsh ssh
+// node` / `gcloud compute ssh`. So the generic `ssh` rule MUST be last —
+// otherwise `tsh ssh node` would mis-detect as plain ssh.
+const REMOTE_PATTERNS: Array<{ kind: RemoteKind; regexes: RegExp[] }> = [
+    { kind: 'tsh', regexes: [/(?:^|[\s/])tsh\s+(?:ssh|exec)\s/] },
+    { kind: 'mosh', regexes: [/(?:^|[\s/])mosh(?:-client)?\s+\S/] },
+    { kind: 'docker', regexes: [/(?:^|[\s/])docker\s+(?:exec|attach|run)\s/] },
+    { kind: 'podman', regexes: [/(?:^|[\s/])podman\s+(?:exec|attach|run)\s/] },
+    { kind: 'kubectl', regexes: [/(?:^|[\s/])(?:kubectl|oc)\s+exec\s/] },
+    // `ssh host …` (also `/usr/bin/ssh …`). `\s+\S` requires an argument, so
+    // bare `ssh`/`ssh -V` help invocations don't match; the `[\s/]` boundary
+    // keeps `sshd`/`ssh-keygen`/`sshpass` (as the leading token) from matching.
+    // Kept LAST so compound `…ssh…` launchers above win first.
+    { kind: 'ssh', regexes: [/(?:^|[\s/])ssh\s+\S/] },
+]
+
+export function detectRemoteFromCommand (command: string): RemoteKind | null {
+    const match = REMOTE_PATTERNS.find(p => p.regexes.some(r => r.test(command)))
+    return match?.kind ?? null
+}
+
+/**
+ * Best-effort "which host/container/pod are we connected to" from the argv
+ * string, for the L0 connection chip. Display-only: a wrong or empty parse just
+ * yields a kind-only chip ("SSH"), never affects status. Naive whitespace
+ * tokenizer — good enough for a label, not a shell parser.
+ */
+export function parseRemoteTarget (kind: RemoteKind, command: string): string | null {
+    const launchers: Record<RemoteKind, RegExp> = {
+        ssh: /(?:^|[\s/])ssh\s+/,
+        mosh: /(?:^|[\s/])mosh(?:-client)?\s+/,
+        docker: /(?:^|[\s/])docker\s+(?:exec|attach|run)\s+/,
+        podman: /(?:^|[\s/])podman\s+(?:exec|attach|run)\s+/,
+        kubectl: /(?:^|[\s/])(?:kubectl|oc)\s+exec\s+/,
+        tsh: /(?:^|[\s/])tsh\s+(?:ssh|exec)\s+/,
+        telnet: /(?:^|[\s/])telnet\s+/,
+        serial: /$^/, // never (serial has no argv target — uses the profile)
+    }
+    const lm = launchers[kind].exec(command)
+    if (!lm) return null
+    const toks = command.slice(lm.index + lm[0].length).split(/\s+/).filter(Boolean)
+    // Flags that consume the NEXT token as their value (superset across kinds —
+    // a false skip only ever drops one extra token before the destination).
+    const valueFlags = new Set([
+        '-p', '-i', '-l', '-o', '-F', '-b', '-c', '-m', '-e', '-J', '-w', '-W',
+        '-L', '-R', '-D', '-Q', '-u', '-n', '--name', '--user', '--workdir',
+        '--namespace', '--container', '--env', '--cluster',
+    ])
+    for (let i = 0; i < toks.length; i++) {
+        const t = toks[i]
+        if (t === '--') break // docker/kubectl: the destination is BEFORE `--`
+        if (t.startsWith('-')) {
+            if (!t.includes('=') && valueFlags.has(t)) i++
+            continue
+        }
+        // An absolute path is a flag VALUE whose flag we didn't recognise (e.g.
+        // `docker run -v /a:/b ubuntu`, `ssh -i /key host`), never a
+        // host/container/pod/image. Skip it rather than mislabel the chip — a
+        // wrong target is worse than a kind-only chip ("show only what's certain").
+        if (t.startsWith('/')) continue
+        return t // first non-flag token = destination (user@host / container / pod)
+    }
+    return null
+}
+
+/**
+ * Connection identity for a MANAGED connectable tab (SSH/Telnet/Serial profile)
+ * — authoritative and flicker-free (no process to poll). Returns null for a
+ * plain local tab. Shape duck-typed off the tab's `profile`, same pattern as
+ * split-shell.service.ts. Display-only.
+ */
+export function remoteFromProfile (inner: BaseTabComponent): { kind: RemoteKind; target: string | null } | null {
+    const profile = (inner as unknown as { profile?: { type?: string; name?: string; options?: any } }).profile
+    const ptype = profile?.type
+    if (ptype !== 'ssh' && ptype !== 'telnet' && ptype !== 'serial') return null
+    const opts = profile?.options ?? {}
+    let target: string | null
+    if (ptype === 'serial') {
+        target = opts.port ?? profile?.name ?? null
+    } else if (opts.host) {
+        target = opts.user ? `${opts.user}@${opts.host}` : String(opts.host)
+    } else {
+        target = profile?.name ?? null
+    }
+    return { kind: ptype, target }
+}
+
 export interface TabState {
     /** Outer tab in app.tabs[]. Pass to AppService.selectTab() to focus. */
     outerTab: BaseTabComponent
@@ -256,6 +356,19 @@ export interface TabState {
     status: TabStatus
     /** Best-effort cwd of the shell session. Display only. */
     cwd: string | null
+    /**
+     * Remote connection kind for a tab whose work runs OFF the local process
+     * tree — `ssh`/`telnet`/`serial` (a managed connectable profile) or
+     * `ssh`/`docker`/`kubectl`/… (a manual remote-entry command typed into a
+     * local shell). Null for a plain local tab. Display only — drives the
+     * connection chip ("SSH · user@host"); never affects status.
+     */
+    remoteKind: string | null
+    /**
+     * Best-effort target for the connection chip: `user@host`, container, pod,
+     * or serial port. Null when unparseable — the chip then shows the kind only.
+     */
+    remoteTarget: string | null
     /** ms since the last hook event for this tab — null if no event yet. */
     lastActiveMs: number | null
     /**
@@ -396,6 +509,14 @@ export class TabMonitor implements OnDestroy {
      *  process-probe outage (snapshot empty AND command-read empty). Bounds the
      *  hold so a permanently wedged `ps` can't pin a dead agent forever. */
     private aiDetectMisses = new WeakMap<BaseTabComponent, number>()
+    /**
+     * Hysteresis for MANUAL remote-entry (`ssh`/`docker`/…) detection — mirror
+     * of {@link aiDetectCache}. Holds the last detection while its pid is still
+     * in the process snapshot, so a single missed `ps` command-read doesn't
+     * flicker the connection chip for one tick. Process-path only; managed
+     * connectable tabs read their profile (no pid, no flicker).
+     */
+    private remoteDetectCache = new WeakMap<BaseTabComponent, { kind: string; target: string | null; pid: number }>()
     /**
      * Per-tab cache of the REAL `GLANCETERM_TAB_ID` read from the running
      * PTY process's environment block. Authoritative over `sess.glancetermTabId`
@@ -777,11 +898,59 @@ export class TabMonitor implements OnDestroy {
             void this.installer.installFor(aiTool)
         }
 
-        // 3. CWD (display only).
+        // 3. CWD (display only). For an SSH tab `sess.reportedCWD` is the REMOTE
+        //    shell's cwd as reported via OSC 7 / OSC 1337 (rides back over the
+        //    connection) — the one zero-config way to surface a remote path.
         let cwd: string | null = typeof sess.reportedCWD === 'string' && sess.reportedCWD
             ? sess.reportedCWD : null
         if (!cwd && typeof sess.getWorkingDirectory === 'function') {
             try { cwd = await withTimeout(Promise.resolve(sess.getWorkingDirectory()), PTY_IPC_TIMEOUT_MS, null) } catch { /* swallow */ }
+        }
+
+        // 3b. Remote connection identity (display only; never affects status).
+        //     Managed connectable tabs (SSH/Telnet/Serial) read their profile —
+        //     authoritative and flicker-free (Tabby dials the remote itself, so
+        //     there's no local `ssh` process to poll). A plain local shell whose
+        //     foreground program is `ssh`/`docker exec`/… is detected from the
+        //     SAME realCmds already fetched above (free), with a one-tick
+        //     hysteresis hold so a missed command-read doesn't drop the chip.
+        let remoteKind: string | null = null
+        let remoteTarget: string | null = null
+        const managedRemote = remoteFromProfile(t.inner)
+        if (managedRemote) {
+            remoteKind = managedRemote.kind
+            remoteTarget = managedRemote.target
+        } else if (!aiTool) {
+            // Scan the foreground leader + ancestors + DIRECT children. A typed
+            // `ssh host` / `docker exec -it` runs as a direct CHILD of the shell
+            // (truePid IS the shell), so children MUST be included or the chip
+            // never shows for the headline "I just ssh'd somewhere" case — same
+            // reason the AI path scans children. False positives stay bounded: a
+            // `git pull` / `rsync` / `scp` spawns its `ssh` as a GRANDCHILD
+            // (absent from direct `children`), and git/rsync/scp themselves
+            // aren't in REMOTE_PATTERNS — so neither can flash a bogus chip.
+            const remoteCandidatePids: number[] = []
+            if (truePid !== null) {
+                remoteCandidatePids.push(truePid)
+                for (const a of ancestorsOf(truePid, snapshot, 6)) remoteCandidatePids.push(a)
+            }
+            for (const c of children) remoteCandidatePids.push(c.pid)
+            let remotePid: number | null = null
+            for (const pid of remoteCandidatePids) {
+                const real = realCmds.get(pid)
+                if (!real) continue
+                const rk = detectRemoteFromCommand(real)
+                if (rk) { remoteKind = rk; remoteTarget = parseRemoteTarget(rk, real); remotePid = pid; break }
+            }
+            const prevR = this.remoteDetectCache.get(t.inner)
+            if (remoteKind && remotePid !== null) {
+                this.remoteDetectCache.set(t.inner, { kind: remoteKind, target: remoteTarget, pid: remotePid })
+            } else if (prevR && snapshot.pidParent.has(prevR.pid)) {
+                remoteKind = prevR.kind
+                remoteTarget = prevR.target
+            } else {
+                this.remoteDetectCache.delete(t.inner)
+            }
         }
 
         // 4. Decide status. The new pipeline pivots on whether (a) an AI tool
@@ -969,6 +1138,8 @@ export class TabMonitor implements OnDestroy {
             aiPid,
             aiCommandLine,
             cwd,
+            remoteKind,
+            remoteTarget,
             status,
             lastActiveMs,
             awaitingFirstEvent,
@@ -1297,6 +1468,11 @@ export class TabMonitor implements OnDestroy {
         this.bgConfirmedPids.delete(t.inner)
         const sess: { glancetermTabId?: string } | undefined =
             (t.inner as unknown as { session?: { glancetermTabId?: string } }).session
+        // A managed connectable tab (SSH/Telnet/Serial) keeps its connection
+        // chip even with no live session (restored / disconnected) — the
+        // profile is still readable, so the row reads "SSH · host" rather than
+        // a bare "(tab)". Manual remote-entry has no process here, so null.
+        const remoteInfo = remoteFromProfile(t.inner)
         return {
             outerTab: t.outer,
             innerTab: t.inner,
@@ -1306,6 +1482,8 @@ export class TabMonitor implements OnDestroy {
             aiPid: null,
             aiCommandLine: null,
             cwd: null,
+            remoteKind: remoteInfo?.kind ?? null,
+            remoteTarget: remoteInfo?.target ?? null,
             status: TabStatus.NoAi,
             lastActiveMs: null,
             awaitingFirstEvent: false,
