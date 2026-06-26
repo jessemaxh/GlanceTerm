@@ -243,8 +243,15 @@ jobs:
           path: feeds/x86_64
       - name: Merge per-arch latest-mac.yml into one feed
         run: |
-          npm install js-yaml@4 --no-save --no-audit --no-fund
-          node scripts/merge-mac-feed.mjs feeds/arm64/latest-mac.yml feeds/x86_64/latest-mac.yml > latest-mac.yml
+          # Install js-yaml in an ISOLATED scratch dir. A bare `npm install` in
+          # the repo root resolves the WHOLE dep tree and fails on the repo's
+          # pre-existing peer-dep conflict (pug@3 vs pug-loader's pug@^2) → the
+          # merge never ran (v0.3.0). Copy the merge script into the scratch dir
+          # so its ESM `import 'js-yaml'` resolves from that local node_modules.
+          mkdir -p /tmp/feedtool
+          cp scripts/merge-mac-feed.mjs /tmp/feedtool/
+          (cd /tmp/feedtool && npm init -y >/dev/null 2>&1 && npm install js-yaml@4 --no-audit --no-fund >/dev/null)
+          node /tmp/feedtool/merge-mac-feed.mjs "$PWD/feeds/arm64/latest-mac.yml" "$PWD/feeds/x86_64/latest-mac.yml" > latest-mac.yml
           echo "----- merged latest-mac.yml -----"; cat latest-mac.yml
       - name: Attach merged feed to the release
         env:
