@@ -7,15 +7,15 @@
   resolved "https://registry.yarnpkg.com/@types/marked/-/marked-5.0.1.tgz#15acd796d722b91bf00738c8c8539aaf5034f0c6"
   integrity sha512-Y3pAUzHKh605fN6fvASsz5FDSWbZcs/65Q6xYRmnIP9ZIYz27T4IOmXfH9gWJV1dpi7f1e7z7nBGUTx/a0ptpA==
 
-marked@^5.1.2:
-  version "5.1.2"
-  resolved "https://registry.yarnpkg.com/marked/-/marked-5.1.2.tgz#62b5ccfc75adf72ca3b64b2879b551d89e77677f"
-  integrity sha512-ahRPGXJpjMjwSOlBoTMZAK7ATXkli5qCPxZ21TG44rx1KEo44bii4ekgTDQPNRQ4Kh7JMb9Ub1PVk1NxRSsorg==
+marked@^18.0.5:
+  version "18.0.5"
+  resolved "https://registry.yarnpkg.com/marked/-/marked-18.0.5.tgz#c229c0ac6ad1e275ae8e5037c6168f76d2f42e61"
+  integrity sha512-S6GcvALHg6K4ohtu4E7x0a1AqhAjp6cV8KhLSyN9qVapnzJkusVBxZRcIU9AeYsbe6P1hKDusSbEOzGyyuce6w==
 
-ngx-infinite-scroll@^16:
-  version "16.0.0"
-  resolved "https://registry.yarnpkg.com/ngx-infinite-scroll/-/ngx-infinite-scroll-16.0.0.tgz#287b48898bc291a0e7c5b3344cf337d7ac82e2dd"
-  integrity sha512-bzyNYd+wVlUUxcopRVr2DAa81eEc8vITtKVvb+c7R1uy8hWPTlxOEXf3L1qA4FMwTEzCQ9b37TXzlJji3qBy+A==
+ngx-infinite-scroll@^21:
+  version "21.0.0"
+  resolved "https://registry.yarnpkg.com/ngx-infinite-scroll/-/ngx-infinite-scroll-21.0.0.tgz#fb01a67e60662e410a3cb38c0d05fae0c1102458"
+  integrity sha512-bm1hCB7aoO9zyiNZBBOLHx9t+cwk/tLiFG5eQB8pWiNup6I2eQiHoT5B2gqlJjj4GfuER5phy5AIWl/B7YiwSQ==
   dependencies:
     tslib "^2.3.0"
 
