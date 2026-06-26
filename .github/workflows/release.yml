@@ -19,22 +19,20 @@ name: Release
 # review on main" blocks CI from direct-pushing a version bump, but a PR the
 # maintainer approves + merges is exactly the supported path.
 #
-# Platforms (all x64 unless noted): macOS arm64 + macOS x64 (both Apple-signed +
-# notarized; x64 is CROSS-COMPILED on the arm64 runner), Linux x64
+# Platforms: macOS arm64 (Apple-signed + notarized), Linux x64
 # (AppImage/deb/rpm/pacman/tar.gz, unsigned), Windows x64
 # (NSIS .exe + portable .zip, UNSIGNED → SmartScreen "unknown publisher" warning).
-# RELEASE=1 stamps the release-please-bumped app/package.json version. Each
-# non-macOS build is gated by a headless launch smoke test (Electron must come up)
-# — a platform that fails to launch is simply not attached, the rest still ship.
-# macOS needs no separate smoke: build-macos.mjs's afterPack asar self-check
-# already catches the "shipped without node_modules" crash at build time.
+# RELEASE=1 stamps the release-please-bumped app/package.json version. Every build
+# is gated by a launch smoke test — a platform that fails to launch is simply not
+# attached, the rest still ship. macOS uses a CDP renderer-bootstrap smoke (a
+# splash hang leaves the process + CDP up while the UI never loads — exactly how
+# v0.3.0 shipped broken); Linux/Windows use a lighter "process/CDP up" smoke.
 #
-# Intel macOS (x64): RE-ADDED 2026-06-24 by CROSS-COMPILING on the arm64 runner
-# (ARCH=x86_64) — sidesteps the scarce/deprecated hosted Intel runners (macos-13)
-# that made us drop it on 2026-06-22. node-pty ships darwin-x64 prebuilds, keytar
-# et al. rebuild for x64; verified launching under Rosetta locally. Best-effort:
-# NOT yet tested on real Intel hardware (no Intel Mac on hand). The Homebrew cask
-# stays arm64-only for now — Intel users grab the macos-x86_64.dmg directly.
+# Intel macOS (x64): DROPPED 2026-06-26. The arm64-runner cross-compile produced
+# an app that launches but hangs on the splash (its native modules aren't really
+# x64), and there's no hosted Intel runner to build/validate it properly — so the
+# binary would ship broken. arm64 is the only macOS target. (Earlier 2026-06-24
+# cross-compile + per-arch feed-merge machinery is in git history if ever revived.)
 #
 # ── Planned (DEFERRED) ────────────────────────────────────────────────────
 # Windows pinned to windows-2022 (windows-latest ships VS 18, which node-gyp 11.x
@@ -69,12 +67,6 @@ jobs:
           - name: macOS arm64
             os: macos-latest
             arch: arm64
-          # Intel mac, CROSS-COMPILED on the same arm64 runner (no scarce Intel
-          # runner needed) — verified locally under Rosetta. Best-effort: not
-          # tested on real Intel hardware.
-          - name: macOS x64
-            os: macos-latest
-            arch: x86_64
           - name: Linux x64
             os: ubuntu-latest
           - name: Windows x64
@@ -200,72 +192,22 @@ jobs:
           # macOS: .dmg for humans PLUS the electron-updater zip (Squirrel.Mac
           # updates from the zip, not the dmg) and its .blockmap. The mac zip is
           # `*-macos-*.zip`, distinct from Windows' `*-portable-*.zip`.
-          # NOTE: latest-mac.yml is deliberately NOT uploaded here — each arch
-          # emits one with the same name; it's stashed as an artifact AFTER this
-          # step and merged into a single feed by the publish-mac-feed job.
+          # NOTE: latest-mac.yml is uploaded by the NEXT step, after these
+          # installers, so the auto-update feed never points at zips not yet up.
           # Linux: all package formats. Windows: setup .exe + portable .zip.
           files=(dist/*.dmg dist/*-macos-*.zip dist/*-macos-*.zip.blockmap dist/*.AppImage dist/*.deb dist/*.rpm dist/*.pacman dist/*.tar.gz dist/*.exe dist/*-portable-*.zip)
           echo "uploading: ${files[*]}"
           gh release upload "${{ needs.release-please.outputs.tag_name }}" "${files[@]}" --clobber
 
-      # macOS only: stash THIS arch's latest-mac.yml as a CI artifact for the
-      # publish-mac-feed job to merge. CRITICAL ordering: this runs AFTER the
-      # upload above, so if `gh release upload` fails (network/perms/GitHub), the
-      # job stops here and the artifact is never produced — publish-mac-feed then
-      # can't publish a feed pointing at zips that never reached the release
-      # (which would 404 → broken auto-update). Both arch jobs emit the same
-      # filename, hence the per-arch artifact + later merge.
-      - name: Stash macOS update manifest (only after installers upload)
+      # macOS only: upload latest-mac.yml LAST — after the installers above are on
+      # the release. electron-updater's GitHub provider fetches exactly this file;
+      # uploading it after the zips ensures the feed never points at a zip that
+      # isn't there yet (which would 404 → broken auto-update). The build is
+      # single-arch (arm64), so this file is already the final feed — no per-arch
+      # merge needed. (If Intel/x64 is ever re-added, restore the stash +
+      # merge-mac-feed.mjs job from git history.)
+      - name: Attach macOS update feed (after installers)
         if: startsWith(matrix.os, 'macos')
-        uses: actions/upload-artifact@v4
-        with:
-          name: mac-feed-${{ matrix.arch }}
-          path: dist/latest-mac.yml
-          if-no-files-found: error
-
-  # Combine the per-arch latest-mac.yml artifacts (stashed by the mac build jobs)
-  # into ONE latest-mac.yml listing both arches' zips, and attach it to the
-  # release. electron-updater's GitHub provider only ever fetches latest-mac.yml;
-  # its MacUpdater then selects arm64 vs x64 by the filename. Runs after the
-  # whole matrix so both arch artifacts exist.
-  publish-mac-feed:
-    name: Publish merged macOS update feed
-    needs: [release-please, build]
-    # `always()` so an UNRELATED matrix leg failing (Linux/Windows build or a
-    # flaky smoke test) doesn't skip the feed — that would leave new Mac
-    # binaries on the release with a stale `latest-mac.yml` and silently break
-    # Mac auto-update. If a mac leg actually failed, its artifact is missing and
-    # download-artifact fails this job (correct: no feed for a broken mac build).
-    if: ${{ always() && needs.release-please.outputs.release_created == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-      - uses: actions/download-artifact@v4
-        with:
-          name: mac-feed-arm64
-          path: feeds/arm64
-      - uses: actions/download-artifact@v4
-        with:
-          name: mac-feed-x86_64
-          path: feeds/x86_64
-      - name: Merge per-arch latest-mac.yml into one feed
-        run: |
-          # Install js-yaml in an ISOLATED scratch dir. A bare `npm install` in
-          # the repo root resolves the WHOLE dep tree and fails on the repo's
-          # pre-existing peer-dep conflict (pug@3 vs pug-loader's pug@^2) → the
-          # merge never ran (v0.3.0). Copy the merge script into the scratch dir
-          # so its ESM `import 'js-yaml'` resolves from that local node_modules.
-          mkdir -p /tmp/feedtool
-          cp scripts/merge-mac-feed.mjs /tmp/feedtool/
-          (cd /tmp/feedtool && npm init -y >/dev/null 2>&1 && npm install js-yaml@4 --no-audit --no-fund >/dev/null)
-          node /tmp/feedtool/merge-mac-feed.mjs "$PWD/feeds/arm64/latest-mac.yml" "$PWD/feeds/x86_64/latest-mac.yml" > latest-mac.yml
-          echo "----- merged latest-mac.yml -----"; cat latest-mac.yml
-      - name: Attach merged feed to the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" latest-mac.yml --clobber
+        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" dist/latest-mac.yml --clobber
