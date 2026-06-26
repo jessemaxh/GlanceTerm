@@ -113,11 +113,23 @@ jobs:
         run: RELEASE=1 ARCH=${{ matrix.arch }} npm run dmg:mac
         env:
           REQUIRE_SIGNED: '1'
+          KEEP_DIR_BUILD: '1'   # keep the unpacked .app so the launch smoke can run it
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      # A "process up" check (like the Linux/Windows smokes below) does NOT catch
+      # a SPLASH HANG — the main process + CDP stay alive while the renderer never
+      # bootstraps (exactly how v0.3.0 shipped broken). This probes the renderer
+      # DOM via CDP and FAILS the build if the app never reaches the app UI.
+      - name: macOS — launch smoke (renderer bootstraps, not just process up)
+        if: matrix.os == 'macos-latest'
+        run: |
+          APP=$(find dist -maxdepth 2 -name 'GlanceTerm.app' -type d | head -1)
+          echo "smoke target: $APP"
+          node scripts/mac-launch-smoke.mjs "$APP"
 
       - name: Build Linux
         if: matrix.os == 'ubuntu-latest'

@@ -53,6 +53,7 @@ jobs:
         if: matrix.os == 'macos-latest'
         run: RELEASE=1 npm run dmg:mac
         env:
+          KEEP_DIR_BUILD: '1'   # keep the unpacked .app for the launch smoke
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
@@ -83,6 +84,17 @@ jobs:
             dist/*.exe
             dist/*.zip
           if-no-files-found: warn
+
+      # Runs AFTER upload so the clean-CI .dmg is captured for inspection even
+      # when this fails. Detects a splash-hang (renderer never bootstraps) — the
+      # failure mode that shipped as 0.3.0. ELECTRON_ENABLE_LOGGING is on inside
+      # the smoke, so a clean CI run prints the REAL renderer error here.
+      - name: macOS — launch smoke (renderer bootstraps, not just process up)
+        if: matrix.os == 'macos-latest'
+        run: |
+          APP=$(find dist -maxdepth 2 -name 'GlanceTerm.app' -type d | head -1)
+          echo "smoke target: $APP"
+          node scripts/mac-launch-smoke.mjs "$APP"
 
   publish:
     needs: build
