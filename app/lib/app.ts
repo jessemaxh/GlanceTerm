@@ -145,9 +145,13 @@ export class Application {
      *  process-global notifications (e.g. the auto-updater) that must surface
      *  exactly once regardless of how many windows are open. */
     sendToActiveWindow (event: string, ...args: any[]): void {
-        const target = this.windows.find(x => x.isFocused())
-            ?? this.windows.find(x => x.isMainWindow)
-            ?? this.windows[0]
+        // Filter destroyed windows (mirrors `send` above) — a window can be in
+        // the list with its webContents torn down between `close` and `closed`,
+        // and `webContents.send` on a destroyed window throws.
+        const live = this.windows.filter(x => !x.isDestroyed())
+        const target = live.find(x => x.isFocused())
+            ?? live.find(x => x.isMainWindow)
+            ?? live[0]
         target?.send(event, ...args)
     }
 

@@ -211,7 +211,12 @@ jobs:
   publish-mac-feed:
     name: Publish merged macOS update feed
     needs: [release-please, build]
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    # `always()` so an UNRELATED matrix leg failing (Linux/Windows build or a
+    # flaky smoke test) doesn't skip the feed — that would leave new Mac
+    # binaries on the release with a stale `latest-mac.yml` and silently break
+    # Mac auto-update. If a mac leg actually failed, its artifact is missing and
+    # download-artifact fails this job (correct: no feed for a broken mac build).
+    if: ${{ always() && needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

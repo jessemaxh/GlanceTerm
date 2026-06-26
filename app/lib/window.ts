@@ -521,12 +521,27 @@ export class Window {
         autoUpdater.on('update-available', () => app.sendToActiveWindow('updater:update-available'))
         autoUpdater.on('update-not-available', () => app.sendToActiveWindow('updater:update-not-available'))
         autoUpdater.on('error', err => app.sendToActiveWindow('updater:error', err))
-        autoUpdater.on('update-downloaded', () => app.sendToActiveWindow('updater:update-downloaded'))
+        // Track whether an update is actually staged, so a stray
+        // `updater:quit-and-install` (any window can send it) is a no-op rather
+        // than registering a dangling native listener on each call.
+        let updateStaged = false
+        autoUpdater.on('update-downloaded', () => {
+            updateStaged = true
+            app.sendToActiveWindow('updater:update-downloaded')
+        })
 
         // App-global actions — register on ipcMain once so ANY window can drive
         // them (not via this.on, which is scoped to one window's sender).
-        ipcMain.on('updater:check-for-updates', () => autoUpdater.checkForUpdates())
-        ipcMain.on('updater:quit-and-install', () => autoUpdater.quitAndInstall())
+        // checkForUpdates() rethrows after emitting 'error' on a failed feed
+        // fetch; swallow the rejection so an offline/404 tick can't become an
+        // unhandledRejection — the 'error' event above still reaches the
+        // renderer for logging (fail-open).
+        ipcMain.on('updater:check-for-updates', () => void autoUpdater.checkForUpdates().catch(() => { /* surfaced via the 'error' event */ }))
+        ipcMain.on('updater:quit-and-install', () => {
+            if (updateStaged) {
+                autoUpdater.quitAndInstall()
+            }
+        })
     }
 
     private destroy () {
