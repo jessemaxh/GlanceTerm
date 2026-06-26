@@ -224,6 +224,25 @@ if (process.env.GITHUB_HEAD_REF) {
 process.env.APPLE_ID ??= process.env.APPSTORE_USERNAME
 process.env.APPLE_APP_SPECIFIC_PASSWORD ??= process.env.APPSTORE_PASSWORD
 
+// In a real release (the CI release workflow sets REQUIRE_SIGNED=1) we must NOT
+// silently fall back to ad-hoc signing. An ad-hoc/unsigned .app attached to the
+// GitHub release is Gatekeeper-blocked on download AND becomes the trust anchor
+// that auto-update verifies every FUTURE update against — so a single
+// missing/expired secret could pin users to an unsignable identity. Fail loudly
+// (here, before any build work) instead of shipping unsigned. Local/test builds
+// leave REQUIRE_SIGNED unset and keep the ad-hoc path.
+if (process.env.REQUIRE_SIGNED === '1') {
+    const missing = ['CSC_LINK', 'APPLE_TEAM_ID', 'APPLE_ID', 'APPLE_APP_SPECIFIC_PASSWORD']
+        .filter(k => !process.env[k])
+    if (missing.length) {
+        console.error(`\n  ✖ REQUIRE_SIGNED=1 but signing secrets are missing: ${missing.join(', ')}`)
+        console.error('  A release build must be Developer-ID signed + notarized; refusing to')
+        console.error('  produce an ad-hoc/unsigned artifact. Configure the repo secrets, or')
+        console.error('  unset REQUIRE_SIGNED for a local/test build.\n')
+        process.exit(1)
+    }
+}
+
 // Without CSC_LINK we want ad-hoc signing — runs locally without Gatekeeper
 // nagging the developer, and avoids electron-builder's keychain
 // auto-discovery silently picking the wrong cert. electron-builder 26 no
@@ -387,6 +406,23 @@ builder({
     // is rejected by Gatekeeper ("no usable signature") on download even
     // though the .app inside is fine. Close that gap before anything else.
     await signNotarizeStapleDmg()
+    // Final integrity gate before artifacts can be uploaded: assert the
+    // signed+notarized .app (the same bytes inside BOTH the .dmg and the
+    // auto-update .zip) actually verifies. A mis-signed app passes the build but
+    // Gatekeeper-blocks on download and Squirrel.Mac rejects on auto-update.
+    // Ad-hoc/local builds skip this — they can't pass spctl.
+    if (!adHocSign) {
+        const appPath = path.join('dist', `mac-${process.env.ARCH === 'x86_64' ? 'x64' : process.env.ARCH}`, 'GlanceTerm.app')
+        if (fs.existsSync(appPath)) {
+            // codesign --verify is the assertion that matters for auto-update:
+            // Squirrel.Mac validates the downloaded .app's CODE SIGNATURE against
+            // the running app, not its Gatekeeper/notarization status. (Download
+            // notarization is asserted on the stapled .dmg below — offline-valid,
+            // no flaky online spctl lookup on a possibly-unstapled .app.)
+            console.log(`  • verifying code signature of ${appPath}`)
+            execFileSync('codesign', ['--verify', '--deep', '--strict', '--verbose=2', appPath], { stdio: 'inherit' })
+        }
+    }
     // The .dmg and .zip already contain a copy of GlanceTerm.app; keeping the
     // loose `dist/mac-arm64/GlanceTerm.app` around just makes LaunchServices
     // index it alongside `/Applications/GlanceTerm.app`, which leaves Launchpad
@@ -478,6 +514,12 @@ async function signNotarizeStapleDmg () {
             { stdio: 'inherit' })
             console.log(`  • stapling dmg ${dmg}`)
             execFileSync('xcrun', ['stapler', 'staple', dmgPath], { stdio: 'inherit' })
+            // Assert the wrapper is genuinely signed + notarized + stapled, so a
+            // silent no-op above can't let an unverifiable dmg into a release.
+            // spctl reads the stapled ticket (offline-valid); both fail closed.
+            console.log(`  • verifying Gatekeeper acceptance of ${dmg}`)
+            execFileSync('codesign', ['--verify', '--strict', '--verbose=2', dmgPath], { stdio: 'inherit' })
+            execFileSync('spctl', ['--assess', '--type', 'open', '--context', 'context:primary-signature', '-v', dmgPath], { stdio: 'inherit' })
         }
     } finally {
         if (prevSearch) { try { sec(['list-keychains', '-d', 'user', '-s', ...prevSearch]) } catch { /* best-effort */ } }

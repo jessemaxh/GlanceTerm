@@ -104,10 +104,15 @@ jobs:
       - name: Install dependencies
         run: yarn install --network-timeout 1000000
 
-      - name: Build macOS (signed + notarized when secrets present)
+      # REQUIRE_SIGNED=1 makes the build hard-fail (rather than ad-hoc fall back)
+      # if any signing secret is missing — a release must be Developer-ID signed
+      # + notarized, both for Gatekeeper and because it's the auto-update trust
+      # anchor. The build also asserts codesign/spctl on the .app and .dmg.
+      - name: Build macOS (signed + notarized — REQUIRED for release)
         if: matrix.os == 'macos-latest'
         run: RELEASE=1 ARCH=${{ matrix.arch }} npm run dmg:mac
         env:
+          REQUIRE_SIGNED: '1'
           CSC_LINK: ${{ secrets.CSC_LINK }}
           CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
