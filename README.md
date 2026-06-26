@@ -108,15 +108,6 @@ when babysitting many agents. **Off by default.** When on, Claude can run
 - **Don't enable** in your main repo, near credentials, or where `sudo` is
   passwordless. Use a container / scratch dir / disposable VM.
 
-## Compared to others
-
-| | GlanceTerm | HiveTerm | Agent&nbsp;Deck |
-|--|--|--|--|
-| Form | GUI terminal + sidebar | GUI terminal + split panes | tmux + TUI |
-| Setup | open app, allow hook | install + write `hive.yml` | `agent-deck add` per session |
-| Workflow change | **none** — keep typing `claude` | new layout | launch every session via the tool |
-| Cost | **Free, MIT** | $99/yr Pro | Free |
-
 ## Build from source
 
 Prereqs: Node 22, [yarn](https://yarnpkg.com).
