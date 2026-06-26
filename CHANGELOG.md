@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.0...v0.3.1) (2026-06-26)
+
+
+### Bug Fixes
+
+* **build:** stop bundling npm@6's https-proxy-agent@2 into plugins (0.3.0 splash hang) ([c8902f8](https://github.com/jessemaxh/GlanceTerm/commit/c8902f8c7656d89e2a9d349c4b8613f4a6dca889))
+
 ## [0.3.0](https://github.com/jessemaxh/GlanceTerm/compare/v0.2.0...v0.3.0) (2026-06-26)
 
 
