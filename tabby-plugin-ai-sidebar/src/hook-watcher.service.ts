@@ -93,6 +93,20 @@ interface HookStatusFile {
      *  subagent is live until a SubagentStop with matching `agent_id`
      *  arrives. Empty on every other event. */
     spawn_agent_id?: string
+    /** Second authoritative spawn source, complementing {@link spawn_agent_id}.
+     *  Set by the handler on `PostToolUse(SendMessage)` to `tool_input.to`
+     *  (the messaged subagent's id) ONLY when the tool result confirms the
+     *  agent "resumed from transcript in the background" — i.e. a dormant
+     *  background subagent was woken by a message and is running again. This
+     *  path fires NO `spawn_agent_id` (SendMessage isn't the Agent tool), so
+     *  without it the resumed subagent's work is invisible and the row drops
+     *  to idle while it runs. Treated like a spawn but WITHOUT the tombstone
+     *  guard (a resume is a distinct, explicit signal, not the ~2s-late
+     *  PostToolUse(Agent) echo the tombstone defends against). Drains via the
+     *  same `SubagentStop(agent_id=to)` the resumed agent fires on completion.
+     *  Empty on every other event / on the "Message queued" result (agent was
+     *  already active → already counted). Older log lines lack the field. */
+    resumed_agent_id?: string
     /** Active model slug (e.g. `gpt-5.5`, `claude-opus-4-8`). Codex emits it
      *  on every hook event; Claude only on SessionStart; empty otherwise. The
      *  watcher keeps the last NON-EMPTY value per tab (see processEvent), so a
@@ -231,6 +245,7 @@ const HOOK_LOG_RETENTION_MS = 7 * 24 * 60 * 60_000
  */
 export type SubagentEvent =
     | { kind: 'spawn'; agentId: string }
+    | { kind: 'resume'; agentId: string }
     | { kind: 'stop'; agentId: string }
     | { kind: 'reset' }
 
@@ -242,12 +257,16 @@ export type SubagentEvent =
  * pairing semantics can be unit-tested without standing up the DI graph.
  *
  * Semantics:
- *   - `spawn`: add `agentId` to the set. Idempotent — re-adding an id
- *     already present is a no-op (returns the same reference). The
- *     processEvent caller emits this ONLY for the authoritative spawn
- *     signal (PostToolUse(Agent/Task).spawn_agent_id); a bare top-level
- *     agent_id no longer creates an id here — see processEvent for why
- *     that "passive liveness" path leaked orphan subagents.
+ *   - `spawn` / `resume`: add `agentId` to the set. Idempotent — re-adding
+ *     an id already present is a no-op (returns the same reference). Both
+ *     kinds add identically here; they differ only in the caller's tombstone
+ *     policy (`spawn` is tombstone-guarded against the ~2s-late
+ *     PostToolUse(Agent) echo, `resume` is not — see processEvent). The
+ *     processEvent caller emits `spawn` ONLY for the authoritative spawn
+ *     signal (PostToolUse(Agent/Task).spawn_agent_id) and `resume` ONLY for
+ *     the SendMessage-wake signal (PostToolUse(SendMessage).resumed_agent_id);
+ *     a bare top-level agent_id no longer creates an id here — see processEvent
+ *     for why that "passive liveness" path leaked orphan subagents.
  *   - `stop`: remove `agentId` from the set. No-op (identity-preserving)
  *     if the id wasn't tracked — that's how we drop "phantom" SubagentStop
  *     events Claude Code fires for subagents we never observed spawning
@@ -265,7 +284,7 @@ export function reduceSubagentSet (
     ev: SubagentEvent,
 ): ReadonlySet<string> {
     if (ev.kind === 'reset') return set.size === 0 ? set : new Set()
-    if (ev.kind === 'spawn') {
+    if (ev.kind === 'spawn' || ev.kind === 'resume') {
         if (set.has(ev.agentId)) return set
         const next = new Set(set)
         next.add(ev.agentId)
@@ -1105,6 +1124,21 @@ export class HookWatcherService implements OnDestroy {
             ) {
                 events.push({ kind: 'spawn', agentId: parsed.spawn_agent_id })
             }
+            // RESUME: the main agent SendMessaged a dormant background subagent
+            // and Claude woke it "from transcript in the background". The handler
+            // set resumed_agent_id = tool_input.to ONLY on that confirmed-resume
+            // result (not on "Message queued", which means already-active). It is
+            // a second authoritative add source alongside spawn_agent_id, but it
+            // BYPASSES the tombstone (applied below) — a resume is a distinct
+            // explicit signal, not the late PostToolUse(Agent) echo. It drains
+            // via the same SubagentStop(agent_id=to) the resumed agent fires.
+            if (
+                parsed.event === 'PostToolUse'
+                && parsed.tool_name === 'SendMessage'
+                && parsed.resumed_agent_id
+            ) {
+                events.push({ kind: 'resume', agentId: parsed.resumed_agent_id })
+            }
             // STOP: a subagent's turn ends with EITHER `SubagentStop` (normal) or
             // `StopFailure` (abnormal — interrupt / stream timeout / error), both
             // carrying the subagent's agent_id. A stop for an id we never spawned
@@ -1143,10 +1177,13 @@ export class HookWatcherService implements OnDestroy {
                 // `reset` clears the per-tab tombstone alongside the live
                 // set, since SessionStart/End drops all prior state.
                 const tomb = this.subagentTombstones.get(parsed.tab_id)
+                const short = parsed.tab_id.slice(0, 8)
                 for (const ev of events) {
                     if (ev.kind === 'reset') {
                         this.subagentTombstones.delete(parsed.tab_id)
+                        const before = next
                         next = reduceSubagentSet(next, ev)
+                        if (next !== before) debugLog.log('debug', 'subagent', `${short} reset → ${next.size}`)
                         continue
                     }
                     if (ev.kind === 'stop') {
@@ -1159,7 +1196,38 @@ export class HookWatcherService implements OnDestroy {
                             if (eventAt - ts > SUBAGENT_TOMBSTONE_TTL_MS) t.delete(id)
                         }
                         this.subagentTombstones.set(parsed.tab_id, t)
+                        const before = next
                         next = reduceSubagentSet(next, ev)
+                        // Log only stops that actually decremented. A stop for an
+                        // id we never tracked is a phantom (Claude fires
+                        // SubagentStop liberally — a heavy workflow run emits
+                        // hundreds), and debugLog is a synchronous appendFileSync
+                        // on this hook hot path, so we deliberately do NOT log
+                        // phantoms. A resume that silently failed to add still
+                        // surfaces: its absent `+resume` line + the on-disk
+                        // `resumed_agent_id:""` are enough to diagnose.
+                        if (next !== before) debugLog.log('debug', 'subagent', `${short} -stop ${ev.agentId.slice(0, 8)} → ${next.size}`)
+                        continue
+                    }
+                    if (ev.kind === 'resume') {
+                        // Authoritative wake of a dormant background subagent via
+                        // SendMessage. Deliberately NOT tombstone-guarded: unlike
+                        // the ~2s-late PostToolUse(Agent) echo the tombstone
+                        // defends against, a resume is a distinct explicit signal
+                        // and can legitimately land within TTL of the agent's
+                        // previous SubagentStop (user reads the output and
+                        // immediately re-messages). Routing it through the spawn
+                        // tombstone would silently drop those quick re-messages.
+                        //
+                        // Safe because SendMessage fires its PostToolUse EXACTLY
+                        // ONCE, synchronously at send — it has no late-duplicate
+                        // echo like the Agent tool. If a future Claude ever fired
+                        // a duplicate AFTER the resumed agent's SubagentStop, that
+                        // late add would re-leak the id (no tombstone to catch
+                        // it); revisit with a tombstone check if that surfaces.
+                        const before = next
+                        next = reduceSubagentSet(next, ev)
+                        if (next !== before) debugLog.log('debug', 'subagent', `${short} +resume ${ev.agentId.slice(0, 8)} → ${next.size}`)
                         continue
                     }
                     // ev.kind === 'spawn'
@@ -1178,9 +1246,12 @@ export class HookWatcherService implements OnDestroy {
                         // Claude version genuinely fires stop+respawn in
                         // the same line, this guard will need a strict
                         // `< TTL` check OR an explicit allowlist.
+                        debugLog.log('debug', 'subagent', `${short} drop-tombstoned-spawn ${ev.agentId.slice(0, 8)} (late echo)`)
                         continue
                     }
+                    const before = next
                     next = reduceSubagentSet(next, ev)
+                    if (next !== before) debugLog.log('debug', 'subagent', `${short} +spawn ${ev.agentId.slice(0, 8)} → ${next.size}`)
                 }
                 if (next !== prev) {
                     if (next.size === 0) this.liveAgentIds.delete(parsed.tab_id)

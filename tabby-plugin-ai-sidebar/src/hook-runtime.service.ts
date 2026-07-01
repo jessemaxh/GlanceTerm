@@ -184,6 +184,47 @@ if [ "\$EVENT" = "PostToolUse" ] && [ "\$TOOL_NAME" = "Agent" ]; then
     SPAWN_AGENT_ID=$(extract agentId)
 fi
 
+# SendMessage resume signal. When the main agent SendMessages a backgrounded
+# subagent whose previous task already finished, Claude "resumes it from
+# transcript in the background" — the subagent runs again, but this goes
+# through the SendMessage tool, NOT the Agent tool, so NO spawn_agent_id fires
+# and the id would never enter HookWatcher's in-flight set. The row then drops
+# to idle/"ready" while the subagent works (observed: one Agent-tool spawn but
+# several SubagentStops as the same id is re-messaged over a session). Capture
+# the target id (tool_input.to) as an authoritative spawn ONLY when the result
+# confirms an actual resume. The alternative result "Message queued for
+# delivery ... at its next tool round" means the agent was ALREADY active
+# (already counted) — we must NOT add on it, so we gate on the resume phrase.
+# The matching SubagentStop(agent_id=to) drains it via the normal stop path,
+# so no TTL/eviction is needed (unlike the removed passive-liveness path).
+#
+# SECURITY-CRITICAL SCOPING: match the resume phrase ONLY inside the tool
+# RESULT, never the whole payload. tool_input.message is main-agent free text;
+# if the phrase there could trigger the add, any SendMessage whose message
+# happens to contain that sentence (while the real result is "Message queued"
+# or an error for a terminated target) would emit resumed_agent_id → an id in
+# the in-flight set with NO decrement path (resume bypasses the tombstone, no
+# TTL) = the orphan leak this whole design exists to prevent. So: flatten
+# newlines (a pretty-printed tool_response would otherwise span lines), then
+# keep only the slice from the real "tool_response" key onward. tool_input
+# precedes it in payload order and is dropped; a message-embedded literal
+# "tool_response" is backslash-escaped (\\"tool_response\\") and can't match the
+# unescaped key pattern. Absent tool_response → empty slice → safe no-match.
+#
+# VERSION-FRAGILE: keys off Claude's English result phrase. If Anthropic
+# rewords it, the resume simply stops being counted — a safe-fail back to the
+# pre-fix under-count, never a leak or a stuck badge. \`to\` is [a-z]+ so it is
+# safe to pass to \`extract\` (see the regex-interpolation caveat there); the
+# real tool_input.to is the FIRST "to":"…" in the payload (message-embedded
+# occurrences are backslash-escaped and don't match), which \`head -1\` takes.
+RESUMED_AGENT_ID=""
+if [ "\$EVENT" = "PostToolUse" ] && [ "\$TOOL_NAME" = "SendMessage" ]; then
+    RESP=$(printf '%s' "\$PAYLOAD" | tr '\\n' ' ' | grep -o '"tool_response".*')
+    if printf '%s' "\$RESP" | grep -q 'resumed from transcript in the background'; then
+        RESUMED_AGENT_ID=$(extract to)
+    fi
+fi
+
 # Monitor task lifecycle. Claude's footer reads "N shell, M monitor": shell
 # is bg-Bash count (already captured via BG above), monitor is the live
 # Monitor-tool task count, decremented when TaskStop fires for that id.
@@ -305,8 +346,8 @@ OUT="\$STATE_DIR/\$TAB_ID.log"
 # other concurrent appenders. Our records are ~250 bytes — well under the
 # limit — so two handler processes firing simultaneously cannot interleave
 # bytes mid-record.
-printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s","ts":%s,"bg":%s,"interrupted":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s","monitor_task_id":"%s","monitor_timeout_ms":%s,"stop_task_id":"%s","model":"%s","auto_approved":%s,"source":"%s"}\\n' \\
-    "\$TAB_ID" "\$AGENT" "\$EVENT" "\$MATCHER" "\$TOOL_NAME" "\$SESSION_ID" "\$CWD" "\$TRANSCRIPT_PATH" "\$TS" "\$BG" "\$INTERRUPTED" "\$AGENT_ID" "\$AGENT_TYPE" "\$SPAWN_AGENT_ID" "\$MONITOR_TASK_ID" "\$MONITOR_TIMEOUT_MS" "\$STOP_TASK_ID" "\$MODEL" "\$AUTO_APPROVED" "\$SOURCE" \\
+printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s","ts":%s,"bg":%s,"interrupted":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s","resumed_agent_id":"%s","monitor_task_id":"%s","monitor_timeout_ms":%s,"stop_task_id":"%s","model":"%s","auto_approved":%s,"source":"%s"}\\n' \\
+    "\$TAB_ID" "\$AGENT" "\$EVENT" "\$MATCHER" "\$TOOL_NAME" "\$SESSION_ID" "\$CWD" "\$TRANSCRIPT_PATH" "\$TS" "\$BG" "\$INTERRUPTED" "\$AGENT_ID" "\$AGENT_TYPE" "\$SPAWN_AGENT_ID" "\$RESUMED_AGENT_ID" "\$MONITOR_TASK_ID" "\$MONITOR_TIMEOUT_MS" "\$STOP_TASK_ID" "\$MODEL" "\$AUTO_APPROVED" "\$SOURCE" \\
     >> "\$OUT" 2>/dev/null
 
 # Auto-approve permission prompts (Claude + Codex). When the user has
@@ -483,6 +524,21 @@ if ([string]$json.hook_event_name -eq "PostToolUse" -and $toolName -eq "Agent") 
     }
 }
 
+# SendMessage resume signal — see HANDLER_SH for the full rationale. Capture
+# tool_input.to as an authoritative spawn ONLY when the result confirms the
+# subagent actually resumed in the background (vs "Message queued" when it was
+# already active). SECURITY-CRITICAL: match the phrase against tool_response
+# .message ONLY — NOT the raw payload / tool_input.message (main-agent free
+# text that could otherwise spoof a resume → an undrainable orphan id; see
+# HANDLER_SH). Native JSON parsing scopes this precisely.
+# VERSION-FRAGILE English phrase; safe-fail to the pre-fix under-count.
+$resumedAgentId = ""
+if ([string]$json.hook_event_name -eq "PostToolUse" -and $toolName -eq "SendMessage") {
+    if ($json.tool_response -and $json.tool_response.message -and ([string]$json.tool_response.message).Contains("resumed from transcript in the background") -and $json.tool_input -and $json.tool_input.to) {
+        $resumedAgentId = [string]$json.tool_input.to
+    }
+}
+
 # Monitor task lifecycle — mirror of the HANDLER_SH block. PowerShell can
 # traverse nested fields directly, so we hit tool_response.taskId /
 # tool_input.task_id without regex. Same dual-casing fallback: try the
@@ -564,6 +620,7 @@ $out = [ordered]@{
     agent_id        = $agentId
     agent_type      = $agentType
     spawn_agent_id  = $spawnAgentId
+    resumed_agent_id = $resumedAgentId
     monitor_task_id = $monitorTaskId
     monitor_timeout_ms = [long]$monitorTimeoutMs
     stop_task_id    = $stopTaskId

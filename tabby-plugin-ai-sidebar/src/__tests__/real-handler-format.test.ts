@@ -44,8 +44,8 @@ import { HookRuntimeService } from '../hook-runtime.service'
 const EXPECTED_KEYS = [
     'tab_id', 'agent', 'event', 'matcher', 'tool_name', 'session_id', 'cwd',
     'transcript_path', 'ts', 'bg', 'interrupted', 'agent_id', 'agent_type',
-    'spawn_agent_id', 'monitor_task_id', 'monitor_timeout_ms', 'stop_task_id',
-    'model', 'auto_approved', 'source',
+    'spawn_agent_id', 'resumed_agent_id', 'monitor_task_id', 'monitor_timeout_ms',
+    'stop_task_id', 'model', 'auto_approved', 'source',
 ].sort()
 
 const TAB_ID = '33333333-3333-4333-8333-333333333333'
@@ -136,6 +136,48 @@ const CASES: Case[] = [
         expects: { event: 'SubagentStop', agent_id: 'a1234567890abcdef', agent_type: 'reviewer' },
     },
     {
+        // SendMessage that WAKES a dormant background subagent — the result
+        // says it resumed, so the handler captures tool_input.to as an
+        // authoritative (tombstone-exempt) spawn. Exercises `extract to` +
+        // the result-phrase grep in the real sh handler.
+        name: 'PostToolUse(SendMessage) resumed in background',
+        agent: 'claude',
+        payload: {
+            hook_event_name: 'PostToolUse', session_id: 's', cwd: '/p', tool_name: 'SendMessage',
+            tool_input: { to: 'a04c31d1166006254', message: 'keep going' },
+            tool_response: { success: true, message: 'Agent "a04c31d1166006254" had no active task; resumed from transcript in the background with your message. You\'ll be notified when it finishes.' },
+        },
+        expects: { event: 'PostToolUse', tool_name: 'SendMessage', resumed_agent_id: 'a04c31d1166006254' },
+    },
+    {
+        // SendMessage to an ALREADY-ACTIVE subagent — the message is queued,
+        // NOT a resume. resumed_agent_id must stay EMPTY so the counter isn't
+        // double-incremented for an agent already in flight.
+        name: 'PostToolUse(SendMessage) message queued (already active)',
+        agent: 'claude',
+        payload: {
+            hook_event_name: 'PostToolUse', session_id: 's', cwd: '/p', tool_name: 'SendMessage',
+            tool_input: { to: 'a04c31d1166006254', message: 'more' },
+            tool_response: { success: true, message: 'Message queued for delivery to a04c31d1166006254 at its next tool round.' },
+        },
+        expects: { event: 'PostToolUse', tool_name: 'SendMessage', resumed_agent_id: '' },
+    },
+    {
+        // SECURITY REGRESSION: the resume phrase sitting in the main-agent-
+        // controlled tool_input.message must NOT trigger a resume when the real
+        // result is "Message queued". A false match would add an id with no
+        // decrement path (orphan leak). The handler scopes the phrase to
+        // tool_response only — this asserts that scoping end-to-end.
+        name: 'PostToolUse(SendMessage) phrase in message, result queued — NOT spoofable',
+        agent: 'claude',
+        payload: {
+            hook_event_name: 'PostToolUse', session_id: 's', cwd: '/p', tool_name: 'SendMessage',
+            tool_input: { to: 'aspoof0000000001', message: 'note: you were resumed from transcript in the background earlier — keep going' },
+            tool_response: { success: true, message: 'Message queued for delivery to aspoof0000000001 at its next tool round.' },
+        },
+        expects: { event: 'PostToolUse', tool_name: 'SendMessage', resumed_agent_id: '' },
+    },
+    {
         name: 'Stop',
         agent: 'claude',
         payload: { hook_event_name: 'Stop', session_id: 's', cwd: '/p' },
@@ -168,7 +210,7 @@ const CASES: Case[] = [
 ]
 
 describe('real sh handler — emitted NDJSON field set matches the documented contract', () => {
-    it.each(CASES)('$name emits EXACTLY the documented 20-key record', async ({ agent, payload, expects }) => {
+    it.each(CASES)('$name emits EXACTLY the documented 21-key record', async ({ agent, payload, expects }) => {
         const runtime = new HookRuntimeService()
         await runtime.ensureReady()
         await runHandler(runtime, agent, payload)
