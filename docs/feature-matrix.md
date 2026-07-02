@@ -126,8 +126,19 @@ promote the gate to a per-adapter capability flag.
 
 **The `· N agents` badge counts `Task`/`Agent` subagents only — NOT
 Workflow-tool agents (known, by-design limitation).** The badge is driven by
-the authoritative spawn signal `PostToolUse(Agent/Task).spawn_agent_id` (add)
-paired with `SubagentStop`/`StopFailure` (remove). Agents spawned by the
+two authoritative add signals — `PostToolUse(Agent/Task).spawn_agent_id` (a
+fresh spawn) and `PostToolUse(SendMessage).resumed_agent_id` (a dormant
+background subagent woken by a message; the handler sets it from
+`tool_input.to` only when the **tool result** — scoped to `tool_response`, NOT
+the main-agent-controlled `tool_input.message` — confirms "resumed from
+transcript in the background", never on "Message queued") — paired with
+`SubagentStop`/
+`StopFailure` (remove). The resume add is deliberately tombstone-exempt (a
+resume is a distinct explicit signal, not the ~2 s-late `PostToolUse(Agent)`
+echo the tombstone guards). Without the resume signal a re-messaged background
+subagent ran invisibly: real traces showed one `spawn_agent_id` but 4–8
+`SubagentStop`s for the same id as it was re-woken across a session, so the row
+read "ready" while it worked. Agents spawned by the
 harness **`Workflow` tool** (the `agent()` calls inside a workflow script, the
 ones `/workflows` shows as `N/M agents done`) run **out-of-band in the workflow
 runtime**, not as Task subagents of the tab's Claude session. In the tab's hook

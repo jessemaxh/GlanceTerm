@@ -56,6 +56,11 @@ export interface TraceEvent {
     /** Extracted from PostToolUse(Agent).tool_response.agentId in the
      *  real handler. Empty / missing on every other event. */
     spawn_agent_id?: string
+    /** Extracted from PostToolUse(SendMessage).tool_input.to in the real
+     *  handler, ONLY when the result confirms "resumed from transcript in
+     *  the background". A second authoritative spawn source (tombstone-
+     *  exempt). Empty / missing on every other event. */
+    resumed_agent_id?: string
     /** Extracted from PostToolUse(Monitor).tool_response.{taskId,task_id}
      *  in the real handler. Empty / missing on every other event. */
     monitor_task_id?: string
