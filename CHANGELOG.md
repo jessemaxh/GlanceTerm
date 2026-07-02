@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.2...v0.3.3) (2026-07-02)
+
+
+### Bug Fixes
+
+* **sidebar:** count SendMessage-resumed background subagents in the in-flight badge ([#94](https://github.com/jessemaxh/GlanceTerm/issues/94)) ([e83e065](https://github.com/jessemaxh/GlanceTerm/commit/e83e0657f5539799195329c2ae5276fa05bf803c))
+
 ## [0.3.2](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.1...v0.3.2) (2026-06-26)
 
 
