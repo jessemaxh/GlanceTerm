@@ -1,4 +1,4 @@
-import { Component, ElementRef, HostListener, NgZone, OnDestroy, OnInit, TemplateRef, ViewChild } from '@angular/core'
+import { Component, ElementRef, HostBinding, HostListener, NgZone, OnDestroy, OnInit, TemplateRef, ViewChild } from '@angular/core'
 import { Subscription } from 'rxjs'
 import { NgbModal } from '@ng-bootstrap/ng-bootstrap'
 import * as os from 'os'
@@ -822,13 +822,25 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             border-radius: 99px;
             pointer-events: none;
         }
+        /* Attention ripple — plays a FINITE burst when a tab ENTERS
+           working / needs-you, then rests invisible (opacity 0). It used to
+           be \`infinite\`, but a perpetual 60 fps animation forces macOS Tahoe
+           to re-blend the window's vibrancy material via SwiftUI on the app
+           MAIN THREAD every frame (whole-window, regardless of the ripple's
+           tiny size) — pegging ~1 core for as long as ANY tab is working,
+           even in the background. A finite burst keeps the attention cue on
+           state change; the persistent status is still carried by the dot's
+           colour + label + sort order. Paired with the unfocused pause
+           (:host(.gt-anim-idle) below). */
         .dot[data-status="working"]::after {
             box-shadow: 0 0 0 2px color-mix(in srgb, var(--gt-working) 55%, transparent);
-            animation: ht-pulse 1.8s ease-out infinite;
+            opacity: 0;
+            animation: ht-pulse 1.8s ease-out 3;
         }
         .dot[data-status="needs_permission"]::after {
             box-shadow: 0 0 0 2px color-mix(in srgb, var(--gt-needsyou) 55%, transparent);
-            animation: ht-breathe 1.5s ease-in-out infinite;
+            opacity: 0;
+            animation: ht-breathe 1.5s ease-in-out 6;
         }
         .dot[data-status="done"] {
             background: var(--gt-done);
@@ -1483,6 +1495,15 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             outline-offset: 2px;
         }
 
+        /* Pause EVERY sidebar animation while the window is unfocused or hidden
+           — driven by AiSidebarComponent.refreshAnimIdle(). A paused animation
+           emits no frames, so the compositor (and the Tahoe main-thread vibrancy
+           re-blend it drives) goes fully idle when nobody's looking. This is the
+           big win: the app used to burn ~1 core in the background purely to
+           animate status dots you couldn't see. */
+        :host(.gt-anim-idle) .dot::after,
+        :host(.gt-anim-idle) .spin { animation-play-state: paused !important; }
+
         @media (prefers-reduced-motion: reduce) {
             .dot[data-status="working"]::after,
             .dot[data-status="needs_permission"]::after,
@@ -1770,6 +1791,28 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         }
     }
 
+    /**
+     * True while the window is unfocused or hidden — bound to the host as
+     * `.gt-anim-idle`, which pauses every sidebar animation (see the CSS rule).
+     *
+     * Perpetual status-dot animations are cheap to *draw*, but on macOS Tahoe
+     * any per-frame window change forces the OS to re-blend the window's
+     * vibrancy ("Liquid Glass") material via SwiftUI on the app main thread —
+     * profiled at ~1 full core, sustained, even when the app is in the
+     * background. Pausing animations whenever nobody's looking takes that to 0.
+     */
+    @HostBinding('class.gt-anim-idle') animIdle = false
+
+    // Re-evaluate on every window activity transition. Angular's @HostListener
+    // runs these inside the zone, so flipping `animIdle` triggers CD and the
+    // host class updates without an explicit zone.run.
+    @HostListener('window:blur')
+    @HostListener('window:focus')
+    @HostListener('document:visibilitychange')
+    refreshAnimIdle (): void {
+        this.animIdle = typeof document !== 'undefined' && (document.hidden || !document.hasFocus())
+    }
+
     async onSplitShell (): Promise<void> {
         await this.splitShell.toggleShellInCurrentTab('r')
         // tabsService.create / addTab dispatch through Tabby internals that
@@ -1875,6 +1918,9 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     }
 
     ngOnInit (): void {
+        // Seed the unfocused-pause state from the current window focus/visibility
+        // (the blur/focus/visibilitychange listeners only fire on transitions).
+        this.refreshAnimIdle()
         this.sub = this.monitor.states$.subscribe(s => {
             // Bounce through zone — the BehaviorSubject's notifications can
             // resolve outside Angular's zone after a few ticks (the monitor's
