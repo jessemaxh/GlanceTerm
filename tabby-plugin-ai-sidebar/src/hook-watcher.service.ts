@@ -1344,9 +1344,10 @@ export class HookWatcherService implements OnDestroy {
         // displayed status is held. `startup`/`clear`/`resume` are genuine
         // waiting-for-input states and keep mapping to idle. Claude-only — other
         // agents never set `source`, so this never matches for them.
-        if (parsed.event === 'SessionStart' && parsed.source === 'compact') {
-            return changed
-        }
+        // NOTE: a post-compaction SessionStart (`source: compact`) is NO LONGER
+        // early-returned here. It must still refresh the model/session/transcript
+        // (compact carries the authoritative current model), so its status-hold
+        // is applied just before the map.set below instead — see there.
 
         // A tool event carrying an `agent_id` is from a SUBAGENT, not the main
         // agent — it must NOT drive the tab's MAIN status. Claude emits no
@@ -1389,6 +1390,31 @@ export class HookWatcherService implements OnDestroy {
         if (!status) return changed
 
         const prev = this.map.get(parsed.tab_id)
+        // Post-compaction SessionStart is a mid-turn continuation, not a fresh
+        // idle: HOLD the displayed status (don't flip the row to "ready") but
+        // still fall through to the map.set so model/session/transcript refresh.
+        // Auto-compact fires while the agent is actively working and emits no
+        // tool events for 60-100 s, so mapping it to idle read as "ready" mid-
+        // turn; and a mid-session `/model` switch surfaces its new slug on the
+        // compact SessionStart, which we'd otherwise drop. `startup`/`clear`/
+        // `resume` are genuine waiting states and keep their idle mapping.
+        if (parsed.event === 'SessionStart' && parsed.source === 'compact') {
+            status = prev?.status ?? status
+        }
+        // Model input gate: the tab's model reflects the MAIN agent only. Claude
+        // stamps `model` ONLY on its SessionStart; a `model` on any OTHER Claude
+        // event is a SUBAGENT's — the Agent/Task tool's Pre/PostToolUse carries
+        // the subagent's slug (e.g. `sonnet`) with an EMPTY agent_id, so the
+        // agent_id guard above doesn't catch it. Letting it through pinned the
+        // chip to the subagent's model for the rest of the session (stickyModel
+        // only resets on a fresh `startup`, which a long compact/resume session
+        // never sees — observed live: a June `sonnet` subagent stuck an Opus tab
+        // reading "sonnet" for two weeks). Codex legitimately stamps its model on
+        // every event (documented contract) so it stays unrestricted; Gemini /
+        // opencode carry no model on these events anyway.
+        const incomingModel = adapter.id === 'claude' && parsed.event !== 'SessionStart'
+            ? undefined
+            : parsed.model
         this.map.set(parsed.tab_id, {
             tabId: parsed.tab_id,
             tool: adapter.id,
@@ -1414,7 +1440,7 @@ export class HookWatcherService implements OnDestroy {
             // (which always re-sends its own model anyway, so this branch just
             // clears a stale slug from a tab reused by a brand-new session).
             // resume / compact / clear keep the sticky. See {@link stickyModel}.
-            model: stickyModel(parsed.event, parsed.source, parsed.model, prev?.model),
+            model: stickyModel(parsed.event, parsed.source, incomingModel, prev?.model),
         })
         // Unified debug log: one concise line per status-changing event, plus a
         // renderer-side mirror of auto-approve grants (the handler also writes
