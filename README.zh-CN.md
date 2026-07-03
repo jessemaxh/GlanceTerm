@@ -27,7 +27,7 @@
 ---
 
 <p align="center">
-  <img src="assets/screenshots/sidebar.png" alt="GlanceTerm 侧栏 —— 每个 AI agent 标签页的实时状态" width="820">
+  <img src="assets/screenshots/sidebar.png" alt="GlanceTerm 侧栏 —— 每个 AI agent 标签页的实时状态" width="900">
 </p>
 
 同时开着 5+ 个 **Claude Code / Codex / Gemini / opencode** 会话?别再 Cmd-Tab 一个个翻、
