@@ -27,7 +27,7 @@
 ---
 
 <p align="center">
-  <img src="assets/screenshots/sidebar.png" alt="GlanceTerm sidebar — live status for every AI agent tab" width="820">
+  <img src="assets/screenshots/sidebar.png" alt="GlanceTerm sidebar — live status for every AI agent tab" width="900">
 </p>
 
 Running 5+ **Claude Code / Codex / Gemini / opencode** sessions across tabs? Stop
