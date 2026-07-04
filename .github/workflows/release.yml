@@ -211,3 +211,22 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release upload "${{ needs.release-please.outputs.tag_name }}" dist/latest-mac.yml --clobber
+
+      # Fire the Homebrew tap's cask updater NOW, so `brew` gets the new version
+      # on release instead of waiting for its daily cron (≤24 h lag). Runs only on
+      # the macOS leg, after the .dmg + latest-mac.yml are on the release, so the
+      # tap can read the fresh dmg + sha256. Non-breaking: if TAP_DISPATCH_TOKEN
+      # isn't set, this no-ops and the daily cron still keeps the cask in sync.
+      # The token is a PAT with `actions: write` on jessemaxh/homebrew-glanceterm
+      # (github.token can't dispatch a workflow in another repo).
+      - name: Sync Homebrew cask immediately (don't wait for the daily cron)
+        if: startsWith(matrix.os, 'macos')
+        env:
+          TAP_TOKEN: ${{ secrets.TAP_DISPATCH_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "TAP_DISPATCH_TOKEN not set — skipping instant sync; the tap's daily cron will pick this release up."
+            exit 0
+          fi
+          GH_TOKEN="$TAP_TOKEN" gh workflow run update-cask.yml -R jessemaxh/homebrew-glanceterm
+          echo "Dispatched update-cask.yml on the Homebrew tap."
