@@ -1,4 +1,5 @@
-import { app, ipcMain, Menu, Tray, shell, screen, globalShortcut, MenuItemConstructorOptions, WebContents, BrowserWindow } from 'electron'
+import { app, ipcMain, Menu, Tray, shell, screen, globalShortcut, dialog, MenuItemConstructorOptions, WebContents, BrowserWindow } from 'electron'
+import { autoUpdater } from 'electron-updater'
 import promiseIpc from 'electron-promise-ipc'
 import * as remote from '@electron/remote/main'
 import { spawnSync } from 'child_process'
@@ -318,12 +319,52 @@ export class Application {
         }
     }
 
+    /**
+     * Manual "Check for Updates…" from the macOS app menu. `autoUpdater` is the
+     * process-global electron-updater singleton wired in window.ts (autoDownload
+     * + autoInstallOnAppQuit). checkForUpdates() resolves after the version check
+     * — BEFORE the download finishes — and, when a newer version is available,
+     * hands back a `downloadPromise`; that's our "available" signal. The download
+     * then proceeds in the background and installs on the next quit, so we just
+     * tell the user the outcome (a manual check must give feedback, unlike the
+     * silent launch-time auto-check). Wrapped in try/catch: a dev/unpackaged
+     * build or an unreachable feed surfaces as a plain error dialog, never an
+     * unhandled rejection.
+     */
+    private async checkForUpdatesFromMenu (): Promise<void> {
+        try {
+            const result = await autoUpdater.checkForUpdates()
+            const available = !!result?.downloadPromise
+            await dialog.showMessageBox({
+                type: 'info',
+                message: available ? 'A new version is available' : 'GlanceTerm is up to date',
+                detail: available
+                    ? `Version ${result?.updateInfo.version} is downloading in the background and will install the next time you quit and reopen GlanceTerm.`
+                    : `You're on the latest version (${app.getVersion()}).`,
+                buttons: ['OK'],
+                defaultId: 0,
+            })
+        } catch (err) {
+            await dialog.showMessageBox({
+                type: 'error',
+                message: 'Could not check for updates',
+                detail: err instanceof Error ? err.message : String(err),
+                buttons: ['OK'],
+                defaultId: 0,
+            })
+        }
+    }
+
     private setupMenu () {
         const template: MenuItemConstructorOptions[] = [
             {
                 label: 'Application',
                 submenu: [
                     { role: 'about', label: 'About GlanceTerm' },
+                    {
+                        label: 'Check for Updates…',
+                        click: () => { void this.checkForUpdatesFromMenu() },
+                    },
                     { type: 'separator' },
                     {
                         label: 'Preferences',
