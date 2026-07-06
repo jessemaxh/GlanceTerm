@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.4](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.3...v0.3.4) (2026-07-06)
+
+
+### Features
+
+* **ai-sidebar:** right-click "Reset agent status" to clear a stuck row ([#100](https://github.com/jessemaxh/GlanceTerm/issues/100)) ([b8e5ad4](https://github.com/jessemaxh/GlanceTerm/commit/b8e5ad46b22b4f5df702ffd2acb078c3517dd819))
+
+
+### Bug Fixes
+
+* **ai-sidebar:** worktree isolation fails on a workspace of linked worktrees ([#102](https://github.com/jessemaxh/GlanceTerm/issues/102)) ([03e5da0](https://github.com/jessemaxh/GlanceTerm/commit/03e5da084d01cfd33fa9a30fdec7d4a1506ffe82))
+* **build:** ship the inset/rounded macOS icon by default ([#103](https://github.com/jessemaxh/GlanceTerm/issues/103)) ([c4557f6](https://github.com/jessemaxh/GlanceTerm/commit/c4557f67a6ffd619be1c0ff0c0f8ae94b6a08302))
+
 ## [0.3.3](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.2...v0.3.3) (2026-07-03)
 
 
