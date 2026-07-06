@@ -104,6 +104,45 @@ describe('WorktreeService — multi-repo non-git root (real git)', () => {
         await expect(svc.createSet(root, repos, 'taken')).rejects.toThrow(/already exists/)
     })
 
+    it('isolates a workspace holding two linked worktrees of ONE repo (shared ref store)', async () => {
+        // Repro of the gmailClient failure: `client` PLUS `client-align`, a linked
+        // worktree of `client` (its `.git` is a FILE sharing client's object store).
+        // discoverSubRepos sees BOTH as repos; createSet used to give each the SAME
+        // `-b <branch>`, so the second `worktree add` failed "a branch named
+        // '<branch>' already exists" (the shared ref store already had it) and the
+        // whole isolation aborted. Now shared-store siblings get a unique
+        // `<branch>-<name>` so both isolate cleanly.
+        git(path.join(root, 'client'), 'worktree', 'add', path.join(root, 'client-align'), '-b', 'align')
+        const repos = await svc.discoverSubRepos(root)
+        expect(repos.map(r => r.name).sort()).toEqual(['client', 'client-align', 'server'])
+
+        // Used to reject /already exists/; now resolves.
+        const set = await svc.createSet(root, repos, 'agent/x')
+
+        const byName = new Map(set.repos.map(r => [r.name, r]))
+        for (const r of set.repos) expect(fs.existsSync(r.worktreePath)).toBe(true)
+        const branchOf = (name: string) =>
+            git(byName.get(name)!.worktreePath, 'rev-parse', '--abbrev-ref', 'HEAD').trim()
+        const clientB = branchOf('client')
+        const alignB = branchOf('client-align')
+
+        // client + client-align share a store → DISTINCT branches (no collision);
+        // one keeps the plain shared branch, the sibling is suffixed.
+        expect(clientB).not.toBe(alignB)
+        expect([clientB, alignB]).toContain('agent/x')
+        const suffixed = [clientB, alignB].find(b => b !== 'agent/x')!
+        expect(suffixed.startsWith('agent/x-')).toBe(true)
+        // the per-repo branch is recorded on the WorktreeRepo for correct teardown
+        expect(byName.get('client-align')!.branch === suffixed || byName.get('client')!.branch === suffixed).toBe(true)
+        // an INDEPENDENT repo keeps the plain shared branch.
+        expect(branchOf('server')).toBe('agent/x')
+
+        // clean teardown removes BOTH branches from the shared repo.
+        await svc.removeSet(set, { force: true })
+        expect(fs.existsSync(set.isolatedRoot)).toBe(false)
+        expect(git(path.join(root, 'client'), 'branch', '--list')).not.toContain('agent/x')
+    })
+
     it('single-repo case: a git root resolves to just itself', async () => {
         const repos = await svc.discoverSubRepos(path.join(root, 'client'))
         expect(repos).toHaveLength(1)

@@ -46,6 +46,13 @@ export interface WorktreeRepo {
     origPath: string       // the original repo
     worktreePath: string   // the isolated worktree
     base: string           // the commit SHA this worktree was forked from (the safety anchor)
+    /** Branch created for THIS repo's worktree. Normally the set's shared
+     *  `branch`; differs ONLY for a repo that shares a git object store with a
+     *  sibling in the set (a linked worktree of the same repo) — those get a
+     *  unique `<branch>-<name>` so `worktree add -b` doesn't collide on the
+     *  shared ref namespace. Optional for back-compat with sets persisted before
+     *  this field; readers (removeSet) fall back to the set's `branch`. */
+    branch?: string
 }
 
 /** The worktree set backing one agent tab. Persisted with the tab for resume. */
@@ -237,6 +244,15 @@ export class WorktreeService {
         try { await this.git(repo, ['rev-parse', '--verify', `refs/heads/${branch}`]); return true } catch { return false }
     }
 
+    /** Absolute path to a repo's shared git object/ref store. IDENTICAL for every
+     *  linked worktree of one repository, so it's how we detect two "sub-repos"
+     *  that are actually worktrees of the same repo (and thus share a branch
+     *  namespace). `--path-format=absolute` normalizes it for comparison. */
+    private async gitCommonDir (repo: string): Promise<string> {
+        const out = await this.git(repo, ['rev-parse', '--path-format=absolute', '--git-common-dir'])
+        return path.resolve(out.trim())
+    }
+
     /**
      * Create a worktree set: one worktree per selected repo on `branch`, plus
      * symlinks for the root's non-git entries (shared). Rolls back on failure.
@@ -245,9 +261,26 @@ export class WorktreeService {
      */
     async createSet (root: string, repos: SubRepo[], branch: string): Promise<WorktreeSet> {
         await this.validateBranch(branch)
+        // Per-repo branch plan. Repos that share a git object store — i.e. linked
+        // worktrees of ONE repo (e.g. a workspace holding `hark` PLUS a
+        // `hark-align` worktree of it) — share a branch namespace, so
+        // `worktree add -b <branch>` on the second FAILS "already exists" and the
+        // whole isolation aborts. Give each shared-store sibling a unique
+        // `<branch>-<name>`; the first occurrence of a store — and every
+        // independent repo, the common case — keeps the plain shared <branch>.
+        const branchFor = new Map<string, string>()
+        const seenStores = new Set<string>()
         for (const r of repos) {
-            if (await this.branchExists(r.repoPath, branch)) {
-                throw new Error(`branch "${branch}" already exists in ${r.name}`)
+            let store: string | null = null
+            try { store = await this.gitCommonDir(r.repoPath) } catch { /* unreadable → treat as its own store */ }
+            const shared = store !== null && seenStores.has(store)
+            if (store !== null) seenStores.add(store)
+            branchFor.set(r.repoPath, shared ? `${branch}-${r.name.replace(/[^\w-]/g, '_')}` : branch)
+        }
+        for (const r of repos) {
+            const b = branchFor.get(r.repoPath) ?? branch
+            if (await this.branchExists(r.repoPath, b)) {
+                throw new Error(`branch "${b}" already exists in ${r.name}`)
             }
         }
         const isolatedRoot = isolatedRootFor(root, branch)
@@ -288,13 +321,14 @@ export class WorktreeService {
                 // `worktree add` creates isolatedRoot itself — no symlinks, no subdir.
                 await this.git(r.repoPath, ['worktree', 'add', isolatedRoot, '-b', branch])
                 ownsIsolatedRoot = true // git created isolatedRoot
-                created.push({ name: r.name, origPath: r.repoPath, worktreePath: isolatedRoot, base })
+                created.push({ name: r.name, origPath: r.repoPath, worktreePath: isolatedRoot, base, branch })
             } else {
                 for (const r of repos) {
                     const base = await this.baseCommit(r.repoPath)
                     const worktreePath = path.join(isolatedRoot, r.name)
-                    await this.git(r.repoPath, ['worktree', 'add', worktreePath, '-b', branch])
-                    created.push({ name: r.name, origPath: r.repoPath, worktreePath, base })
+                    const repoBranch = branchFor.get(r.repoPath) ?? branch
+                    await this.git(r.repoPath, ['worktree', 'add', worktreePath, '-b', repoBranch])
+                    created.push({ name: r.name, origPath: r.repoPath, worktreePath, base, branch: repoBranch })
                 }
                 // Symlink every root entry that ISN'T an isolated repo (non-git content
                 // + unchecked repos) → shared. Surface failures instead of swallowing
@@ -422,9 +456,10 @@ export class WorktreeService {
         for (const r of set.repos) {
             if (fsSync.existsSync(r.worktreePath)) continue // worktree survived → keep its branch
             try {
-                const ahead = await this.git(r.origPath, ['rev-list', `${r.base}..${set.branch}`])
+                const br = r.branch ?? set.branch
+                const ahead = await this.git(r.origPath, ['rev-list', `${r.base}..${br}`])
                 if (ahead.trim() === '') {
-                    await this.git(r.origPath, ['branch', '-D', set.branch]).catch(() => {})
+                    await this.git(r.origPath, ['branch', '-D', br]).catch(() => {})
                 }
             } catch { /* base/branch gone — ignore */ }
             try { await this.git(r.origPath, ['worktree', 'prune']) } catch { /* */ }
