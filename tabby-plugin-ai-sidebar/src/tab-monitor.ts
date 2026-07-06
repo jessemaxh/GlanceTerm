@@ -691,6 +691,28 @@ export class TabMonitor implements OnDestroy {
         this.idleGateTimerHandles.clear()
     }
 
+    /**
+     * Manually clear a tab's live-agent side-channel (subagents, monitors,
+     * pending bg arrivals, tombstones) and force an immediate re-render.
+     *
+     * User escape hatch, exposed via the sidebar row's right-click menu, for
+     * the rare case where an UPSTREAM hook drop leaves a phantom "· N agents"
+     * badge that pins an otherwise-idle row to `working`. Canonical trigger:
+     * Claude does not always fire `SubagentStop` for a subagent that terminated
+     * abnormally (e.g. its tool was killed) — so the `spawn` never gets its
+     * matching decrement and the id leaks until the next SessionStart/SessionEnd
+     * reset. That is a lossy-source problem GlanceTerm cannot prevent at the
+     * origin (the event is simply never emitted), so we give the user a way to
+     * force-correct it. Clears the side-channel counters ONLY; the snapshot and
+     * status re-derive from the tab's true state on the forced tick. Harmless
+     * when nothing is stuck. Returns whether anything was actually cleared.
+     */
+    resetAgentState (tabId: string): boolean {
+        const cleared = this.hooks.clearSideChannel(tabId)
+        void this.tick()
+        return cleared
+    }
+
     private async tick (): Promise<void> {
         if (this.busy) {
             // Record that someone wanted a tick — finally-block re-fires once
