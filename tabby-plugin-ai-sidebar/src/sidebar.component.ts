@@ -2657,6 +2657,23 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
                     void this.worktreeActions.openInWorktree(s.innerTab)
                 },
             },
+            { type: 'separator' },
+            {
+                // Escape hatch for a stuck row: an upstream hook drop (Claude
+                // not firing SubagentStop for an abnormally-terminated subagent)
+                // can leave a phantom "· N agents" badge that pins the row to
+                // "working". Clears the live-agent side-channel so the row
+                // re-derives its true status; a no-op when nothing is stuck.
+                label: 'Reset agent status',
+                enabled: !!s.tabId,
+                click: () => {
+                    if (!s.tabId) {
+                        return
+                    }
+                    const cleared = this.monitor.resetAgentState(s.tabId)
+                    this.notifications.info(cleared ? 'Agent status reset' : 'Nothing to reset')
+                },
+            },
         ]
         this.platform.popupContextMenu(items, ev)
     }
