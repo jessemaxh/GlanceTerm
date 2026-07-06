@@ -298,21 +298,28 @@ builder({
                 [FuseV1Options.EnableNodeOptionsEnvironmentVariable]: false,
                 [FuseV1Options.EnableNodeCliInspectArguments]: false,
             })
-            // 1.5 macOS 26 (Tahoe) icon. If a compiled Icon Composer `.icon` is
-            //     present at build/mac/icon.icon, bundle it (actool → Assets.car +
-            //     CFBundleIconName) AND swap the bundled legacy icon.icns to the
-            //     inset version (build/mac/icon-legacy.icns) so macOS ≤15 sizes
-            //     correctly too. ATOMIC + gated: the .icns swap happens only AFTER
-            //     actool + the plist edit succeed, so a missing OR a failed .icon
-            //     leaves the full-bleed icon.icns electron-builder already bundled
-            //     (correct on Tahoe, slightly large on ≤15 — NO regression before
-            //     the .icon lands). The actool invocation is VERIFIED against
-            //     Xcode 26.3 actool (2026-06-16): the `.icon` bundle is passed to
-            //     actool DIRECTLY — wrapping it in an .xcassets silently compiles to
-            //     nothing. We also assert Assets.car was produced, so a future actool
-            //     change that no-ops falls back to full-bleed instead of shipping a
-            //     CFBundleIconName with no catalog behind it.
-            //     Runs before signing so the cert covers Assets.car + the new icns.
+            // 1.5 macOS 26 (Tahoe) icon. The icon.icns electron-builder bundles
+            //     (build/mac/icon.icns) is the INSET/rounded macOS art with padding
+            //     — correct on EVERY macOS: pre-Tahoe renders the squircle+padding
+            //     as authored; Tahoe masks it into its shape. So the base icon is
+            //     right with OR without the step below.
+            //     (Regression history: this used to be a FULL-BLEED square, and the
+            //     inset art was only swapped IN on actool success. Xcode 26 actool
+            //     isn't on the CI runners, so releases shipped the square — which
+            //     Tahoe hid by auto-masking but macOS ≤15 rendered oversized with
+            //     no rounded corners. Making the inset icns the bundled default is
+            //     the fix; the Tahoe catalog below is now pure enhancement.)
+            //     If a compiled Icon Composer `.icon` is present at build/mac/
+            //     icon.icon, ADD the Tahoe Liquid-Glass catalog ON TOP: actool →
+            //     Assets.car + CFBundleIconName. Best-effort — a missing OR failed
+            //     `.icon` (e.g. a runner without Xcode 26 actool) simply keeps the
+            //     already-correct inset icns; NO regression anywhere. The actool
+            //     invocation is VERIFIED against Xcode 26.3 actool (2026-06-16): the
+            //     `.icon` bundle is passed to actool DIRECTLY — wrapping it in an
+            //     .xcassets silently compiles to nothing. We assert Assets.car was
+            //     produced, so a future actool no-op falls back to the inset icns
+            //     rather than a CFBundleIconName with no catalog behind it.
+            //     Runs before signing so the cert covers Assets.car.
             try {
                 const dotIcon = path.resolve('build/mac/icon.icon')
                 if (fs.existsSync(dotIcon)) {
@@ -335,18 +342,15 @@ builder({
                         throw new Error('actool produced no Assets.car — refusing to set CFBundleIconName')
                     }
                     const info = path.join(appPath, 'Contents', 'Info.plist')
-                    // Tahoe reads CFBundleIconName → Assets.car. Leave CFBundleIconFile
-                    // (=icon) pointing at icon.icns, which we swap to the inset legacy
-                    // art so macOS ≤15 (which ignores the Tahoe catalog) sizes correctly.
+                    // Tahoe reads CFBundleIconName → Assets.car. CFBundleIconFile
+                    // (=icon) keeps pointing at the inset icon.icns electron-builder
+                    // already bundled — the correct fallback for macOS ≤15, which
+                    // ignores the Tahoe catalog. No icns swap needed anymore.
                     try { execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Set :CFBundleIconName AppIcon', info], { stdio: 'ignore' }) }
                     catch { execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Add :CFBundleIconName string AppIcon', info], { stdio: 'ignore' }) }
-                    const inset = path.resolve('build/mac/icon-legacy.icns')
-                    const insetApplied = fs.existsSync(inset)
-                    if (insetApplied) fs.copyFileSync(inset, path.join(res, 'icon.icns'))
-                    else console.warn('  ⚠ build/mac/icon-legacy.icns missing — macOS ≤15 keeps the full-bleed icon.icns (may look oversized).')
-                    console.log(`  • Tahoe icon: bundled .icon (Assets.car + CFBundleIconName)${insetApplied ? ' + inset icon.icns for macOS ≤15' : ''}`)
+                    console.log('  • Tahoe icon: added Liquid-Glass catalog (Assets.car + CFBundleIconName) on top of the inset icon.icns')
                 } else {
-                    console.log('  • no build/mac/icon.icon — keeping full-bleed icon.icns (Tahoe-safe). Drop the Icon Composer export at build/mac/icon.icon to enable the dual-format.')
+                    console.log('  • no build/mac/icon.icon — shipping the inset icon.icns only (correct on all macOS; no Tahoe Liquid-Glass catalog). Drop an Icon Composer export at build/mac/icon.icon to add it.')
                 }
             } catch (e) {
                 // Roll back any partial catalog actool wrote before the failure
@@ -357,7 +361,7 @@ builder({
                     fs.rmSync(path.join(resDir, 'Assets.car'), { force: true })
                     fs.rmSync(path.join(resDir, 'AppIcon.icns'), { force: true })
                 } catch { /* best-effort cleanup */ }
-                console.warn('  ⚠ Tahoe .icon bundling failed — kept full-bleed icon.icns (no Tahoe regression). Verify the actool step with the real .icon:', e?.message ?? e)
+                console.warn('  ⚠ Tahoe .icon bundling failed — kept the inset icon.icns (correct on all macOS; just no Tahoe Liquid-Glass catalog). Verify the actool step with the real .icon:', e?.message ?? e)
             }
             // 2. Now sign bottom-up. Skip when CSC_LINK is set — electron-builder
             //    handles that case with the real cert.
