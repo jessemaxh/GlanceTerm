@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { ReplayHarness, TraceEvent } from './harness'
+import { TabStatus } from '../../tab-monitor'
 
 /**
  * Regression + escape-hatch coverage for a LEAKED live-subagent id.
@@ -75,5 +76,32 @@ describe('leaked subagent id — survives Stops, cleared by manual reset', () =>
         expect(h.getSubagentInFlight(TAB)).toBe(0)           // phantom gone
         expect(h.getStatus(TAB)).not.toBeNull()              // snapshot/status kept
         expect(h.watcher.clearSideChannel(TAB)).toBe(false)  // idempotent no-op
+    })
+
+    it('reset guard discriminates by RAW status: idle for a phantom, working for a real turn', () => {
+        // TabMonitor.resetAgentState() refuses to clear while the RAW hook
+        // status is Working — a genuinely busy tab's live set is real and
+        // clearing it would undercount. It keys off exactly this snapshot
+        // status, so this pins the discriminator the guard relies on.
+
+        // Phantom: main agent idle (Stop) + a leaked count. The RAW status stays
+        // IDLE — the idle→working override lives in TabMonitor, not the
+        // snapshot — so the guard ALLOWS the reset.
+        const phantom = new ReplayHarness()
+        phantom.process(ev({ event: 'SessionStart', source: 'startup', ts: 1000 }))
+        phantom.process(ev({ event: 'PostToolUse', tool_name: 'Agent', spawn_agent_id: LEAK, ts: 1001 }))
+        phantom.process(ev({ event: 'Stop', ts: 1002 }))
+        expect(phantom.getSubagentInFlight(TAB)).toBe(1)
+        expect(phantom.getStatus(TAB)?.status).toBe(TabStatus.Idle)     // guard → allow
+
+        // Real turn: main agent mid-turn (UserPromptSubmit) + a REAL live
+        // subagent. RAW status is Working, so the guard BLOCKS the reset —
+        // clearing here would drop a genuinely-running subagent from the count.
+        const busy = new ReplayHarness()
+        busy.process(ev({ event: 'SessionStart', source: 'startup', ts: 1000 }))
+        busy.process(ev({ event: 'UserPromptSubmit', ts: 1001 }))
+        busy.process(ev({ event: 'PostToolUse', tool_name: 'Agent', spawn_agent_id: 'realsub', ts: 1002 }))
+        expect(busy.getSubagentInFlight(TAB)).toBe(1)
+        expect(busy.getStatus(TAB)?.status).toBe(TabStatus.Working)     // guard → block
     })
 })

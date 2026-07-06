@@ -706,8 +706,20 @@ export class TabMonitor implements OnDestroy {
      * force-correct it. Clears the side-channel counters ONLY; the snapshot and
      * status re-derive from the tab's true state on the forced tick. Harmless
      * when nothing is stuck. Returns whether anything was actually cleared.
+     *
+     * Guarded: refuses (returns false) while the main agent is genuinely
+     * WORKING, where the live-subagent set is real and blindly clearing it
+     * would undercount the running subagents (their eventual SubagentStops are
+     * no-ops against the emptied set) until new ones spawn. A phantom-stuck row
+     * reports its RAW status as idle — the leaked count is only what forces the
+     * *displayed* status to working via the idle→working override — so the
+     * guard still allows the reset there. It fires in the phantom case, not on
+     * a busy tab.
      */
     resetAgentState (tabId: string): boolean {
+        if (this.hooks.getStatus(tabId)?.status === TabStatus.Working) {
+            return false
+        }
         const cleared = this.hooks.clearSideChannel(tabId)
         void this.tick()
         return cleared
