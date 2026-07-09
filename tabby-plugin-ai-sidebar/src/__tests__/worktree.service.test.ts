@@ -4,7 +4,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
-import { WorktreeService, decideSafeToRemove, isolatedRootFor, summarizeSetStatus } from '../worktree.service'
+import { WorktreeService, branchLeaf, decideSafeToRemove, isolatedRootFor, MANAGED_ROOT, summarizeSetStatus } from '../worktree.service'
 
 const git = (cwd: string, ...args: string[]) =>
     execFileSync('git', args, { cwd, encoding: 'utf-8' })
@@ -31,7 +31,7 @@ describe('isolatedRootFor (pure)', () => {
         const p = isolatedRootFor('/Users/x/my-project', 'agent/login')
         expect(p).toContain(path.join('.glanceterm', 'worktrees'))
         expect(p).toMatch(/my-project-[0-9a-f]{6,}/)       // basename + stable hash of abs root
-        expect(path.basename(p)).toBe('agent%2Flogin')     // branch = single encoded segment (no nesting)
+        expect(path.basename(p)).toMatch(/^agent-login-[0-9a-f]{10}$/) // one readable segment, no nesting
     })
     it('same basename but different absolute root → DIFFERENT dir (no collision)', () => {
         expect(isolatedRootFor('/tmp/a/project', 'b')).not.toBe(isolatedRootFor('/tmp/c/project', 'b'))
@@ -42,6 +42,76 @@ describe('isolatedRootFor (pure)', () => {
     it('caps an over-long branch leaf under the filename-component limit', () => {
         const p = isolatedRootFor('/x/p', 'feature/' + 'a'.repeat(400))
         expect(path.basename(p).length).toBeLessThanOrEqual(200)
+    })
+    it('keeps the 2-level grandchild shape assertWithinManagedRoot requires', () => {
+        const p = isolatedRootFor('/Users/x/my-project', 'agent/a/b/c')
+        expect(path.dirname(path.dirname(p))).toBe(MANAGED_ROOT)   // exactly MANAGED_ROOT/<ws>/<leaf>
+    })
+})
+
+describe('branchLeaf (pure)', () => {
+    // The bug this replaced: encodeURIComponent spelled `/` as `%2F`, so a branch
+    // `agent/bug_fix` became the dir `agent%2Fbug_fix`.
+    it('renders a slashed branch readably — no percent-escapes', () => {
+        const leaf = branchLeaf('agent/bug_fix')
+        expect(leaf).toMatch(/^agent-bug_fix-[0-9a-f]{10}$/)
+        expect(leaf).not.toContain('%')
+    })
+
+    it('is ONE path segment — never nests, whatever the branch', () => {
+        for (const b of ['agent/x', 'a/b/c/d', 'a\\b', 'feature/2026/q3']) {
+            const leaf = branchLeaf(b)
+            expect(leaf).not.toContain('/')
+            expect(leaf).not.toContain('\\')
+            expect(path.basename(leaf)).toBe(leaf)
+        }
+    })
+
+    // The load-bearing property: `removeSet` does `fs.rm(isolatedRoot)` and
+    // `persistSet` dedupes on it, so two branches sharing a dir = data loss.
+    // These four all slug to `agent-bug_fix` and MUST stay distinct.
+    it('is injective across branches that slug identically', () => {
+        const branches = ['agent/bug_fix', 'agent-bug_fix', 'agent bug_fix', 'agent.bug_fix']
+        const leaves = branches.map(branchLeaf)
+        expect(new Set(leaves).size).toBe(branches.length)
+    })
+
+    it('never yields `.`, `..`, a dotfile, or a leading-dash arg', () => {
+        for (const b of ['.', '..', '...', './x', '-rf', '.hidden', '-', '.-.']) {
+            const leaf = branchLeaf(b)
+            expect(leaf).not.toBe('.')
+            expect(leaf).not.toBe('..')
+            expect(leaf.startsWith('.')).toBe(false)
+            expect(leaf.startsWith('-')).toBe(false)
+        }
+    })
+
+    it('is total: an all-punctuation branch still yields a usable leaf', () => {
+        expect(branchLeaf('///')).toMatch(/^[0-9a-f]{10}$/)   // slug empties → bare digest
+        expect(branchLeaf('!!!')).toMatch(/^[0-9a-f]{10}$/)
+    })
+
+    it('a Windows-reserved name never survives bare', () => {
+        for (const b of ['aux', 'con', 'nul', 'COM1']) {
+            expect(branchLeaf(b)).toMatch(new RegExp(`^${b}-[0-9a-f]{10}$`))
+        }
+    })
+
+    it('keeps a CJK branch readable and under the 255-BYTE component limit', () => {
+        expect(branchLeaf('功能/修复')).toMatch(/^功能-修复-[0-9a-f]{10}$/)
+        // 400 CJK chars = 1200 bytes raw; the cap is on bytes, not chars.
+        const leaf = branchLeaf('修'.repeat(400))
+        expect(Buffer.byteLength(leaf)).toBeLessThanOrEqual(255)
+    })
+
+    it('caps by bytes without splitting a multi-byte char (no U+FFFD)', () => {
+        const leaf = branchLeaf('修'.repeat(400))
+        expect(leaf).not.toContain('�')
+        expect(Buffer.from(leaf, 'utf-8').toString('utf-8')).toBe(leaf)  // round-trips = well-formed
+    })
+
+    it('is deterministic', () => {
+        expect(branchLeaf('agent/x')).toBe(branchLeaf('agent/x'))
     })
 })
 
@@ -73,6 +143,11 @@ describe('WorktreeService — multi-repo non-git root (real git)', () => {
     it('isolates each repo as a worktree + symlinks non-git content; reflects safety', async () => {
         const repos = await svc.discoverSubRepos(root)
         const set = await svc.createSet(root, repos, 'agent/x')
+
+        // the dir git actually created is readable: a slashed branch must not
+        // land on disk percent-escaped (`agent%2Fx`), and must stay ONE segment
+        expect(path.basename(set.isolatedRoot)).toMatch(/^agent-x-[0-9a-f]{10}$/)
+        expect(set.isolatedRoot).not.toContain('%')
 
         // each repo got an isolated worktree on the new branch
         expect(set.repos.map(r => r.name).sort()).toEqual(['client', 'server'])

@@ -82,26 +82,77 @@ export interface WorktreeSetStatus {
 
 // ── pure helpers (no IO — unit-testable) ─────────────────────────────────────
 
+/** Slug cap, in BYTES not chars: a filename component is limited to 255 bytes on
+ *  APFS/ext4/NTFS, and a CJK branch costs 3 bytes per char, so a char-based cap
+ *  would silently blow past it. Leaves room for the `-<10 hex>` suffix. */
+const MAX_SLUG_BYTES = 180
+
+/** Truncate to at most `max` BYTES without splitting a multi-byte character. */
+function capBytes (s: string, max: number): string {
+    let out = s
+    while (out.length > 0 && Buffer.byteLength(out) > max) {
+        out = out.slice(0, -1)
+    }
+    // Never leave a dangling high surrogate whose low half was just cut off.
+    return out.replace(/[\uD800-\uDBFF]$/, '')
+}
+
+/** Collapse `s` into ONE filesystem-safe path segment. Pure.
+ *
+ *  Anything outside `[A-Za-z0-9._-]` becomes `-`, EXCEPT non-ASCII (>= U+0080),
+ *  which every target filesystem stores fine and which keeps a CJK branch name
+ *  readable. Astral chars survive as their surrogate pair (both code units fall
+ *  inside the preserved range), so no `u` flag is needed — `\p{…}` escapes are
+ *  unavailable at this tsconfig's es2016 target.
+ *
+ *  Leading/trailing `-` and `.` are stripped, so the result can never be `.`,
+ *  `..`, a dotfile, a leading-dash arg, or a Windows-illegal trailing dot. */
+function slugSegment (s: string, max: number = MAX_SLUG_BYTES): string {
+    const slug = s
+        .replace(/[^A-Za-z0-9._\u0080-\uFFFF-]+/g, '-')
+        .replace(/-{2,}/g, '-')
+        .replace(/^[-.]+/, '')
+        .replace(/[-.]+$/, '')
+    // Cap first, then re-strip: the cut can expose a fresh trailing `-`/`.`.
+    return capBytes(slug, max).replace(/[-.]+$/, '')
+}
+
+/** ONE leaf-safe, human-readable path segment for `branch`. Pure.
+ *  `agent/bug_fix` → `agent-bug_fix-3f2a1c9b04`.
+ *
+ *  The short sha1 of the EXACT branch is not decoration — it buys two properties
+ *  the slug alone cannot:
+ *
+ *  - **Injective.** Slugging is lossy: `agent/bug_fix` and `agent-bug_fix` are
+ *    distinct branches that git lets coexist, and they slug identically. Two sets
+ *    sharing one dir is a data-loss bug — `removeSet` does `fs.rm(isolatedRoot)`
+ *    and `persistSet` dedupes on it, so one set would delete (and evict) the
+ *    other's worktree. The suffix keeps distinct branches on distinct dirs.
+ *  - **Total.** An all-punctuation branch slugs to `""`, and `aux`/`con`/`nul`
+ *    are reserved, uncreatable names on Windows. The suffix means the leaf is
+ *    never empty and never a bare reserved name.
+ *
+ *  Supersedes an `encodeURIComponent` scheme that was injective but spelled `/`
+ *  as `%2F` and `.` as `%2E` — correct, unreadable, and awkward in a shell. */
+export function branchLeaf (branch: string): string {
+    const digest = crypto.createHash('sha1').update(branch).digest('hex').slice(0, 10)
+    const slug = slugSegment(branch)
+    return slug ? `${slug}-${digest}` : digest
+}
+
 /** Where a worktree set lives on disk. Pure.
  *
  *  Globally unique per (absolute root, branch): the dir name carries a stable hash
  *  of the ABSOLUTE root path, so two different workspaces that merely share a
  *  basename (`/a/project` and `/b/project`) never collide onto the same dir — which
  *  would let one set's `fs.rm` delete another's. The branch becomes ONE leaf-safe
- *  path segment: encodeURIComponent collapses any `/` (no nesting, so `agent` and
- *  `agent/x` can't become a parent/child removal hazard) and we also escape `.` so
- *  the segment can never resolve to `.`/`..`. */
+ *  path segment via `branchLeaf` — never nested, so `agent` and `agent/x` can't
+ *  become a parent/child removal hazard. */
 export function isolatedRootFor (root: string, branch: string): string {
     const absRoot = path.resolve(root)
-    const name = (path.basename(absRoot) || 'workspace').replace(/[^\w.-]/g, '_')
+    const name = slugSegment(path.basename(absRoot)) || 'workspace'
     const hash = crypto.createHash('sha1').update(absRoot).digest('hex').slice(0, 10)
-    let leaf = encodeURIComponent(branch).replace(/\./g, '%2E')
-    // A git-valid branch can encode past the 255-byte filename-component limit
-    // (`/`→`%2F` etc.); cap it and append a hash of the full branch for uniqueness.
-    if (leaf.length > 200) {
-        leaf = leaf.slice(0, 188) + '-' + crypto.createHash('sha1').update(branch).digest('hex').slice(0, 10)
-    }
-    return path.join(MANAGED_ROOT, `${name}-${hash}`, leaf)
+    return path.join(MANAGED_ROOT, `${name}-${hash}`, branchLeaf(branch))
 }
 
 /** Structural validator for a persisted registry entry. Pure. Rejects anything
