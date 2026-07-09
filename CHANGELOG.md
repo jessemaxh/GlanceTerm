@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.5](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.4...v0.3.5) (2026-07-09)
+
+
+### Features
+
+* **app:** add "Check for Updates…" to the macOS app menu under About ([#104](https://github.com/jessemaxh/GlanceTerm/issues/104)) ([53d44fd](https://github.com/jessemaxh/GlanceTerm/commit/53d44fde905510982734111394af71f253d2753e))
+
+
+### Bug Fixes
+
+* **worktree:** name isolated dirs readably instead of percent-escaping them ([#105](https://github.com/jessemaxh/GlanceTerm/issues/105)) ([0a6a27b](https://github.com/jessemaxh/GlanceTerm/commit/0a6a27b8493061047d539c2b96de84df977e2af4))
+
 ## [0.3.4](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.3...v0.3.4) (2026-07-06)
 
 
