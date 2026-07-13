@@ -7,24 +7,28 @@ const FIRST_CHECK_DELAY_MS = 8_000
 /** Re-check cadence for a long-running window. Releases land on the order of
  *  days, so 6h keeps an always-open window current without being noisy. */
 const INTERVAL_HOURS = 6
+/** localStorage key holding the last `version` the user dismissed with "Later",
+ *  so the notify shows once per NEW version, not every 6h poll. */
+const DISMISS_KEY = 'glanceterm.autoUpdate.dismissedVersion'
 
 /**
- * In-app auto-update driver (renderer side).
+ * In-app update NOTIFIER (renderer side).
  *
- * GlanceTerm ships with electron-updater wired in the main process
- * ({@link ../../app/lib/window.ts} `setupUpdater`): it polls the GitHub release
- * feed (`latest-${arch}-mac.yml`, baked via `build.publish` in
- * `scripts/build-macos.mjs`), auto-downloads a newer signed build, and — with
- * `autoInstallOnAppQuit` — applies it on the next quit. The main process only
- * *checks* when the renderer asks it to (`updater:check-for-updates`), so this
- * service is the thing that asks: once shortly after launch, then on an
- * interval. GitHub releases are the single source of truth — there is no config
- * to maintain (cf. the dormant JSON-config {@link UpdateCheckService}).
+ * GlanceTerm's main process ({@link ../../app/lib/window.ts} `setupUpdater`)
+ * polls the GitHub release feed for a newer version but — deliberately — does
+ * NOT download or install it: the in-process install runs Squirrel's ShipIt,
+ * which on macOS 15/26 pops an "add a new helper tool" admin-password prompt
+ * (and Cancel aborts the update). Instead, on `updater:update-available` the
+ * main process hands us the new version + a direct `.dmg` URL, and this service
+ * offers a one-click **Download** that opens it in the browser. The user
+ * drag-installs — which touches no launchd helper and so never prompts.
  *
- * On `updater:update-downloaded` it offers an immediate restart; declining is
- * fine because the update installs on quit regardless. Any updater error
- * (unreachable feed, unpacked dev app, signature mismatch …) is swallowed —
- * a broken update path must never disrupt normal terminal use (fail-open).
+ * This service is the thing that ASKS the main process to check
+ * (`updater:check-for-updates`): once shortly after launch, then on an interval.
+ * GitHub releases are the single source of truth — there is no config to
+ * maintain (cf. the dormant JSON-config {@link UpdateCheckService}). Any updater
+ * error (unreachable feed, unpacked dev app, signature mismatch …) is swallowed
+ * — a broken update path must never disrupt normal terminal use (fail-open).
  */
 @Injectable({ providedIn: 'root' })
 export class AutoUpdateService implements OnDestroy {
@@ -34,10 +38,10 @@ export class AutoUpdateService implements OnDestroy {
     private timer?: ReturnType<typeof setInterval>
     private firstCheck?: ReturnType<typeof setTimeout>
     /** Guards against stacking a second dialog while one is still open. NOT a
-     *  once-ever latch: electron-updater fires `update-downloaded` once per
-     *  downloaded version, so dropping the latch lets a NEWER build (downloaded
-     *  later in a long-running session) re-prompt — which is the whole point of
-     *  the 6h re-check cadence. */
+     *  once-ever latch: `update-available` fires once per poll that finds a newer
+     *  version, and a NEWER build appearing later in a long-running session
+     *  should re-notify — which is the whole point of the 6h re-check cadence.
+     *  Repeat-nagging for the SAME version is suppressed via {@link DISMISS_KEY}. */
     private prompting = false
 
     constructor (
@@ -62,8 +66,8 @@ export class AutoUpdateService implements OnDestroy {
             return
         }
 
-        this.ipc.on('updater:update-downloaded', () =>
-            this.zone.run(() => void this.onDownloaded()))
+        this.ipc.on('updater:update-available', (_e: any, version: string, url: string) =>
+            this.zone.run(() => void this.onUpdateAvailable(version, url)))
         this.ipc.on('updater:error', (_e: any, message: string, integrity?: boolean) => {
             // Fail-open: never disrupt normal use. But split a security-relevant
             // integrity/signature failure (possible tampering — main classifies
@@ -87,8 +91,11 @@ export class AutoUpdateService implements OnDestroy {
         this.ipc?.send('updater:check-for-updates')
     }
 
-    private async onDownloaded (): Promise<void> {
-        if (this.prompting) {
+    private async onUpdateAvailable (version: string, url: string): Promise<void> {
+        // Show once per version — don't re-nag every 6h poll for a version the
+        // user already deferred. A newer version later clears this naturally
+        // (different value), so it re-notifies exactly once for each new release.
+        if (this.prompting || this.getDismissed() === version) {
             return
         }
         this.prompting = true
@@ -97,17 +104,37 @@ export class AutoUpdateService implements OnDestroy {
                 // Tabby's MessageBoxOptions only allows 'warning' | 'error';
                 // 'warning' is the non-alarmist choice for an informational nudge.
                 type: 'warning',
-                message: 'A GlanceTerm update is ready',
-                detail: 'It installs automatically when you quit GlanceTerm. Restart now to apply it immediately.',
-                buttons: ['Restart now', 'Later'],
+                message: `GlanceTerm ${version} is available`,
+                detail: 'Download opens in your browser. Drag the new app into Applications to update — no admin password needed.',
+                buttons: ['Download', 'Later'],
                 defaultId: 0,
                 cancelId: 1,
             })
-            if (r.response === 0) {
-                this.ipc?.send('updater:quit-and-install')
+            // Remember we surfaced THIS version regardless of choice; clicking
+            // Download opens the page but the user may not actually install, and
+            // the next genuinely-newer release will notify again (different key).
+            this.setDismissed(version)
+            if (r.response === 0 && url) {
+                void this.platform.openExternal(url)
             }
         } finally {
             this.prompting = false
+        }
+    }
+
+    private getDismissed (): string | null {
+        try {
+            return localStorage.getItem(DISMISS_KEY)
+        } catch {
+            return null
+        }
+    }
+
+    private setDismissed (version: string): void {
+        try {
+            localStorage.setItem(DISMISS_KEY, version)
+        } catch {
+            /* private mode / quota — non-fatal, we may just re-notify */
         }
     }
 
