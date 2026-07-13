@@ -531,7 +531,14 @@ export class Window {
         // one notification shows no matter how many windows are open. Ship the
         // version + a direct .dmg URL so the renderer can offer one-click Download.
         autoUpdater.on('update-available', info => {
+            // Always record the URL (so a quit-and-install redirect has a target),
+            // but when the "Check for Updates…" menu is running its OWN check it
+            // shows its own dialog — don't ALSO forward to the renderer, or one
+            // manual click pops two dialogs.
             latestDownloadUrl = macUpdateDownloadUrl(info.version)
+            if (application.manualUpdateCheckInFlight) {
+                return
+            }
             application.sendToActiveWindow('updater:update-available', info.version, latestDownloadUrl)
         })
         autoUpdater.on('update-not-available', () => application.sendToActiveWindow('updater:update-not-available'))

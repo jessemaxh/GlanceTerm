@@ -27,6 +27,11 @@ export class Application {
     private cachedPlasmaVersion?: [number, number] | null
     private globalHotkey$ = new Subject<void>()
     private quitRequested = false
+    /** True while the "Check for Updates…" menu runs its own version check.
+     *  window.ts's `update-available` forward reads this and skips notifying the
+     *  renderer during a manual check, so one menu click shows ONE dialog (the
+     *  native one below) instead of two (native + the renderer's Download prompt). */
+    manualUpdateCheckInFlight = false
     userPluginsPath: string
 
     // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
@@ -333,6 +338,11 @@ export class Application {
      * unhandled rejection.
      */
     private async checkForUpdatesFromMenu (): Promise<void> {
+        // Suppress the renderer's own Download prompt for THIS check —
+        // checkForUpdates() emits `update-available`, which window.ts would
+        // otherwise forward to AutoUpdateService, double-popping alongside the
+        // native dialog below. Reset in `finally` so auto-checks still notify.
+        this.manualUpdateCheckInFlight = true
         try {
             // Detection only — `autoDownload` is off (see window.ts), so we can't
             // rely on `downloadPromise`; compare the feed's version ourselves.
@@ -369,6 +379,8 @@ export class Application {
                 buttons: ['OK'],
                 defaultId: 0,
             })
+        } finally {
+            this.manualUpdateCheckInFlight = false
         }
     }
 

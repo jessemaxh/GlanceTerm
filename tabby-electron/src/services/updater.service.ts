@@ -1,5 +1,6 @@
 import { Injectable } from '@angular/core'
 import axios from 'axios'
+import { compare as compareVersions } from 'compare-versions'
 
 import { Logger, LogService, ConfigService, UpdaterService, PlatformService, TranslateService } from 'tabby-core'
 import { ElectronService } from '../services/electron.service'
@@ -117,7 +118,18 @@ export class ElectronUpdaterService extends UpdaterService {
             const response = await axios.get(UPDATES_URL)
             const data = response.data
             const version = data.tag_name.substring(1)
-            if (this.electron.app.getVersion() !== version) {
+            // Strictly NEWER than the running build — not merely different. A
+            // `!==` would flag a dev/prerelease build that is newer than the
+            // latest release as "update available" and open the release page,
+            // pointing the user at a downgrade. A parse failure on an odd version
+            // string fails safe to "no update" rather than nagging.
+            let newer = false
+            try {
+                newer = compareVersions(version, this.electron.app.getVersion(), '>')
+            } catch {
+                newer = false
+            }
+            if (newer) {
                 this.logger.info('Update available')
                 this.updateURL = data.html_url
                 return true
