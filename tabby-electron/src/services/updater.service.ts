@@ -30,7 +30,13 @@ export class ElectronUpdaterService extends UpdaterService {
         super()
         this.logger = log.create('updater')
 
-        if (process.platform === 'linux' || process.env.PORTABLE_EXECUTABLE_FILE) {
+        // macOS deliberately uses the fallback (browser-download) path too: the
+        // in-process electron-updater install runs Squirrel's ShipIt, which on
+        // macOS 15/26 pops an "add a new helper tool" admin-password prompt (and
+        // Cancel aborts the update). The `check()` fallback below hits the
+        // GitHub releases API and `update()` opens the release page in the
+        // browser — no ShipIt, no prompt. See app/lib/updateDownload.ts.
+        if (process.platform === 'linux' || process.platform === 'darwin' || process.env.PORTABLE_EXECUTABLE_FILE) {
             this.electronUpdaterAvailable = false
             return
         }

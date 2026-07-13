@@ -10,6 +10,7 @@ import { Subject, throttleTime } from 'rxjs'
 
 import { saveConfig } from './config'
 import { Window, WindowOptions } from './window'
+import { macUpdateDownloadUrl, isNewerVersion } from './updateDownload'
 import { pluginManager } from './pluginManager'
 import { PTYManager } from './pty'
 
@@ -333,17 +334,33 @@ export class Application {
      */
     private async checkForUpdatesFromMenu (): Promise<void> {
         try {
+            // Detection only — `autoDownload` is off (see window.ts), so we can't
+            // rely on `downloadPromise`; compare the feed's version ourselves.
+            // The "apply update" action is a browser .dmg download, never ShipIt,
+            // so no admin-password prompt (see ./updateDownload.ts).
             const result = await autoUpdater.checkForUpdates()
-            const available = !!result?.downloadPromise
-            await dialog.showMessageBox({
-                type: 'info',
-                message: available ? 'A new version is available' : 'GlanceTerm is up to date',
-                detail: available
-                    ? `Version ${result?.updateInfo.version} is downloading in the background and will install the next time you quit and reopen GlanceTerm.`
-                    : `You're on the latest version (${app.getVersion()}).`,
-                buttons: ['OK'],
-                defaultId: 0,
-            })
+            const latest = result?.updateInfo.version
+            if (latest && isNewerVersion(latest, app.getVersion())) {
+                const r = await dialog.showMessageBox({
+                    type: 'info',
+                    message: `GlanceTerm ${latest} is available`,
+                    detail: `You're on ${app.getVersion()}. The download opens in your browser — drag the new app into Applications to update. No admin password needed.`,
+                    buttons: ['Download', 'Later'],
+                    defaultId: 0,
+                    cancelId: 1,
+                })
+                if (r.response === 0) {
+                    void shell.openExternal(macUpdateDownloadUrl(latest))
+                }
+            } else {
+                await dialog.showMessageBox({
+                    type: 'info',
+                    message: 'GlanceTerm is up to date',
+                    detail: `You're on the latest version (${app.getVersion()}).`,
+                    buttons: ['OK'],
+                    defaultId: 0,
+                })
+            }
         } catch (err) {
             await dialog.showMessageBox({
                 type: 'error',
