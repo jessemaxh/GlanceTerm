@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.7](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.6...v0.3.7) (2026-07-13)
+
+
+### Bug Fixes
+
+* **build:** exclude test files from the ai-sidebar typings build ([#109](https://github.com/jessemaxh/GlanceTerm/issues/109)) ([134628b](https://github.com/jessemaxh/GlanceTerm/commit/134628b9833e499ad5ecc4aa4b4359c0ef3eff28))
+
 ## [0.3.6](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.5...v0.3.6) (2026-07-13)
 
 
