@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.6](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.5...v0.3.6) (2026-07-13)
+
+
+### Features
+
+* **update:** notify + browser DMG download on macOS, never ShipIt (no admin prompt) ([#107](https://github.com/jessemaxh/GlanceTerm/issues/107)) ([a88148c](https://github.com/jessemaxh/GlanceTerm/commit/a88148cef09ee31819f36f61ddf7de7ac5b8800c))
+
 ## [0.3.5](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.4...v0.3.5) (2026-07-09)
 
 
