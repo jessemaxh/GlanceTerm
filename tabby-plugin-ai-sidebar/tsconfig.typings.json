@@ -1,7 +1,8 @@
 {
   "extends": "../tsconfig.json",
   "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "typings"],
+  "// exclude tests": "Test/e2e files are never part of the shipped .d.ts API, and some import across the repo (e.g. app/lib helpers). Compiling them here would drag those out-of-rootDir files into the emit, shifting the declaration output path so dependent plugins (mobile-bridge) can't resolve `tabby-plugin-ai-sidebar` — which broke a release build. tsc typechecks tests via tsconfig.json + vitest runs them; they must NOT be in the typings build.",
+  "exclude": ["node_modules", "dist", "typings", "src/**/__tests__/**", "src/**/__e2e__/**"],
   "compilerOptions": {
     "baseUrl": "src",
     "emitDeclarationOnly": true,
