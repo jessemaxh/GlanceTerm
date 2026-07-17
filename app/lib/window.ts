@@ -1,14 +1,13 @@
 import * as glasstron from 'glasstron'
 import { autoUpdater } from 'electron-updater'
 import { Subject, Observable, debounceTime } from 'rxjs'
-import { BrowserWindow, app, ipcMain, Rectangle, Menu, screen, BrowserWindowConstructorOptions, TouchBar, nativeImage, WebContents, nativeTheme, shell } from 'electron'
+import { BrowserWindow, app, ipcMain, Rectangle, Menu, screen, BrowserWindowConstructorOptions, TouchBar, nativeImage, WebContents, nativeTheme, systemPreferences } from 'electron'
 import ElectronConfig = require('electron-config')
 import { enable as enableRemote } from '@electron/remote/main'
 import * as os from 'os'
 import * as path from 'path'
 import macOSRelease from 'macos-release'
 import { compare as compareVersions } from 'compare-versions'
-import { macUpdateDownloadUrl, releasesLatestUrl } from './updateDownload'
 
 import type { Application } from './app'
 import { parseArgs } from './cli'
@@ -509,38 +508,30 @@ export class Window {
         }
         Window.updaterWired = true
 
+        // Update the app bundle IN PLACE (write into Contents/) instead of
+        // moving the whole .app out of and back into /Applications. The default
+        // "move" method writes to the /Applications DIRECTORY (root:admin), which
+        // on macOS 15/26 makes Squirrel escalate to a privileged launchd helper
+        // — the "add a new helper tool" admin-password prompt that was silently
+        // breaking auto-updates (Cancel aborts the update). Direct-contents-write
+        // only needs the .app itself writable (it is — user-owned), leaving the
+        // parent directory untouched, so the install stays silent. This is the
+        // exact key + mechanism Electron's own autoUpdater spec uses to enable it
+        // (spec/api-autoupdater-darwin-spec.ts); Squirrel reads it from
+        // standardUserDefaults at install time.
+        systemPreferences.setUserDefault('SquirrelMacEnableDirectContentsWrite', 'boolean', true)
+
         const application = this.application
-        // DETECTION ONLY — never download or install in-process. The in-process
-        // install path runs Squirrel's ShipIt, which on macOS 15/26 pops an
-        // "add a new helper tool" admin-password prompt (Cancel aborts the whole
-        // update — a hard blocker for users who won't type an admin password).
-        // So we keep the GitHub feed's version CHECK and hand a newer version
-        // off to a browser .dmg download instead. See ./updateDownload.ts.
-        autoUpdater.autoDownload = false
-        autoUpdater.autoInstallOnAppQuit = false
-        // Never advertise an OLDER build than the one running (rollback /
+        autoUpdater.autoDownload = true
+        autoUpdater.autoInstallOnAppQuit = true
+        // Never silently apply an OLDER build than the one running (rollback /
         // botched-release protection). Explicit because electron-updater can
         // flip this on for some channel configurations.
         autoUpdater.allowDowngrade = false
 
-        // Remember the newest advertised .dmg URL so any legacy "install now"
-        // trigger can redirect to it instead of ShipIt (belt-and-suspenders).
-        let latestDownloadUrl: string | null = null
-
         // Route lifecycle events to a SINGLE window (focused → main → first) so
-        // one notification shows no matter how many windows are open. Ship the
-        // version + a direct .dmg URL so the renderer can offer one-click Download.
-        autoUpdater.on('update-available', info => {
-            // Always record the URL (so a quit-and-install redirect has a target),
-            // but when the "Check for Updates…" menu is running its OWN check it
-            // shows its own dialog — don't ALSO forward to the renderer, or one
-            // manual click pops two dialogs.
-            latestDownloadUrl = macUpdateDownloadUrl(info.version)
-            if (application.manualUpdateCheckInFlight) {
-                return
-            }
-            application.sendToActiveWindow('updater:update-available', info.version, latestDownloadUrl)
-        })
+        // the user sees exactly one restart prompt no matter how many are open.
+        autoUpdater.on('update-available', () => application.sendToActiveWindow('updater:update-available'))
         autoUpdater.on('update-not-available', () => application.sendToActiveWindow('updater:update-not-available'))
         autoUpdater.on('error', err => {
             // A checksum/signature/integrity failure is security-relevant (a
@@ -553,6 +544,14 @@ export class Window {
             const integrity = /sha512|checksum|signature|not signed|integrity|tamper/i.test(msg)
             application.sendToActiveWindow('updater:error', msg, integrity)
         })
+        // Track whether an update is actually staged, so a stray
+        // `updater:quit-and-install` (any window can send it) is a no-op rather
+        // than registering a dangling native listener on each call.
+        let updateStaged = false
+        autoUpdater.on('update-downloaded', () => {
+            updateStaged = true
+            application.sendToActiveWindow('updater:update-downloaded')
+        })
 
         // App-global actions — register on ipcMain once so ANY window can drive
         // them (not via this.on, which is scoped to one window's sender).
@@ -561,11 +560,11 @@ export class Window {
         // unhandledRejection — the 'error' event above still reaches the
         // renderer for logging (fail-open).
         ipcMain.on('updater:check-for-updates', () => void autoUpdater.checkForUpdates().catch(() => { /* surfaced via the 'error' event */ }))
-        // Deliberately NO quitAndInstall: the only "apply update" action is a
-        // browser download. Any legacy `updater:quit-and-install` (Tabby's built-in
-        // updater UI, a stray sender) opens the .dmg page rather than invoking
-        // ShipIt, so no code path can reach the admin-password prompt.
-        ipcMain.on('updater:quit-and-install', () => void shell.openExternal(latestDownloadUrl ?? releasesLatestUrl()))
+        ipcMain.on('updater:quit-and-install', () => {
+            if (updateStaged) {
+                autoUpdater.quitAndInstall()
+            }
+        })
     }
 
     private destroy () {

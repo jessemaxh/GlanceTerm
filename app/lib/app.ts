@@ -10,7 +10,6 @@ import { Subject, throttleTime } from 'rxjs'
 
 import { saveConfig } from './config'
 import { Window, WindowOptions } from './window'
-import { macUpdateDownloadUrl, isNewerVersion } from './updateDownload'
 import { pluginManager } from './pluginManager'
 import { PTYManager } from './pty'
 
@@ -27,11 +26,6 @@ export class Application {
     private cachedPlasmaVersion?: [number, number] | null
     private globalHotkey$ = new Subject<void>()
     private quitRequested = false
-    /** True while the "Check for Updates…" menu runs its own version check.
-     *  window.ts's `update-available` forward reads this and skips notifying the
-     *  renderer during a manual check, so one menu click shows ONE dialog (the
-     *  native one below) instead of two (native + the renderer's Download prompt). */
-    manualUpdateCheckInFlight = false
     userPluginsPath: string
 
     // eslint-disable-next-line @typescript-eslint/explicit-module-boundary-types
@@ -338,39 +332,18 @@ export class Application {
      * unhandled rejection.
      */
     private async checkForUpdatesFromMenu (): Promise<void> {
-        // Suppress the renderer's own Download prompt for THIS check —
-        // checkForUpdates() emits `update-available`, which window.ts would
-        // otherwise forward to AutoUpdateService, double-popping alongside the
-        // native dialog below. Reset in `finally` so auto-checks still notify.
-        this.manualUpdateCheckInFlight = true
         try {
-            // Detection only — `autoDownload` is off (see window.ts), so we can't
-            // rely on `downloadPromise`; compare the feed's version ourselves.
-            // The "apply update" action is a browser .dmg download, never ShipIt,
-            // so no admin-password prompt (see ./updateDownload.ts).
             const result = await autoUpdater.checkForUpdates()
-            const latest = result?.updateInfo.version
-            if (latest && isNewerVersion(latest, app.getVersion())) {
-                const r = await dialog.showMessageBox({
-                    type: 'info',
-                    message: `GlanceTerm ${latest} is available`,
-                    detail: `You're on ${app.getVersion()}. The download opens in your browser — drag the new app into Applications to update. No admin password needed.`,
-                    buttons: ['Download', 'Later'],
-                    defaultId: 0,
-                    cancelId: 1,
-                })
-                if (r.response === 0) {
-                    void shell.openExternal(macUpdateDownloadUrl(latest))
-                }
-            } else {
-                await dialog.showMessageBox({
-                    type: 'info',
-                    message: 'GlanceTerm is up to date',
-                    detail: `You're on the latest version (${app.getVersion()}).`,
-                    buttons: ['OK'],
-                    defaultId: 0,
-                })
-            }
+            const available = !!result?.downloadPromise
+            await dialog.showMessageBox({
+                type: 'info',
+                message: available ? 'A new version is available' : 'GlanceTerm is up to date',
+                detail: available
+                    ? `Version ${result?.updateInfo.version} is downloading in the background and will install the next time you quit and reopen GlanceTerm.`
+                    : `You're on the latest version (${app.getVersion()}).`,
+                buttons: ['OK'],
+                defaultId: 0,
+            })
         } catch (err) {
             await dialog.showMessageBox({
                 type: 'error',
@@ -379,8 +352,6 @@ export class Application {
                 buttons: ['OK'],
                 defaultId: 0,
             })
-        } finally {
-            this.manualUpdateCheckInFlight = false
         }
     }
 

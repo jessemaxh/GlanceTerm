@@ -1,6 +1,5 @@
 import { Injectable } from '@angular/core'
 import axios from 'axios'
-import { compare as compareVersions } from 'compare-versions'
 
 import { Logger, LogService, ConfigService, UpdaterService, PlatformService, TranslateService } from 'tabby-core'
 import { ElectronService } from '../services/electron.service'
@@ -31,13 +30,7 @@ export class ElectronUpdaterService extends UpdaterService {
         super()
         this.logger = log.create('updater')
 
-        // macOS deliberately uses the fallback (browser-download) path too: the
-        // in-process electron-updater install runs Squirrel's ShipIt, which on
-        // macOS 15/26 pops an "add a new helper tool" admin-password prompt (and
-        // Cancel aborts the update). The `check()` fallback below hits the
-        // GitHub releases API and `update()` opens the release page in the
-        // browser — no ShipIt, no prompt. See app/lib/updateDownload.ts.
-        if (process.platform === 'linux' || process.platform === 'darwin' || process.env.PORTABLE_EXECUTABLE_FILE) {
+        if (process.platform === 'linux' || process.env.PORTABLE_EXECUTABLE_FILE) {
             this.electronUpdaterAvailable = false
             return
         }
@@ -118,18 +111,7 @@ export class ElectronUpdaterService extends UpdaterService {
             const response = await axios.get(UPDATES_URL)
             const data = response.data
             const version = data.tag_name.substring(1)
-            // Strictly NEWER than the running build — not merely different. A
-            // `!==` would flag a dev/prerelease build that is newer than the
-            // latest release as "update available" and open the release page,
-            // pointing the user at a downgrade. A parse failure on an odd version
-            // string fails safe to "no update" rather than nagging.
-            let newer = false
-            try {
-                newer = compareVersions(version, this.electron.app.getVersion(), '>')
-            } catch {
-                newer = false
-            }
-            if (newer) {
+            if (this.electron.app.getVersion() !== version) {
                 this.logger.info('Update available')
                 this.updateURL = data.html_url
                 return true
