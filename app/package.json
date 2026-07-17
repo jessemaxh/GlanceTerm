@@ -8,7 +8,7 @@
     "email": "noreply@glanceterm.dev"
   },
   "main": "dist/main.js",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "scripts": {
     "postinstall": "patch-package",
     "build": "webpack --progress --color --display-modules",

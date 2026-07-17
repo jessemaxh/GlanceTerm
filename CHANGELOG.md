@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.8](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.7...v0.3.8) (2026-07-17)
+
+
+### Bug Fixes
+
+* **update:** install macOS updates in place to avoid the admin-helper prompt ([#112](https://github.com/jessemaxh/GlanceTerm/issues/112)) ([bdcfa61](https://github.com/jessemaxh/GlanceTerm/commit/bdcfa6170d0aaa0b31331799ed4f5f2d6312eff4))
+
 ## [0.3.7](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.6...v0.3.7) (2026-07-13)
 
 
