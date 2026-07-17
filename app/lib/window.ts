@@ -518,7 +518,8 @@ export class Window {
         // parent directory untouched, so the install stays silent. This is the
         // exact key + mechanism Electron's own autoUpdater spec uses to enable it
         // (spec/api-autoupdater-darwin-spec.ts); Squirrel reads it from
-        // standardUserDefaults at install time.
+        // standardUserDefaults at install time. Only affects updates applied FROM
+        // a build that ships this — the running app's Squirrel does the install.
         systemPreferences.setUserDefault('SquirrelMacEnableDirectContentsWrite', 'boolean', true)
 
         const application = this.application
