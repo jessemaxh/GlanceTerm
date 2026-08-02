@@ -182,10 +182,11 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                              focused or not → no reflow/jump when focus moves) +
                              process-tree counts. We surface the process tree
                              GlanceTerm can observe, not terminal text. -->
-                        <div class="line3" *ngIf="s.aiTool && (s.cwd || s.subagentCount > 0 || s.backgroundJobCount > 0 || s.monitorCount > 0)">
+                        <div class="line3" *ngIf="s.aiTool && (s.cwd || s.subagentCount > 0 || s.workflowStartedAt || s.backgroundJobCount > 0 || s.monitorCount > 0)">
                             <span class="path-sub" *ngIf="s.cwd" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
                             <span class="l3-sp"></span>
-                            <span class="conc" *ngIf="s.subagentCount > 0 || s.backgroundJobCount > 0 || s.monitorCount > 0">
+                            <span class="conc" *ngIf="s.subagentCount > 0 || s.workflowStartedAt || s.backgroundJobCount > 0 || s.monitorCount > 0">
+                                <span class="wf" *ngIf="s.workflowStartedAt" [title]="workflowTitle(s)">workflow <b>{{ s.workflowCount }}</b> · {{ workflowElapsed(s) }}</span>
                                 <span *ngIf="s.subagentCount > 0" [title]="subagentTitle(s)"><b>{{ s.subagentCount }}</b> {{ s.subagentCount === 1 ? 'agent' : 'agents' }}</span>
                                 <span *ngIf="s.backgroundJobCount > 0" [title]="bgJobTitle(s)"><b>{{ s.backgroundJobCount }}</b> {{ bgLabel(s) }}</span>
                                 <span *ngIf="s.monitorCount > 0" [title]="monitorTitle(s)"><b>{{ s.monitorCount }}</b> {{ s.monitorCount === 1 ? 'monitor' : 'monitors' }}</span>
@@ -1022,6 +1023,14 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
             border-radius: 5px;
         }
         .conc b { color: var(--gt-proc); font-weight: 700; margin-right: 3px; }
+        /* Workflow chip — same shape as the other concurrency chips but tinted
+           with the WORKING colour, because a running workflow is what holds the
+           row at "working" (its agents run out-of-band, so the main agent has
+           already gone idle). Distinct from the cyan process chips so a glance
+           separates "the harness is running a fan-out" from "N subagents /
+           background jobs hanging off this agent". */
+        .conc > span.wf { color: var(--gt-working); background: color-mix(in srgb, var(--gt-working) 13%, transparent); }
+        .conc > span.wf b { color: var(--gt-working); }
 
         /* ---- agent + model pill (BRAND-THEMED, default) ----
            One pill holding a tool glyph, the tool name, and the active model.
@@ -2486,6 +2495,37 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         const h = Math.floor(m / 60)
         if (h < 24) return `${h}h`
         return `${Math.floor(h / 24)}d`
+    }
+
+    /** Elapsed time since the workflow launched, in the compact s/m/h shape the
+     *  rest of the row uses. */
+    workflowElapsed (s: TabState): string {
+        if (!s.workflowStartedAt) {
+            return ''
+        }
+        const sec = Math.max(0, Math.floor((Date.now() - s.workflowStartedAt) / 1000))
+        if (sec < 60) {
+            return `${sec}s`
+        }
+        const m = Math.floor(sec / 60)
+        if (m < 60) {
+            return `${m}m`
+        }
+        return `${Math.floor(m / 60)}h${m % 60 ? `${m % 60}m` : ''}`
+    }
+
+    workflowTitle (s: TabState): string {
+        const n = s.workflowCount
+        const noun = n === 1 ? 'agent' : 'agents'
+        // Deliberately no "N/M done": the hook stream carries no total. The
+        // script decides its own agent count at runtime (loops, budget scaling)
+        // and neither the Workflow tool's events nor the transcript expose it —
+        // a denominator would have to be invented. We show what is known: how
+        // many are running right now, and for how long.
+        return `A harness Workflow is running: ${n} ${noun} active right now, started `
+            + `${this.workflowElapsed(s)} ago. Workflow agents run out-of-band and are tracked `
+            + `from their own tool events (they emit no spawn signal), so this is a live count, `
+            + `not a total — run /workflows in the tab for progress and to stop it.`
     }
 
     subagentTitle (s: TabState): string {

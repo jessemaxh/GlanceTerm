@@ -384,6 +384,14 @@ export interface TabState {
      * subagentInFlight doc).
      */
     subagentCount: number
+    /** Live harness `Workflow`-tool agents (0 when no workflow is running).
+     *  Counted separately from {@link subagentCount} because workflow agents
+     *  emit no spawn signal and are tracked passively — see
+     *  `HookWatcher.workflowAgents`. */
+    workflowCount: number
+    /** When the tab's running workflow was launched (ms since epoch), else null.
+     *  Drives the sidebar's elapsed timer. */
+    workflowStartedAt: number | null
     /**
      * Number of long-lived child processes hanging off `aiPid` — proxy for
      * "backgrounded shells / jobs the agent kicked off and walked away
@@ -1117,6 +1125,13 @@ export class TabMonitor implements OnDestroy {
                 if (rawStatus === TabStatus.Idle && tabId && this.hooks.getSubagentInFlight(tabId) > 0) {
                     rawStatus = TabStatus.Working
                 }
+                // Same override for a running `Workflow`: its agents run
+                // out-of-band, so the main agent's turn ends (Stop → idle) while
+                // dozens of agents keep working for many minutes. Without this
+                // the row reads idle for the whole run — the reported bug.
+                if (rawStatus === TabStatus.Idle && tabId && this.hooks.getWorkflowInFlight(tabId) > 0) {
+                    rawStatus = TabStatus.Working
+                }
                 status = this.applyIdleGate(t.inner, rawStatus, snap.eventAt)
                 lastActiveMs = Math.max(0, Date.now() - snap.eventAt)
                 this.maybeProbeTranscriptInterrupt(t.inner, tabId, snap, status)
@@ -1181,6 +1196,8 @@ export class TabMonitor implements OnDestroy {
             // couldn't resolve a tabId (no env var captured yet, no hook
             // event yet, etc.), matching placeholderState.
             subagentCount: tabId ? this.hooks.getSubagentInFlight(tabId) : 0,
+            workflowCount: tabId ? this.hooks.getWorkflowInFlight(tabId) : 0,
+            workflowStartedAt: tabId ? this.hooks.getWorkflowStartedAt(tabId) : null,
             backgroundJobCount,
             monitorCount: tabId ? this.hooks.getMonitorInFlight(tabId) : 0,
             model,
@@ -1522,6 +1539,8 @@ export class TabMonitor implements OnDestroy {
             lastActiveMs: null,
             awaitingFirstEvent: false,
             subagentCount: 0,
+            workflowCount: 0,
+            workflowStartedAt: null,
             backgroundJobCount: 0,
             monitorCount: 0,
             model: null,

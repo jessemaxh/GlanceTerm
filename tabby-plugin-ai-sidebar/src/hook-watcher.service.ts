@@ -194,6 +194,35 @@ const BG_ARRIVAL_TTL_MS = 10_000
 const SUBAGENT_TOMBSTONE_TTL_MS = 60_000
 
 /**
+ * How long a passively-tracked `Workflow` agent may go silent before we treat
+ * it as gone. This is the ONLY thing that bounds an orphan — an id that emits
+ * tool calls and never gets a `SubagentStop` (12.7% of observed ids: 55 of 432
+ * across the local hook logs; the trace's `af57c354…` fired one PreToolUse and
+ * vanished). A tombstone cannot help there, since there is no stop to seed it.
+ *
+ * Sized off the real gap distribution between consecutive events from the SAME
+ * agent (measured over those logs): p50 1 s, p90 16 s, p99 80 s, p99.9 293 s.
+ * The long tail is a genuinely busy agent sitting inside one slow tool call
+ * (PreToolUse → … → PostToolUse), which must NOT be expired. 10 min clears
+ * p99.9 by ~2x, so a live agent is never dropped mid-work, while an orphan
+ * self-clears within 10 minutes instead of pinning the row forever — the
+ * failure mode that got passive-add removed in the first place.
+ */
+const WORKFLOW_AGENT_STALE_MS = 600_000
+
+/**
+ * Grace window after `PostToolUse(Workflow)` during which the tab counts as
+ * "workflow running" even with zero agents tracked yet.
+ *
+ * Needed because "drained to 0" is our end-of-workflow signal, and at launch
+ * the count is legitimately 0 until the first agent emits its first tool call
+ * (measured: ~6 s on a real run). Without the grace the workflow would be
+ * declared finished the instant it started. 2 min is far above that startup gap
+ * and still short enough that a workflow which dies at birth clears quickly.
+ */
+const WORKFLOW_ARM_GRACE_MS = 120_000
+
+/**
  * Fallback live-window for a Monitor task whose start event carried no
  * `monitor_timeout_ms` (older Claude builds, or a future Monitor schema
  * that renames the field). A Monitor never runs past its own timeout, so
@@ -436,6 +465,44 @@ export class HookWatcherService implements OnDestroy {
     private readonly subagentTombstones = new Map<string, Map<string, number>>()
 
     /**
+     * Per-tab tracker for harness `Workflow`-tool agents. Inner Map is
+     * `agentId → last-seen timestamp (ms since epoch)`.
+     *
+     * Why separate from {@link liveAgentIds}: workflow agents NEVER announce
+     * themselves. Verified 2026-08-02 on a real 41-agent run — `spawn_agent_id`
+     * count was 0, yet each agent emitted 40–62 in-flight Pre/PostToolUse events
+     * carrying its own `agent_id`, plus exactly one terminal `SubagentStop`. The
+     * authoritative-spawn-only rule that keeps `liveAgentIds` exact is therefore
+     * structurally blind here: the tab read idle while 41 agents ran 29 minutes.
+     * (This supersedes the 2026-06-17 note that no in-flight event with such an
+     * id ever arrives — that premise no longer holds in current Claude Code.)
+     *
+     * We ADD PASSIVELY here — an in-flight `agent_id` is direct evidence the
+     * agent is alive — but only under three containments, because passive-add is
+     * exactly what leaked before (see the STOP block: 12.7% of observed ids are
+     * orphans that emit tool calls and never stop):
+     *   1. ONLY while a workflow is armed on this tab (since the last
+     *      `PostToolUse(Workflow)`), so non-workflow tabs keep the exact,
+     *      authoritative-spawn-only behaviour untouched.
+     *   2. Tombstone-guarded, like `spawn` — a stop and a trailing in-flight
+     *      event can share a timestamp (observed: SubagentStop written BETWEEN a
+     *      PreToolUse and its PostToolUse in the same second), which would
+     *      otherwise resurrect a finished agent permanently.
+     *   3. Stale-expired on read (WORKFLOW_AGENT_STALE_MS) — the only defence
+     *      that works against orphans, which by definition never produce the
+     *      stop a tombstone would need.
+     *
+     * Reset on SessionStart/SessionEnd and by `clearSideChannel`, like the other
+     * session-scoped trackers.
+     */
+    private readonly workflowAgents = new Map<string, Map<string, number>>()
+
+    /** Per-tab timestamp (ms) of the most recent `PostToolUse(Workflow)` — when
+     *  the workflow was launched. Drives the sidebar's elapsed timer and arms
+     *  the passive-add path above. */
+    private readonly workflowStartedAt = new Map<string, number>()
+
+    /**
      * Per-tab FIFO queue of timestamps for PreToolUse(Bash,
      * run_in_background:true) events that haven't yet been matched to a
      * concrete child PID by TabMonitor's process-tree poll. Each entry
@@ -622,6 +689,99 @@ export class HookWatcherService implements OnDestroy {
      *  green even after the main agent fires Stop. */
     getSubagentInFlight (tabId: string): number {
         return this.liveAgentIds.get(tabId)?.size ?? 0
+    }
+
+    /**
+     * Fold one event into the per-tab `Workflow` tracker. Returns true if the
+     * tab's workflow state changed (so the caller can emit a snapshot).
+     *
+     * Ordering note: the stop branch runs BEFORE the passive add, and the add is
+     * tombstone-guarded, so a `SubagentStop` landing between an agent's
+     * PreToolUse and PostToolUse in the SAME second (observed) removes the agent
+     * and the trailing PostToolUse cannot resurrect it.
+     */
+    private trackWorkflowAgent (parsed: HookStatusFile, eventAt: number): boolean {
+        const tabId = parsed.tab_id
+        // Launch: arm the tab and stamp the start time. Both Pre/PostToolUse
+        // fire at launch (the tool returns a background task id immediately);
+        // PostToolUse is the one that means "the workflow is now running".
+        if (parsed.event === 'PostToolUse' && parsed.tool_name === 'Workflow') {
+            this.workflowStartedAt.set(tabId, eventAt || Date.now())
+            if (!this.workflowAgents.has(tabId)) {
+                this.workflowAgents.set(tabId, new Map())
+            }
+            return true
+        }
+        // Containment #1 — passive-add stays off entirely on tabs that never
+        // launched a workflow.
+        if (!this.workflowStartedAt.has(tabId)) {
+            return false
+        }
+        const agentId = parsed.agent_id
+        if (!agentId) {
+            return false
+        }
+        const agents = this.workflowAgents.get(tabId) ?? new Map<string, number>()
+
+        if (parsed.event === 'SubagentStop' || parsed.event === 'StopFailure') {
+            if (!agents.delete(agentId)) {
+                return false
+            }
+            this.workflowAgents.set(tabId, agents)
+            return true
+        }
+        if (parsed.event !== 'PreToolUse' && parsed.event !== 'PostToolUse') {
+            return false
+        }
+        // Containment #2 — never re-add an id we just saw stop. Reuses the same
+        // per-tab tombstone (and TTL) that guards the spawn path.
+        const stopTs = this.subagentTombstones.get(tabId)?.get(agentId)
+        if (stopTs !== undefined && eventAt - stopTs <= SUBAGENT_TOMBSTONE_TTL_MS) {
+            return false
+        }
+        const known = agents.has(agentId)
+        agents.set(agentId, eventAt || Date.now())
+        this.workflowAgents.set(tabId, agents)
+        // Refreshing last-seen on a known id isn't a user-visible change; only a
+        // genuinely new agent moves the count.
+        return !known
+    }
+
+    /** Live `Workflow`-tool agents for a tab, stale-expired on read (see
+     *  WORKFLOW_AGENT_STALE_MS — the orphan backstop). 0 when none are running.
+     *  Read every TabMonitor poll, so expiry needs no sweep timer. */
+    getWorkflowInFlight (tabId: string): number {
+        const agents = this.workflowAgents.get(tabId)
+        if (!agents) {
+            return 0
+        }
+        const now = this.now()
+        for (const [id, seen] of agents) {
+            if (now - seen > WORKFLOW_AGENT_STALE_MS) {
+                agents.delete(id)
+            }
+        }
+        return agents.size
+    }
+
+    /** When the tab's current workflow was launched (ms since epoch), or null.
+     *  Cleared once the run has drained, so a finished workflow stops showing an
+     *  ever-growing elapsed time. Verified on a real 41-agent / 29-minute run:
+     *  the live count never dipped to 0 mid-workflow, so "drained" is a sound
+     *  end signal (the stream carries no explicit completion event). */
+    getWorkflowStartedAt (tabId: string): number | null {
+        const startedAt = this.workflowStartedAt.get(tabId)
+        if (startedAt === undefined) {
+            return null
+        }
+        // Drained → the run is over, but only once past the arm grace: at launch
+        // the count is legitimately 0 until the first agent reports in.
+        if (this.getWorkflowInFlight(tabId) === 0 && this.now() - startedAt > WORKFLOW_ARM_GRACE_MS) {
+            this.workflowStartedAt.delete(tabId)
+            this.workflowAgents.delete(tabId)
+            return null
+        }
+        return startedAt
     }
 
     /** Sync lookup — how many Monitor tasks are currently live. Drives the
@@ -966,7 +1126,10 @@ export class HookWatcherService implements OnDestroy {
         // unbounded in count. Mirror the same delete shape the other
         // per-tab side-trackers above use.
         const tombDropped = this.subagentTombstones.delete(tabId)
+        const wfDropped = this.workflowAgents.delete(tabId)
+        const wfStartDropped = this.workflowStartedAt.delete(tabId)
         return snapshotDropped || liveDropped || offsetDropped || bgDropped || monDropped || tombDropped
+            || wfDropped || wfStartDropped
     }
 
     /**
@@ -1012,6 +1175,12 @@ export class HookWatcherService implements OnDestroy {
         for (const k of this.liveMonitorTaskIds.keys()) keys.add(k)
         for (const k of this.pendingBgArrivals.keys()) keys.add(k)
         for (const k of this.subagentTombstones.keys()) keys.add(k)
+        for (const k of this.workflowAgents.keys()) {
+            keys.add(k)
+        }
+        for (const k of this.workflowStartedAt.keys()) {
+            keys.add(k)
+        }
         for (const k of keys) {
             if (!liveTabIds.has(k)) this.dropTabState(k)
         }
@@ -1044,11 +1213,15 @@ export class HookWatcherService implements OnDestroy {
             && !this.liveMonitorTaskIds.has(tabId)
             && !this.pendingBgArrivals.has(tabId)
             && !this.subagentTombstones.has(tabId)
+            && !this.workflowAgents.has(tabId)
+            && !this.workflowStartedAt.has(tabId)
         ) return false
         this.liveAgentIds.delete(tabId)
         this.liveMonitorTaskIds.delete(tabId)
         this.pendingBgArrivals.delete(tabId)
         this.subagentTombstones.delete(tabId)
+        this.workflowAgents.delete(tabId)
+        this.workflowStartedAt.delete(tabId)
         return true
     }
 
@@ -1163,6 +1336,14 @@ export class HookWatcherService implements OnDestroy {
             ) {
                 events.push({ kind: 'stop', agentId: parsed.agent_id })
             }
+            // WORKFLOW agents — tracked in their own map, passively, because
+            // they never emit a spawn signal. See `workflowAgents` for the
+            // rationale and the three containments. Deliberately kept OUT of the
+            // `events`/reducer path above so the exact, authoritative
+            // `liveAgentIds` accounting stays untouched on non-workflow tabs.
+            if (this.trackWorkflowAgent(parsed, eventAt)) {
+                changed = true
+            }
             if (parsed.event === 'SessionStart' || parsed.event === 'SessionEnd') {
                 events.push({ kind: 'reset' })
             }
@@ -1265,6 +1446,16 @@ export class HookWatcherService implements OnDestroy {
                 // get falsely matched to the next new child of the freshly
                 // launched agent.
                 if (this.pendingBgArrivals.delete(parsed.tab_id)) changed = true
+                // Workflow tracking is session-scoped too: a workflow cannot
+                // outlive the session that launched it, and its passively-added
+                // ids would otherwise carry into the next session as a phantom
+                // "workflow running" chip.
+                if (this.workflowAgents.delete(parsed.tab_id)) {
+                    changed = true
+                }
+                if (this.workflowStartedAt.delete(parsed.tab_id)) {
+                    changed = true
+                }
                 // And for the live-monitor set: a Claude crash that left
                 // monitors "live" with no matching TaskStop would otherwise
                 // carry the count into the next session as a phantom badge.
