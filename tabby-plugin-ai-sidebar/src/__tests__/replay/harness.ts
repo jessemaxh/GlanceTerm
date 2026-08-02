@@ -176,6 +176,14 @@ export class ReplayHarness {
         return this.watcher.getMonitorInFlight(tabId)
     }
 
+    getWorkflowInFlight (tabId: string): number {
+        return this.watcher.getWorkflowInFlight(tabId)
+    }
+
+    getWorkflowStartedAt (tabId: string): number | null {
+        return this.watcher.getWorkflowStartedAt(tabId)
+    }
+
     /** Advance the harness's monitor-TTL clock (ms-since-epoch). Lets a
      *  spec assert that a monitor self-evicts once `now` passes its
      *  `eventAt + timeout_ms + grace` deadline, without real time. */

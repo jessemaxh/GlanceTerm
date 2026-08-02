@@ -215,6 +215,36 @@ const AI_PATTERNS: Array<{ tool: AiTool; regexes: RegExp[] }> = [
     },
 ]
 
+/**
+ * Decide the raw (pre-idle-gate) status for a tab from its hook snapshot plus
+ * the two out-of-band work signals. Pure, so the override this feature exists
+ * to deliver is directly testable — it previously lived inline in the poll loop
+ * and no test could reach it.
+ *
+ * Both overrides only ever turn Idle into Working:
+ *   - subagents: a main-agent `Stop` routinely fires WHILE a launched subagent
+ *     keeps working (real logs show the Stop and the subagent's next PreToolUse
+ *     in the same second). Surfacing idle there makes the row flap.
+ *   - workflow: its agents run out-of-band entirely, so the main agent's turn
+ *     ends and the row would read idle for the whole run — the reported bug.
+ *     Keyed on "a workflow is running", NOT on a live count, because workflows
+ *     run in waves and the count is legitimately 0 in the troughs between them
+ *     (observed up to 78 s).
+ */
+export function resolveRawStatus (
+    snapStatus: TabStatus,
+    subagentCount: number,
+    workflowRunning: boolean,
+): TabStatus {
+    if (snapStatus !== TabStatus.Idle) {
+        return snapStatus
+    }
+    if (subagentCount > 0 || workflowRunning) {
+        return TabStatus.Working
+    }
+    return TabStatus.Idle
+}
+
 export function detectAiToolFromCommand (command: string): AiTool | null {
     const match = AI_PATTERNS.find(p => p.regexes.some(r => r.test(command)))
     return match?.tool ?? null
@@ -384,6 +414,21 @@ export interface TabState {
      * subagentInFlight doc).
      */
     subagentCount: number
+    /** Live harness `Workflow`-tool agents (0 when no workflow is running).
+     *  Counted separately from {@link subagentCount} because workflow agents
+     *  emit no spawn signal and are tracked passively — see
+     *  `HookWatcher.workflowAgents`. */
+    workflowCount: number
+    /** When the tab's running workflow was launched (ms since epoch), else null.
+     *  Non-null IS the "a workflow is running" flag — the live count is 0 in the
+     *  troughs between waves, so it cannot be used for that. */
+    workflowStartedAt: number | null
+    /** How long the workflow has been running, stamped ONCE per states$ emission.
+     *  Precomputed rather than derived from Date.now() in a template binding:
+     *  the sidebar is CheckAlways and re-checked on every IPC chunk of
+     *  background-agent output, so a time-varying binding would churn the DOM
+     *  on the renderer hot path for the whole run. */
+    workflowElapsedMs: number
     /**
      * Number of long-lived child processes hanging off `aiPid` — proxy for
      * "backgrounded shells / jobs the agent kicked off and walked away
@@ -1113,10 +1158,11 @@ export class TabMonitor implements OnDestroy {
                 // Stop shows idle). This is safe now that the count is leak-free
                 // (orphan/late-spawn fixed) — a non-zero count means a subagent is
                 // genuinely working. (We tried idle-here; it caused the flap.)
-                let rawStatus = snap.status
-                if (rawStatus === TabStatus.Idle && tabId && this.hooks.getSubagentInFlight(tabId) > 0) {
-                    rawStatus = TabStatus.Working
-                }
+                const rawStatus = resolveRawStatus(
+                    snap.status,
+                    tabId ? this.hooks.getSubagentInFlight(tabId) : 0,
+                    tabId ? this.hooks.getWorkflowStartedAt(tabId) !== null : false,
+                )
                 status = this.applyIdleGate(t.inner, rawStatus, snap.eventAt)
                 lastActiveMs = Math.max(0, Date.now() - snap.eventAt)
                 this.maybeProbeTranscriptInterrupt(t.inner, tabId, snap, status)
@@ -1163,6 +1209,9 @@ export class TabMonitor implements OnDestroy {
             this.bgConfirmedPids.delete(t.inner)
         }
 
+        // Stamp the workflow clock once per emission — see workflowElapsedMs.
+        const workflowStartedAt = tabId ? this.hooks.getWorkflowStartedAt(tabId) : null
+
         return {
             outerTab: t.outer,
             innerTab: t.inner,
@@ -1181,6 +1230,9 @@ export class TabMonitor implements OnDestroy {
             // couldn't resolve a tabId (no env var captured yet, no hook
             // event yet, etc.), matching placeholderState.
             subagentCount: tabId ? this.hooks.getSubagentInFlight(tabId) : 0,
+            workflowCount: tabId ? this.hooks.getWorkflowInFlight(tabId) : 0,
+            workflowStartedAt: workflowStartedAt,
+            workflowElapsedMs: workflowStartedAt === null ? 0 : Math.max(0, Date.now() - workflowStartedAt),
             backgroundJobCount,
             monitorCount: tabId ? this.hooks.getMonitorInFlight(tabId) : 0,
             model,
@@ -1522,6 +1574,9 @@ export class TabMonitor implements OnDestroy {
             lastActiveMs: null,
             awaitingFirstEvent: false,
             subagentCount: 0,
+            workflowCount: 0,
+            workflowStartedAt: null,
+            workflowElapsedMs: 0,
             backgroundJobCount: 0,
             monitorCount: 0,
             model: null,

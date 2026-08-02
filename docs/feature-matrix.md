@@ -42,7 +42,7 @@ Adding a new agent means editing that file **and** adding a column here.
 | `idle` / "ready" state | ✅ | ✅ (Stop — verified e2e) | 🧪 (`AfterAgent`) | 🧪 (`session.idle`) |
 | `needs_permission` state | ✅ | 🧪 (PermissionRequest — fires only in interactive codex, not `exec`; untested e2e) | ❌ deferred (`Notification`/`ToolPermission` — matcher filtering unverified) | 🧪 (`permission.asked`) |
 | `done` (working → idle → unfocused) | ✅ | ✅ (derives from Stop — verified e2e) | 🧪 (depends on `AfterAgent`) | 🧪 (depends on `session.idle`) |
-| Subagent in-flight `· N agents` badge | ✅ (Task/Agent subagents only — Workflow-tool agents excluded, see note) | ❌ (side-channel is Claude-only by construction; Codex's hook payload carries no subagent id — see note) | ❌ adapter (not subscribed) | ❌ adapter (not surfaced) |
+| Subagent in-flight `· N agents` badge | ✅ (Task/Agent subagents only — Workflow-tool agents get their own chip, see note) | ❌ (side-channel is Claude-only by construction; Codex's hook payload carries no subagent id — see note) | ❌ adapter (not subscribed) | ❌ adapter (not surfaced) |
 | **Auto-approve** |||||
 | Shield button toggle (UI present) | ✅ | 🧪 (now active — auto-approves) | 🧪 (inert — auto-approve not possible) | 🧪 (inert — observe-only) |
 | Actually responds `allow` to permission prompts | ✅ | 🧪 (Codex added it in PR #17563 — same decision JSON as Claude, source-confirmed; untested e2e) | 🚫 (`Notification` is advisory — "cannot grant permissions automatically"; `BeforeTool` can only `deny`) | ❌ (observe-only; `permission.ask` interceptor exists but unused — flaky) |
@@ -141,22 +141,40 @@ subagent ran invisibly: real traces showed one `spawn_agent_id` but 4–8
 read "ready" while it worked. Agents spawned by the
 harness **`Workflow` tool** (the `agent()` calls inside a workflow script, the
 ones `/workflows` shows as `N/M agents done`) run **out-of-band in the workflow
-runtime**, not as Task subagents of the tab's Claude session. In the tab's hook
-log each workflow agent surfaces as **exactly one `SubagentStop`** — no
-`spawn_agent_id`, and none of its own in-flight `Pre/PostToolUse` events reach
-the tab (verified 2026-06-17: 117 of 131 stopped subagents in one workflow run
-had no spawn; a sampled workflow agent_id appeared once, only as `SubagentStop`).
-The `Workflow` tool's own `Pre/PostToolUse` both fire at launch (it returns a
-background task id immediately) and carry no agent count or run id. So the hook
-stream exposes **neither a start signal nor a total** for workflow agents — an
-accurate live count is not derivable from hooks, and re-enabling the old
-"passive liveness" add (bare `agent_id`) would not help, because no in-flight
-event with that id ever lands in the log. The only on-disk source of the real
-`N/M` is the harness-internal workflow journal under
-`~/.claude/projects/<proj>/<session>/workflows/`, which is uncontracted and
-version-fragile; deliberately NOT read. A workflow-running tab still shows
-`working` from the parent agent's own activity — only the per-agent count is
-absent.
+runtime**, not as Task subagents of the tab's Claude session, and are tracked
+**separately** — see the workflow chip below. They never appear in this badge.
+
+**Workflow chip `workflow N · 24m` (Claude only).** Re-measured 2026-08-02 across
+five real runs (72 agents): workflow agents emit **zero `spawn_agent_id`**, so the
+authoritative-spawn `· N agents` path is structurally blind to them. But — unlike
+the 2026-06-17 note this supersedes — each one DOES emit its own in-flight
+`Pre/PostToolUse` events carrying a top-level `agent_id`, plus one terminal
+`SubagentStop`. Those in-flight events are what the chip counts, added passively
+and only while a run is live, excluded from `liveAgentIds` so an ordinary
+subagent is not double-counted, tombstone-guarded (26% of workflow agents emit a
+trailing tool event AFTER their stop), and staleness-bounded. The row is held at
+`working` for the run, which is the point: workflow agents run out-of-band, so
+the parent agent's turn ENDS and the row previously read **idle for the whole
+run** (measured: 29 minutes).
+
+**No `N/M`.** The stream carries no total — a workflow script picks its own agent
+count at runtime (loops, budget scaling), and neither the `Workflow` tool's
+events nor the transcript expose it. The chip shows live agents and elapsed only.
+The harness-internal workflow journal under
+`~/.claude/projects/<proj>/<session>/workflows/` does hold the real `N/M`, but it
+is uncontracted and version-fragile; deliberately NOT read.
+
+**KNOWN LIMITATION — the chip can drop out mid-run.** Liveness is inferred from
+agent events, and a workflow can go silent far longer than any window we could
+justify: one captured 65-minute run had a **2274 s (38 min)** stretch with zero
+agent events, because the agents working through it were of the kind that emit
+only a terminal `SubagentStop` and nothing in flight (4 of 72). During such a
+stretch the hook stream carries no signal at all, so the chip disappears and the
+row reverts to `idle` until the next agent event. Replaying the five captured
+runs gives chip uptime of 100% / 99.6% / 99.4% on three of them and materially
+less on the two with long silent stretches. Widening the window to cover them
+would mean an equally long phantom chip and delayed "ready" notification after
+every run — a worse trade. This is a limit of the event source.
 
 ### Gemini CLI — adapter shipped (`gemini.ts`), UNTESTED
 
