@@ -30,12 +30,22 @@ const ev = (e: Partial<TraceEvent>): TraceEvent => ({
     ...e,
 } as TraceEvent)
 
-const launch = (h: ReplayHarness, at: number) =>
-    h.process(ev({ event: 'PostToolUse', tool_name: 'Workflow', ts: at }))
-const work = (h: ReplayHarness, agentId: string, at: number, event = 'PostToolUse') =>
-    h.process(ev({ event, tool_name: 'Bash', agent_id: agentId, ts: at }))
-const stop = (h: ReplayHarness, agentId: string, at: number, event = 'SubagentStop') =>
-    h.process(ev({ event, agent_id: agentId, ts: at }))
+// Always advance the harness clock with the fixture. Its default `_now` is 0,
+// so a spec that never calls setNow evaluates liveness at a NEGATIVE elapsed and
+// `isWorkflowRunning` is vacuously true — which silently voided several of these
+// assertions in an earlier revision.
+const launch = (h: ReplayHarness, at: number) => {
+    h.setNow(at * S)
+    return h.process(ev({ event: 'PostToolUse', tool_name: 'Workflow', ts: at }))
+}
+const work = (h: ReplayHarness, agentId: string, at: number, event = 'PostToolUse') => {
+    h.setNow(at * S)
+    return h.process(ev({ event, tool_name: 'Bash', agent_id: agentId, ts: at }))
+}
+const stop = (h: ReplayHarness, agentId: string, at: number, event = 'SubagentStop') => {
+    h.setNow(at * S)
+    return h.process(ev({ event, agent_id: agentId, ts: at }))
+}
 
 describe('Workflow agents — passive tracking', () => {
     it('counts agents that emit no spawn signal, without touching the exact count', () => {
@@ -87,25 +97,10 @@ describe('Workflow agents — passive tracking', () => {
         launch(h, 1000)
         work(h, 'a1', 1010)
         stop(h, 'a1', 1100)
-        h.setNow(1100 * S + 299_000)          // just inside the quiet window
+        h.setNow(1100 * S + 179_000)          // just inside the quiet window
         expect(h.getWorkflowStartedAt(TAB)).toBe(1000 * S)
-        h.setNow(1100 * S + 301_000)          // past it
+        h.setNow(1100 * S + 181_000)          // past it
         expect(h.getWorkflowStartedAt(TAB)).toBeNull()
-    })
-
-    // Nothing is deleted when the run is judged finished, so a late wave — or a
-    // misjudged quiet window — is always recoverable.
-    it('a late agent event revives a workflow already judged finished', () => {
-        const h = new ReplayHarness()
-        launch(h, 1000)
-        work(h, 'a1', 1010)
-        stop(h, 'a1', 1100)
-        h.setNow(1100 * S + 400_000)
-        expect(h.getWorkflowStartedAt(TAB)).toBeNull()
-        work(h, 'late', 1600)
-        h.setNow(1600 * S)
-        expect(h.getWorkflowStartedAt(TAB)).toBe(1000 * S)
-        expect(h.getWorkflowInFlight(TAB)).toBe(1)
     })
 
     it('a same-second trailing tool event cannot resurrect a stopped agent', () => {
@@ -205,12 +200,108 @@ describe('Workflow agents — passive tracking', () => {
         expect(h.getWorkflowStartedAt(TAB)).toBeNull()
     })
 
-    it('does not restamp the clock when already armed (elapsed never jumps back)', () => {
+    it('does not restamp while the run is still live (elapsed never jumps back)', () => {
         const h = new ReplayHarness()
         launch(h, 1000)
         work(h, 'a1', 1006)
-        launch(h, 5000)
+        launch(h, 1010)                        // nested / duplicate call mid-run
         expect(h.getWorkflowStartedAt(TAB)).toBe(1000 * S)
+    })
+
+    // A second workflow in the same session previously inherited the first
+    // run's clock forever — measured at +39h and +40h of bogus elapsed on a
+    // real tab, because the guard tested "ever armed" rather than "running".
+    it('a NEW workflow after the previous one ended restamps the clock', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'a1', 1010)
+        stop(h, 'a1', 1100)
+        h.setNow(1100 * S + 200_000)           // run 1 is over
+        expect(h.getWorkflowStartedAt(TAB)).toBeNull()
+        launch(h, 5000)
+        work(h, 'b1', 5010)
+        expect(h.getWorkflowStartedAt(TAB)).toBe(5000 * S)
+        expect(h.getWorkflowInFlight(TAB)).toBe(1)
+    })
+
+    // The phantom-chip regression: stray stops (Claude fires them by the
+    // hundred for ids we never tracked) must not resurrect a finished run.
+    it('a stray SubagentStop cannot revive a finished workflow', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'a1', 1010)
+        stop(h, 'a1', 1100)
+        h.setNow(1100 * S + 200_000)
+        expect(h.getWorkflowStartedAt(TAB)).toBeNull()
+        stop(h, 'never-tracked', 1400)
+        expect(h.getWorkflowStartedAt(TAB)).toBeNull()
+        expect(h.getWorkflowInFlight(TAB)).toBe(0)
+    })
+
+    // Same for an orphan ordinary agent_id after the run.
+    it('a stray tool event cannot revive a finished workflow', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'a1', 1010)
+        stop(h, 'a1', 1100)
+        h.setNow(1100 * S + 200_000)
+        work(h, 'orphan', 1400)
+        expect(h.getWorkflowStartedAt(TAB)).toBeNull()
+        expect(h.getWorkflowInFlight(TAB)).toBe(0)
+    })
+
+    it('an outstanding agent keeps the run alive past the quiet window', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'slow', 1010, 'PreToolUse')     // inside one long tool call
+        h.setNow(1010 * S + 500_000)            // way past WORKFLOW_QUIET_MS
+        expect(h.getWorkflowStartedAt(TAB)).toBe(1000 * S)
+    })
+
+    it('holds the arm grace when a launch is followed by silence, then gives up', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        h.setNow(1000 * S + 119_000)
+        expect(h.getWorkflowStartedAt(TAB)).toBe(1000 * S)
+        h.setNow(1000 * S + 121_000)
+        expect(h.getWorkflowStartedAt(TAB)).toBeNull()
+    })
+
+    it('a stop for an id this workflow never tracked does not extend the run', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'a1', 1010)
+        stop(h, 'a1', 1020)
+        stop(h, 'never-seen', 1100)             // must not refresh the clock
+        h.setNow(1020 * S + 181_000)
+        expect(h.getWorkflowStartedAt(TAB)).toBeNull()
+    })
+
+    it('the tombstone expires, so a much later event can start a new agent', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'a1', 1010)
+        stop(h, 'a1', 1020)
+        work(h, 'a1', 1090)                     // 70s later — past the 60s tombstone
+        expect(h.getWorkflowInFlight(TAB)).toBe(1)
+    })
+
+    it('dropping a closed tab clears its workflow state', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'a1', 1010)
+        h.watcher.retainOnly(new Set(['someone-else']))
+        expect(h.getWorkflowInFlight(TAB)).toBe(0)
+        expect(h.getWorkflowStartedAt(TAB)).toBeNull()
+        expect(h.watcher.clearSideChannel(TAB)).toBe(false)
+    })
+
+    it('clearSideChannel is not reported for a tab with nothing to clear', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'a1', 1010)
+        expect(h.watcher.clearSideChannel(TAB)).toBe(true)
+        expect(h.watcher.clearSideChannel(TAB)).toBe(false)
     })
 
     it('a nested Workflow launch from inside an agent does not restamp', () => {

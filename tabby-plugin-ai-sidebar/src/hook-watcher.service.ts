@@ -212,23 +212,31 @@ const SUBAGENT_TOMBSTONE_TTL_MS = 60_000
 const WORKFLOW_AGENT_STALE_MS = 900_000
 
 /**
- * How long a tab with a launched workflow may see NO workflow-agent event at
- * all before we call the run finished.
+ * How long a running workflow may see NO event from any of its agents before we
+ * call the run finished. Only consulted when nothing is currently in flight —
+ * a live agent keeps the run alive on its own (see `isWorkflowRunning`).
  *
  * This replaces an earlier "live count hit 0 ⇒ finished" rule, which was wrong:
- * workflows run in WAVES (concurrency ~8-10), and between waves the live set is
- * genuinely empty. Replaying the four captured runs, the inter-wave troughs are
- * 78 s, 63 s, 20 s and 8 s — so a count-based end signal tore the chip down
- * mid-run in 4 of 4 runs, losing it for 46% and 91% of the two longest ones and
- * silently restoring the very bug this feature fixes.
+ * workflows run in WAVES and the live set is genuinely empty between them
+ * (measured troughs across five real runs: 78 s, 63 s, 20 s, 8 s). 3 min clears
+ * the worst of those by ~2.3x.
  *
- * Measured from the LAST workflow-agent event (not from launch, which by
- * construction cannot cover a mid-run trough). 5 min clears the worst observed
- * trough by ~4x. Nothing is deleted when it elapses — see `getWorkflowStartedAt`
- * — so even an unprecedented longer gap only hides the chip until the next
- * agent event revives it.
+ * The cost is symmetric and deliberate: for up to this long AFTER a run really
+ * ends, the row stays `working` and the "ready" notification is withheld. Every
+ * increase buys trough tolerance and pays for it in notification latency, so
+ * this is kept as tight as the measured troughs allow.
+ *
+ * KNOWN LIMITATION — a workflow can go silent for far longer than any window we
+ * could justify here. One captured 65-minute run had a 2274 s (38 min) stretch
+ * with ZERO agent events, because the agents working through it were of the kind
+ * that emit only a terminal `SubagentStop` and nothing in flight (4 of 72
+ * observed agents). The hook stream carries no signal at all during such a
+ * stretch, so the chip WILL drop out and the row will read idle until the next
+ * agent event. Widening the window to cover it would mean an equally long
+ * phantom chip and notification delay after every run — a worse trade. This is
+ * a limit of the event source, not something a constant can fix.
  */
-const WORKFLOW_QUIET_MS = 300_000
+const WORKFLOW_QUIET_MS = 180_000
 
 /**
  * Launch-to-first-agent allowance, used only before any agent has reported.
@@ -731,19 +739,30 @@ export class HookWatcherService implements OnDestroy {
         const at = eventAt || this.now()
         // Launch. `PostToolUse` is the one that means "running" (both Pre and
         // Post fire at launch — the tool returns a background task id at once).
-        // An event carrying an agent_id is a NESTED launch from inside a
-        // workflow agent; it must not restamp the parent run's clock. Nor does a
-        // re-launch while already armed, so the elapsed timer never jumps back.
-        if (parsed.event === 'PostToolUse' && parsed.tool_name === 'Workflow' && !parsed.agent_id) {
-            if (this.workflowStartedAt.has(tabId)) {
+        //
+        // Gated on `isWorkflowRunning`, NOT on "has this tab ever armed": a tab
+        // keeps its workflow entry after a run ends (nothing is deleted from a
+        // read path), so a `has()` test would swallow every later launch and
+        // report the FIRST run's clock forever — measured at +39h and +40h of
+        // bogus elapsed on a real tab with three runs. A launch that arrives
+        // while a run is genuinely live is a nested/duplicate call and must not
+        // restamp; anything else starts a new run and resets its agents.
+        if (parsed.event === 'PostToolUse' && parsed.tool_name === 'Workflow') {
+            if (this.isWorkflowRunning(tabId)) {
                 return false
             }
             this.workflowStartedAt.set(tabId, at)
             this.workflowAgents.set(tabId, new Map())
+            this.workflowLastAgentAt.delete(tabId)
             return true
         }
-        // Containment #1 — passive-add is off entirely on tabs with no workflow.
-        if (!this.workflowStartedAt.has(tabId)) {
+        // Containment #1 — passive-add is live ONLY for the duration of a run.
+        // Keyed on `isWorkflowRunning`, not "ever armed": with the latter, every
+        // stray `agent_id` for the rest of the session kept re-arming a finished
+        // run — measured as 5h16m of phantom chip and 4h25m of an idle row
+        // forced to `working` on one real tab. Once a run is over, only a new
+        // `PostToolUse(Workflow)` starts tracking again.
+        if (!this.isWorkflowRunning(tabId)) {
             return false
         }
         const agentId = parsed.agent_id
@@ -753,14 +772,14 @@ export class HookWatcherService implements OnDestroy {
         const agents = this.workflowAgents.get(tabId) ?? new Map<string, number>()
 
         if (parsed.event === 'SubagentStop' || parsed.event === 'StopFailure') {
-            // A terminal event still proves the workflow was alive at `at`,
-            // so it refreshes the quiet-window clock even though it removes an
-            // agent — otherwise a wave ending would start the countdown from
-            // the previous wave's last tool call.
-            this.workflowLastAgentAt.set(tabId, at)
+            // Refresh the liveness clock ONLY once the id is confirmed to be one
+            // of this workflow's agents. Claude fires phantom `SubagentStop`s for
+            // ids we never tracked, by the hundred; refreshing first let any of
+            // them resurrect a finished run for another quiet window.
             if (!agents.delete(agentId)) {
                 return false
             }
+            this.workflowLastAgentAt.set(tabId, at)
             this.workflowAgents.set(tabId, agents)
             return true
         }
@@ -791,14 +810,29 @@ export class HookWatcherService implements OnDestroy {
      *  derives the answer from timestamps and never mutates, so a wave trough
      *  (observed up to 78 s) or any other misjudgement is always recoverable by
      *  the next agent event. */
+    /** True if this tab holds workflow state worth clearing. A tab whose run
+     *  ended keeps an inert entry (nothing is deleted from a read path), and
+     *  counting that as "clearable" made the right-click reset report "Agent
+     *  status reset" on tabs where nothing was stuck. */
+    private hasClearableWorkflowState (tabId: string): boolean {
+        return this.isWorkflowRunning(tabId) || (this.workflowAgents.get(tabId)?.size ?? 0) > 0
+    }
+
     private isWorkflowRunning (tabId: string): boolean {
         const startedAt = this.workflowStartedAt.get(tabId)
         if (startedAt === undefined) {
             return false
         }
+        // An agent that was seen and has not stopped is live, whatever the
+        // clock says. This is what carries a straggler sitting inside one long
+        // tool call: a 601 s `Bash` emits nothing between its Pre and Post, so
+        // the silence clock alone would declare the run over mid-work.
+        if (this.getWorkflowInFlight(tabId) > 0) {
+            return true
+        }
         const lastAgentAt = this.workflowLastAgentAt.get(tabId)
         if (lastAgentAt === undefined) {
-            // No agent has reported yet — only the launch allowance applies.
+            // Nothing has reported yet — only the launch allowance applies.
             return this.now() - startedAt <= WORKFLOW_ARM_GRACE_MS
         }
         return this.now() - lastAgentAt <= WORKFLOW_QUIET_MS
@@ -1259,9 +1293,7 @@ export class HookWatcherService implements OnDestroy {
             && !this.liveMonitorTaskIds.has(tabId)
             && !this.pendingBgArrivals.has(tabId)
             && !this.subagentTombstones.has(tabId)
-            && !this.workflowAgents.has(tabId)
-            && !this.workflowStartedAt.has(tabId)
-            && !this.workflowLastAgentAt.has(tabId)
+            && !this.hasClearableWorkflowState(tabId)
         ) return false
         this.liveAgentIds.delete(tabId)
         this.liveMonitorTaskIds.delete(tabId)
@@ -1317,22 +1349,19 @@ export class HookWatcherService implements OnDestroy {
             // floor — that's how we ignore the phantom SubagentStops Claude Code
             // fires for subagents we never observed spawning.
             //
-            // KNOWN LIMITATION — harness `Workflow`-tool agents are NOT counted
-            // here, by design. The `agent()` calls inside a workflow script (the
-            // ones `/workflows` reports as `N/M agents done`) run out-of-band in
-            // the workflow runtime, not as Task subagents of this tab's session.
-            // In this tab's hook log each workflow agent surfaces as EXACTLY ONE
-            // `SubagentStop` — no `spawn_agent_id`, and none of its own in-flight
-            // Pre/PostToolUse events reach the log (verified 2026-06-17). The
-            // `Workflow` tool's own Pre/PostToolUse both fire at launch (it
-            // returns a background task id immediately) and carry no count/runId.
-            // So the hook stream has neither a start signal nor a total for them:
-            // an accurate live count is not derivable here, and re-enabling
-            // passive-add would NOT help (no in-flight event with that id ever
-            // arrives — only the terminal stop). Do not "fix" this by reading the
-            // harness-internal workflow journal; it's uncontracted and
-            // version-fragile. See docs/feature-matrix.md ("`· N agents` badge
-            // counts Task/Agent subagents only").
+            // Harness `Workflow`-tool agents are NOT counted here — they have
+            // their own tracker (`workflowAgents` / the sidebar's workflow chip),
+            // because they emit no `spawn_agent_id` at all and so cannot be
+            // added by the authoritative path below. Keeping them out of this
+            // set is deliberate: it stays exact, spawn-signalled, and needs no
+            // time-based cleanup. See docs/feature-matrix.md for the measured
+            // behaviour and the chip's known drop-out limitation.
+            //
+            // (An older note here claimed workflow agents emit no in-flight
+            // events either, and concluded passive-add could never help. That
+            // was re-measured on 2026-08-02 across five runs and is no longer
+            // true — every agent that stops also emits in-flight events — which
+            // is what the separate tracker is built on.)
             //
             // tool_name: Claude renamed the subagent-spawning tool from `Task`
             // to `Agent`; we accept both. The spawn signal is spawn_agent_id,

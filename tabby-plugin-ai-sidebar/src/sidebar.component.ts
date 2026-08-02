@@ -186,10 +186,10 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                             <span class="path-sub" *ngIf="s.cwd" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
                             <span class="l3-sp"></span>
                             <span class="conc" *ngIf="s.subagentCount > 0 || s.workflowStartedAt || s.backgroundJobCount > 0 || s.monitorCount > 0">
-                                <span class="wf" *ngIf="s.workflowStartedAt" [title]="workflowTitle(s)">workflow<b *ngIf="s.workflowCount > 0">&nbsp;{{ s.workflowCount }}</b> · {{ workflowElapsed(s) }}</span>
                                 <span *ngIf="s.subagentCount > 0" [title]="subagentTitle(s)"><b>{{ s.subagentCount }}</b> {{ s.subagentCount === 1 ? 'agent' : 'agents' }}</span>
                                 <span *ngIf="s.backgroundJobCount > 0" [title]="bgJobTitle(s)"><b>{{ s.backgroundJobCount }}</b> {{ bgLabel(s) }}</span>
                                 <span *ngIf="s.monitorCount > 0" [title]="monitorTitle(s)"><b>{{ s.monitorCount }}</b> {{ s.monitorCount === 1 ? 'monitor' : 'monitors' }}</span>
+                                <span class="wf" *ngIf="s.workflowStartedAt" [title]="workflowTitle(s)">workflow<b *ngIf="s.workflowCount > 0">&nbsp;{{ s.workflowCount }}</b> · {{ workflowElapsed(s) }}</span>
                             </span>
                         </div>
                     </div>
@@ -1030,7 +1030,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
            separates "the harness is running a fan-out" from "N subagents /
            background jobs hanging off this agent". */
         .conc > span.wf { color: var(--gt-working); background: color-mix(in srgb, var(--gt-working) 13%, transparent); }
-        .conc > span.wf b { color: var(--gt-working); }
+        .conc > span.wf b { color: var(--gt-working); margin-right: 0; }
 
         /* ---- agent + model pill (BRAND-THEMED, default) ----
            One pill holding a tool glyph, the tool name, and the active model.
@@ -2522,12 +2522,17 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     workflowTitle (s: TabState): string {
         const n = s.workflowCount
         const noun = n === 1 ? 'agent' : 'agents'
+        // Between waves the live set is legitimately empty; saying "0 agents
+        // active" there reads as a stall, which is the opposite of the truth.
+        const active = n === 0
+            ? 'between waves right now (its agents start in batches)'
+            : `${n} ${noun} active right now`
         // Deliberately no "N/M done": the hook stream carries no total. The
         // script decides its own agent count at runtime (loops, budget scaling)
         // and neither the Workflow tool's events nor the transcript expose it —
         // a denominator would have to be invented. We show what is known: how
         // many are running right now, and for how long.
-        return `A harness Workflow is running: ${n} ${noun} active right now, started `
+        return `A harness Workflow is running: ${active}, started `
             + `${this.workflowElapsed(s)} ago. Workflow agents run out-of-band and are tracked `
             + `from their own tool events (they emit no spawn signal), so this is a live count, `
             + `not a total — run /workflows in the tab for progress and to stop it.`
