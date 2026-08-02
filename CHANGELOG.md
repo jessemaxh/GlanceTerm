@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.9](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.8...v0.3.9) (2026-08-02)
+
+
+### Features
+
+* **sidebar:** track harness Workflow agents and show a workflow chip ([#114](https://github.com/jessemaxh/GlanceTerm/issues/114)) ([ea88d7e](https://github.com/jessemaxh/GlanceTerm/commit/ea88d7e8777a1d93d855a992e9f14c2843c6ead6))
+
 ## [0.3.8](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.7...v0.3.8) (2026-07-17)
 
 
