@@ -102,6 +102,7 @@ export function makeTabState (tab: FakeTab, overrides: FakeStateOverrides = {}):
         subagentCount: 0,
         workflowCount: 0,
         workflowStartedAt: null,
+        workflowElapsedMs: 0,
         backgroundJobCount: 0,
         monitorCount: 0,
         model: null,

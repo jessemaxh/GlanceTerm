@@ -186,7 +186,7 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                             <span class="path-sub" *ngIf="s.cwd" [attr.title]="s.cwd">{{ displayCwd(s.cwd) }}</span>
                             <span class="l3-sp"></span>
                             <span class="conc" *ngIf="s.subagentCount > 0 || s.workflowStartedAt || s.backgroundJobCount > 0 || s.monitorCount > 0">
-                                <span class="wf" *ngIf="s.workflowStartedAt" [title]="workflowTitle(s)">workflow <b>{{ s.workflowCount }}</b> · {{ workflowElapsed(s) }}</span>
+                                <span class="wf" *ngIf="s.workflowStartedAt" [title]="workflowTitle(s)">workflow<b *ngIf="s.workflowCount > 0">&nbsp;{{ s.workflowCount }}</b> · {{ workflowElapsed(s) }}</span>
                                 <span *ngIf="s.subagentCount > 0" [title]="subagentTitle(s)"><b>{{ s.subagentCount }}</b> {{ s.subagentCount === 1 ? 'agent' : 'agents' }}</span>
                                 <span *ngIf="s.backgroundJobCount > 0" [title]="bgJobTitle(s)"><b>{{ s.backgroundJobCount }}</b> {{ bgLabel(s) }}</span>
                                 <span *ngIf="s.monitorCount > 0" [title]="monitorTitle(s)"><b>{{ s.monitorCount }}</b> {{ s.monitorCount === 1 ? 'monitor' : 'monitors' }}</span>
@@ -2503,7 +2503,12 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         if (!s.workflowStartedAt) {
             return ''
         }
-        const sec = Math.max(0, Math.floor((Date.now() - s.workflowStartedAt) / 1000))
+        // `lastActiveMs` is stamped once per states$ emission, so deriving the
+        // elapsed value from the row's own snapshot keeps this binding STABLE
+        // between emissions. Reading Date.now() here instead would produce a new
+        // string on every change-detection pass — and this component is
+        // CheckAlways, re-checked on every IPC chunk of background-agent output.
+        const sec = Math.floor(s.workflowElapsedMs / 1000)
         if (sec < 60) {
             return `${sec}s`
         }

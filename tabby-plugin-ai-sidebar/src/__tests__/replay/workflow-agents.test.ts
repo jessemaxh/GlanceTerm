@@ -1,136 +1,252 @@
 import { describe, it, expect } from 'vitest'
 
 import { ReplayHarness, TraceEvent } from './harness'
+import { resolveRawStatus, TabStatus } from '../../tab-monitor'
 
 /**
  * Harness `Workflow`-tool agents.
  *
- * Every shape here is taken from a REAL run captured in the local hook logs on
- * 2026-08-02 (`vidcatch-cross-review`, 41 agents / 29 minutes): the Workflow
- * tool's Pre+PostToolUse both fire at launch and carry no ids, each workflow
- * agent then emits its own in-flight Pre/PostToolUse with a top-level
- * `agent_id`, and ends with exactly one `SubagentStop`. Crucially the run
- * produced ZERO `spawn_agent_id` events — which is why the authoritative-spawn
- * `liveAgentIds` path is blind to them and the row showed idle for 29 minutes.
+ * Every shape and every timing constant asserted here comes from the four real
+ * workflow runs captured in the local hook logs (72 agents total; the largest
+ * run 41 agents / 29 minutes). Measurements referenced below:
+ *   - `spawn_agent_id` emitted by a workflow agent: 0 of 72.
+ *   - agents that emit ONLY a terminal stop and no in-flight event: 4 of 72.
+ *   - agents that emit a trailing tool event AFTER their stop: 19 of 72 (26%),
+ *     one of them a second BEFORE it.
+ *   - inter-wave troughs where the live count is legitimately 0: 78 s, 63 s,
+ *     20 s, 8 s.
+ *   - longest single tool call in the corpus: 601 s (Claude's default Bash
+ *     timeout is 600 s, so ~600 s is a designed-in cluster, not a tail).
  */
 
 const TAB = 'wf-tab'
-let clock = 1_700_000_000
+const S = 1000                       // ts is unix SECONDS; the code uses ts*1000
 
 const ev = (e: Partial<TraceEvent>): TraceEvent => ({
     tab_id: TAB,
     agent: 'claude',
     event: 'PostToolUse',
-    ts: clock,
+    ts: 0,
     ...e,
 } as TraceEvent)
 
-/** Launch a workflow (both events fire at launch, ~5s apart in the real trace). */
-const launch = (h: ReplayHarness, at: number) => {
-    clock = at
-    h.process(ev({ event: 'PreToolUse', tool_name: 'Workflow', ts: at }))
+const launch = (h: ReplayHarness, at: number) =>
     h.process(ev({ event: 'PostToolUse', tool_name: 'Workflow', ts: at }))
-}
-/** One in-flight tool event attributed to a workflow agent. */
 const work = (h: ReplayHarness, agentId: string, at: number, event = 'PostToolUse') =>
     h.process(ev({ event, tool_name: 'Bash', agent_id: agentId, ts: at }))
-const stop = (h: ReplayHarness, agentId: string, at: number) =>
-    h.process(ev({ event: 'SubagentStop', agent_id: agentId, ts: at }))
+const stop = (h: ReplayHarness, agentId: string, at: number, event = 'SubagentStop') =>
+    h.process(ev({ event, agent_id: agentId, ts: at }))
 
 describe('Workflow agents — passive tracking', () => {
-    it('counts agents that never emit a spawn signal (the reported bug)', () => {
+    it('counts agents that emit no spawn signal, without touching the exact count', () => {
         const h = new ReplayHarness()
         launch(h, 1000)
-        // Three agents show up only via their own tool events.
-        work(h, 'a1', 1006)
-        work(h, 'a2', 1007)
-        work(h, 'a3', 1008)
+        work(h, 'a1', 1006); work(h, 'a2', 1007); work(h, 'a3', 1008)
         expect(h.getWorkflowInFlight(TAB)).toBe(3)
-        // The exact, authoritative subagent count stays untouched — no spawn
-        // signal was ever seen, so it must remain 0.
+        // The authoritative subagent count must stay 0 — no spawn was ever seen.
         expect(h.getSubagentInFlight(TAB)).toBe(0)
     })
 
-    it('drains to 0 as each agent stops, and clears the workflow', () => {
+    it('is inert on a tab that never launched a workflow', () => {
         const h = new ReplayHarness()
-        launch(h, 1000)
-        work(h, 'a1', 1006); work(h, 'a2', 1007)
-        stop(h, 'a1', 1200)
-        expect(h.getWorkflowInFlight(TAB)).toBe(1)
-        stop(h, 'a2', 1300)
+        expect(work(h, 'orphan', 1006)).toBe(false)   // no state change at all
         expect(h.getWorkflowInFlight(TAB)).toBe(0)
-        // Past the arm grace → the run is over, so no stale elapsed timer.
-        h.setNow(1_000_000 * 1000)
         expect(h.getWorkflowStartedAt(TAB)).toBeNull()
     })
 
-    it('does NOT track agent_ids on a tab that never launched a workflow', () => {
+    it('arms on PostToolUse(Workflow) only, not PreToolUse', () => {
         const h = new ReplayHarness()
-        work(h, 'orphan', 1006)          // bare agent_id, no workflow armed
+        h.process(ev({ event: 'PreToolUse', tool_name: 'Workflow', ts: 1000 }))
+        expect(h.getWorkflowStartedAt(TAB)).toBeNull()
+        work(h, 'a1', 1006)
         expect(h.getWorkflowInFlight(TAB)).toBe(0)
-        expect(h.getSubagentInFlight(TAB)).toBe(0)
     })
 
-    // Real ordering hazard: a SubagentStop was written BETWEEN an agent's
-    // PreToolUse and its PostToolUse in the SAME second. Without the tombstone
-    // the trailing PostToolUse resurrects a finished agent — which is exactly
-    // how 6 of 41 agents leaked in the captured run.
+    // THE regression this feature exists for: workflows run in waves, and the
+    // live count is legitimately 0 between them. An earlier version tore the
+    // chip down on the first trough and could never re-arm, restoring the
+    // original bug for 46% and 91% of the two longest captured runs.
+    it('survives an inter-wave trough and keeps counting the next wave', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'w1a', 1010); work(h, 'w1b', 1011)
+        stop(h, 'w1a', 1100); stop(h, 'w1b', 1101)
+        // Trough: nothing live. Poll here, as the real poll loop would.
+        h.setNow(1102 * S)
+        expect(h.getWorkflowInFlight(TAB)).toBe(0)
+        expect(h.getWorkflowStartedAt(TAB)).toBe(1000 * S)   // still running
+        // Wave 2 starts 78 s later — the worst trough observed.
+        work(h, 'w2a', 1179)
+        h.setNow(1179 * S)
+        expect(h.getWorkflowInFlight(TAB)).toBe(1)
+        expect(h.getWorkflowStartedAt(TAB)).toBe(1000 * S)
+    })
+
+    it('ends the run only after a long silence, measured from the last agent event', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'a1', 1010)
+        stop(h, 'a1', 1100)
+        h.setNow(1100 * S + 299_000)          // just inside the quiet window
+        expect(h.getWorkflowStartedAt(TAB)).toBe(1000 * S)
+        h.setNow(1100 * S + 301_000)          // past it
+        expect(h.getWorkflowStartedAt(TAB)).toBeNull()
+    })
+
+    // Nothing is deleted when the run is judged finished, so a late wave — or a
+    // misjudged quiet window — is always recoverable.
+    it('a late agent event revives a workflow already judged finished', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'a1', 1010)
+        stop(h, 'a1', 1100)
+        h.setNow(1100 * S + 400_000)
+        expect(h.getWorkflowStartedAt(TAB)).toBeNull()
+        work(h, 'late', 1600)
+        h.setNow(1600 * S)
+        expect(h.getWorkflowStartedAt(TAB)).toBe(1000 * S)
+        expect(h.getWorkflowInFlight(TAB)).toBe(1)
+    })
+
     it('a same-second trailing tool event cannot resurrect a stopped agent', () => {
         const h = new ReplayHarness()
         launch(h, 1000)
         work(h, 'a1', 1006, 'PreToolUse')
         stop(h, 'a1', 1010)
-        work(h, 'a1', 1010, 'PostToolUse')   // same ts, arrives after the stop
+        work(h, 'a1', 1010, 'PostToolUse')     // 26% of real agents do this
         expect(h.getWorkflowInFlight(TAB)).toBe(0)
     })
 
-    // 12.7% of observed agent ids (55/432) emit tool calls and NEVER get a
-    // SubagentStop. A tombstone can't bound those — only staleness can.
-    it('expires an orphan that never stops, instead of pinning forever', () => {
-        const h = new ReplayHarness()
-        launch(h, 1000)
-        work(h, 'orphan', 1006)
-        expect(h.getWorkflowInFlight(TAB)).toBe(1)
-        h.setNow(1006 * 1000 + 599_000)       // just under the 10-min TTL
-        expect(h.getWorkflowInFlight(TAB)).toBe(1)
-        h.setNow(1006 * 1000 + 601_000)       // past it
-        expect(h.getWorkflowInFlight(TAB)).toBe(0)
-    })
-
-    it('a busy agent inside one slow tool call is NOT expired (p99.9 gap = 293s)', () => {
-        const h = new ReplayHarness()
-        launch(h, 1000)
-        work(h, 'slow', 1006, 'PreToolUse')
-        h.setNow(1006 * 1000 + 293_000)       // observed worst-case quiet gap
-        expect(h.getWorkflowInFlight(TAB)).toBe(1)
-    })
-
-    it('a session boundary drops workflow state (no phantom across restarts)', () => {
+    it('treats StopFailure as terminal too', () => {
         const h = new ReplayHarness()
         launch(h, 1000)
         work(h, 'a1', 1006)
+        stop(h, 'a1', 1010, 'StopFailure')
+        expect(h.getWorkflowInFlight(TAB)).toBe(0)
+    })
+
+    it('does not double-count an ordinary subagent spawned during a workflow', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        // Authoritative spawn → belongs to liveAgentIds, not the workflow map.
+        h.process(ev({ event: 'PostToolUse', tool_name: 'Agent', spawn_agent_id: 'reg1', ts: 1005 }))
+        work(h, 'reg1', 1006)
+        expect(h.getSubagentInFlight(TAB)).toBe(1)
+        expect(h.getWorkflowInFlight(TAB)).toBe(0)
+    })
+
+    it('ignores non-tool events that happen to carry an agent_id', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        h.process(ev({ event: 'Stop', agent_id: 'a1', ts: 1006 }))
+        h.process(ev({ event: 'Notification', agent_id: 'a2', ts: 1007 }))
+        expect(h.getWorkflowInFlight(TAB)).toBe(0)
+    })
+
+    it('keeps refreshing last-seen so a long-running agent is never expired', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'a1', 1006)
+        work(h, 'a1', 1500)                    // still active
+        h.setNow(1500 * S + 899_000)           // 899 s after the LAST event
         expect(h.getWorkflowInFlight(TAB)).toBe(1)
-        h.process(ev({ event: 'SessionStart', ts: 2000 }))
+    })
+
+    // The staleness backstop is defensive only (0 of 72 workflow agents orphaned)
+    // and must clear an id that genuinely stops reporting.
+    it('expires an agent that goes silent past the stale window', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'orphan', 1006)
+        h.setNow(1006 * S + 899_000)
+        expect(h.getWorkflowInFlight(TAB)).toBe(1)
+        h.setNow(1006 * S + 901_000)
+        expect(h.getWorkflowInFlight(TAB)).toBe(0)
+    })
+
+    // 601 s single Bash calls exist in the corpus; a 600 s window would expire
+    // an agent one second before its tool returned.
+    it('does not expire an agent inside a 601-second tool call', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'slow', 1006, 'PreToolUse')
+        h.setNow(1006 * S + 601_000)
+        expect(h.getWorkflowInFlight(TAB)).toBe(1)
+    })
+
+    it('a fresh session drops workflow state', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'a1', 1006)
+        h.process(ev({ event: 'SessionStart', source: 'startup', ts: 2000 } as any))
         expect(h.getWorkflowInFlight(TAB)).toBe(0)
         expect(h.getWorkflowStartedAt(TAB)).toBeNull()
     })
 
-    it('keeps the workflow armed at launch before any agent reports in', () => {
-        const h = new ReplayHarness()
-        launch(h, 1000)
-        // Real runs took ~6s for the first agent's first tool call; the row must
-        // not read "finished" during that window.
-        h.setNow(1000 * 1000 + 5_000)
-        expect(h.getWorkflowStartedAt(TAB)).toBe(1000 * 1000)
-        expect(h.getWorkflowInFlight(TAB)).toBe(0)
-    })
-
-    it('re-launching a workflow restamps the start time', () => {
+    // Auto-compaction is a MID-TURN continuation of the same session and fires
+    // exactly when context is long — i.e. during a half-hour workflow.
+    it('an auto-compact SessionStart does NOT disarm a running workflow', () => {
         const h = new ReplayHarness()
         launch(h, 1000)
         work(h, 'a1', 1006)
-        stop(h, 'a1', 1100)
+        h.process(ev({ event: 'SessionStart', source: 'compact', ts: 1100 } as any))
+        h.setNow(1100 * S)
+        expect(h.getWorkflowStartedAt(TAB)).toBe(1000 * S)
+        work(h, 'a2', 1110)
+        expect(h.getWorkflowInFlight(TAB)).toBe(2)
+    })
+
+    it('clearSideChannel wipes workflow state', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'a1', 1006)
+        expect(h.watcher.clearSideChannel(TAB)).toBe(true)
+        expect(h.getWorkflowInFlight(TAB)).toBe(0)
+        expect(h.getWorkflowStartedAt(TAB)).toBeNull()
+    })
+
+    it('does not restamp the clock when already armed (elapsed never jumps back)', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        work(h, 'a1', 1006)
         launch(h, 5000)
-        expect(h.getWorkflowStartedAt(TAB)).toBe(5000 * 1000)
+        expect(h.getWorkflowStartedAt(TAB)).toBe(1000 * S)
+    })
+
+    it('a nested Workflow launch from inside an agent does not restamp', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        h.process(ev({ event: 'PostToolUse', tool_name: 'Workflow', agent_id: 'a1', ts: 4000 }))
+        expect(h.getWorkflowStartedAt(TAB)).toBe(1000 * S)
+    })
+
+    it('reports change only for a genuinely new agent', () => {
+        const h = new ReplayHarness()
+        launch(h, 1000)
+        expect(work(h, 'a1', 1006)).toBe(true)
+        expect(work(h, 'a1', 1007)).toBe(false)
+    })
+})
+
+/**
+ * The status override itself — the user-visible half of the feature. Extracted
+ * from TabMonitor's poll loop precisely so it can be asserted here; while it was
+ * inline, deleting it entirely was invisible to the whole suite.
+ */
+describe('resolveRawStatus', () => {
+    it('holds the row at working for a running workflow, even in a wave trough', () => {
+        expect(resolveRawStatus(TabStatus.Idle, 0, true)).toBe(TabStatus.Working)
+    })
+    it('holds the row at working while subagents are in flight', () => {
+        expect(resolveRawStatus(TabStatus.Idle, 2, false)).toBe(TabStatus.Working)
+    })
+    it('leaves a genuinely idle row idle', () => {
+        expect(resolveRawStatus(TabStatus.Idle, 0, false)).toBe(TabStatus.Idle)
+    })
+    it('never downgrades or overrides a non-idle status', () => {
+        for (const s of [TabStatus.Working, TabStatus.NeedsPermission, TabStatus.NoAi]) {
+            expect(resolveRawStatus(s, 0, false)).toBe(s)
+            expect(resolveRawStatus(s, 5, true)).toBe(s)
+        }
     })
 })
