@@ -94,6 +94,26 @@ export class Application {
         app.commandLine.appendSwitch('max-active-webgl-contexts', '9000')
         app.commandLine.appendSwitch('lang', 'EN')
 
+        // Opt-in DevTools endpoint, for diagnosing a session that has already
+        // gone wrong. Some faults only appear after days of uptime — a renderer
+        // that climbs to a full core over ~10 days is the case this was added
+        // for — and they do not reproduce in a fresh instance, so the only way
+        // to inspect one is to attach to the instance that is already degraded.
+        // That requires the port to have been open since launch, hence an env
+        // var rather than a runtime toggle.
+        //
+        // Off unless GLANCETERM_DEBUG_PORT is set, because an open endpoint is
+        // a real capability: anything that can reach it can execute arbitrary
+        // code in the renderer. Chromium binds it to loopback only, and we
+        // refuse anything that isn't a plausible port number so a stray value
+        // cannot turn into some other switch.
+        const debugPort = (process.env.GLANCETERM_DEBUG_PORT ?? '').trim()
+        if (/^\d{4,5}$/.test(debugPort) && Number(debugPort) <= 65535) {
+            app.commandLine.appendSwitch('remote-debugging-port', debugPort)
+            // eslint-disable-next-line no-console
+            console.warn(`[glanceterm] DevTools endpoint enabled on 127.0.0.1:${debugPort} — anyone able to reach it can run code in this app. Unset GLANCETERM_DEBUG_PORT to disable.`)
+        }
+
         for (const flag of this.configStore.flags || [['force_discrete_gpu', '0']]) {
             app.commandLine.appendSwitch(flag[0], flag[1])
         }
