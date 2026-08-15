@@ -22,7 +22,12 @@ console.log('Signing enabled:', !!keypair)
 
 builder({
     dir: true,
-    win: ['nsis', 'zip'],
+    // zip only — no NSIS installer. Windows builds are unsigned, so an .exe
+    // installer triggers SmartScreen's "unknown publisher" block, which is a
+    // worse first run than unzipping a folder. Nothing is lost on the update
+    // side either: the in-app updater is macOS-only (see window.ts setupUpdater),
+    // so the .exe was never an update channel.
+    win: ['zip'],
     arm64: process.env.ARCH === 'arm64',
     config: {
         extraMetadata: {

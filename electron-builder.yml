@@ -43,12 +43,6 @@ win:
   artifactName: GlanceTerm-${version}-portable-${env.ARCH}.${ext}
   signtoolOptions:
     rfc3161TimeStampServer: http://timestamp.sectigo.com
-nsis:
-  oneClick: false
-  artifactName: GlanceTerm-${version}-setup-${env.ARCH}.${ext}
-  installerIcon: "./build/windows/icon.ico"
-  allowToChangeInstallationDirectory: true
-  shortcutName: GlanceTerm
 mac:
   category: public.app-category.utilities
   icon: "./build/mac/icon.icns"
