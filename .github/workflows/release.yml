@@ -21,7 +21,7 @@ name: Release
 #
 # Platforms: macOS arm64 (Apple-signed + notarized), Linux x64
 # (AppImage/deb/rpm/pacman/tar.gz, unsigned), Windows x64
-# (NSIS .exe + portable .zip, UNSIGNED → SmartScreen "unknown publisher" warning).
+# (portable .zip, UNSIGNED → no installer, user unzips and runs).
 # RELEASE=1 stamps the release-please-bumped app/package.json version. Every build
 # is gated by a launch smoke test — a platform that fails to launch is simply not
 # attached, the rest still ship. macOS uses a CDP renderer-bootstrap smoke (a
@@ -86,12 +86,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libfontconfig1-dev libsecret-1-dev libarchive-tools rpm fakeroot
-
-      # build/installer.nsh bundles the VC++ runtime via File ${BUILD_RESOURCES_DIR}\vc_redist.exe
-      - name: Windows — fetch VC++ redistributable
-        if: matrix.os == 'windows-2022'
-        shell: bash
-        run: curl -fL -o build/vc_redist.exe https://aka.ms/vs/17/release/vc_redist.x64.exe
 
       - name: Install dependencies
         run: yarn install --network-timeout 1000000
@@ -194,8 +188,9 @@ jobs:
           # `*-macos-*.zip`, distinct from Windows' `*-portable-*.zip`.
           # NOTE: latest-mac.yml is uploaded by the NEXT step, after these
           # installers, so the auto-update feed never points at zips not yet up.
-          # Linux: all package formats. Windows: setup .exe + portable .zip.
-          files=(dist/*.dmg dist/*-macos-*.zip dist/*-macos-*.zip.blockmap dist/*.AppImage dist/*.deb dist/*.rpm dist/*.pacman dist/*.tar.gz dist/*.exe dist/*-portable-*.zip)
+          # Linux: all package formats. Windows: portable .zip only (no NSIS
+          # installer — see scripts/build-windows.mjs).
+          files=(dist/*.dmg dist/*-macos-*.zip dist/*-macos-*.zip.blockmap dist/*.AppImage dist/*.deb dist/*.rpm dist/*.pacman dist/*.tar.gz dist/*-portable-*.zip)
           echo "uploading: ${files[*]}"
           gh release upload "${{ needs.release-please.outputs.tag_name }}" "${files[@]}" --clobber
 
