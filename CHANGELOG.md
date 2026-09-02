@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.10](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.9...v0.3.10) (2026-09-02)
+
+
+### Bug Fixes
+
+* **usage:** count Claude subagent tokens, which were silently missing ([#118](https://github.com/jessemaxh/GlanceTerm/issues/118)) ([9b9ef61](https://github.com/jessemaxh/GlanceTerm/commit/9b9ef6159810c71bd0986a7fc717b27e482e53aa))
+
 ## [0.3.9](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.8...v0.3.9) (2026-08-02)
 
 
