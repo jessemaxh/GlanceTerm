@@ -39,6 +39,26 @@ import type { AiTool } from './tab-monitor'
  *     as running `tokens_in` / `tokens_out` totals. We read the newest complete
  *     totals from `~/.glanceterm/hooks/<tab_id>.log`.
  *
+ * SUBAGENT coverage differs per agent, because their storage does. Verified
+ * 2026-09-02 against local data and upstream behaviour:
+ *   - Claude   — subagent turns go to SEPARATE files (`<session>/subagents/
+ *     agent-*.jsonl`), so summing the session transcript alone missed them:
+ *     66% of input and 44% of output on a real session. computeClaude now folds
+ *     those in.
+ *   - Codex    — subagent turns stay in the SAME rollout, and the figure we use
+ *     is Codex's own cumulative `total_token_usage`, reported as one number
+ *     with no per-agent breakdown (a 110-spawn session reports a single
+ *     164M-input total). Nothing separate exists to miss; no change needed.
+ *   - Gemini / opencode — both grew subagents in 2026 and both are expected to
+ *     under-report here for the same reason as Claude (Gemini documents a
+ *     separate context loop; opencode keeps subagent sessions under
+ *     storage/message and has an open upstream issue for its own TUI counter).
+ *     NOT implemented: there is no local data for either — no post-2026-04
+ *     Gemini chats and no opencode message storage on this machine — and
+ *     writing a parser against release notes rather than observed records is
+ *     how you ship a plausible-looking miscount. Left until a real session
+ *     exists to verify against.
+ *
  * Efficiency: the Claude transcript can be many MB. We read INCREMENTALLY —
  * track a byte offset per tab and only parse the bytes appended since the last
  * read, keeping running sums. A path change or file shrink (new session /
@@ -51,6 +71,11 @@ interface ClaudeUsageState {
     path: string
     /** Next unread byte offset (advances only past complete lines). */
     offset: number
+    /** Per-file next-unread offset for this session's SUBAGENT transcripts.
+     *  Claude writes each subagent's turns to its own file under
+     *  `<session>/subagents/`, so their usage is invisible in the main
+     *  transcript — see computeClaude. Keyed by absolute path. */
+    subOffsets: Map<string, number>
     inTok: number
     /** Cumulative cache-read tokens — tracked apart from inTok (the headline
      *  input) so the UI can show it as its own dim figure; see
@@ -185,7 +210,7 @@ export class UsageTrackerService {
 
         // New tab, or the session's transcript changed → start fresh.
         if (!st || st.path !== path) {
-            st = { path, offset: 0, inTok: 0, cacheReadTok: 0, outTok: 0, model: null, lastReadAt: 0 }
+            st = { path, offset: 0, subOffsets: new Map(), inTok: 0, cacheReadTok: 0, outTok: 0, model: null, lastReadAt: 0 }
             this.claude.set(key, st)
         }
 
@@ -209,38 +234,120 @@ export class UsageTrackerService {
         // the re-read below restores it from the new content.
         if (size < st.offset) {
             st.offset = 0; st.inTok = 0; st.cacheReadTok = 0; st.outTok = 0; st.model = null
+            st.subOffsets.clear()
         }
         if (size > st.offset) {
-            try {
-                const fh = await fs.open(path, 'r')
-                try {
-                    const len = size - st.offset
-                    const buf = Buffer.allocUnsafe(len)
-                    await fh.read(buf, 0, len, st.offset)
-                    const text = buf.toString('utf8')
-                    // Only advance past COMPLETE lines; a trailing partial line
-                    // is left for the next read (offset stops at the last \n).
-                    const lastNl = text.lastIndexOf('\n')
-                    if (lastNl >= 0) {
-                        const complete = text.slice(0, lastNl)
-                        const delta = sumClaudeAssistantUsage(complete)
-                        st.inTok += delta.inTok
-                        st.cacheReadTok += delta.cacheReadTok
-                        st.outTok += delta.outTok
-                        // Model rides the same assistant records we just summed
-                        // (one pass). Keep the prior value if this chunk had no
-                        // assistant line so the chip never blanks mid-session.
-                        if (delta.model) st.model = delta.model
-                        st.offset += Buffer.byteLength(text.slice(0, lastNl + 1), 'utf8')
-                    }
-                } finally {
-                    await fh.close()
-                }
-            } catch {
-                /* transient read error — keep prior sums, retry next interval */
+            const r = await this.readUsageDelta(path, st.offset, size)
+            if (r) {
+                st.inTok += r.delta.inTok
+                st.cacheReadTok += r.delta.cacheReadTok
+                st.outTok += r.delta.outTok
+                // Model rides the same assistant records we just summed (one
+                // pass). Keep the prior value if this chunk had no assistant
+                // line so the chip never blanks mid-session.
+                if (r.delta.model) st.model = r.delta.model
+                st.offset = r.offset
             }
         }
+
+        // SUBAGENT transcripts. Claude does NOT write a subagent's turns into
+        // the session transcript — each gets its own file under
+        // `<session-id>/subagents/agent-<id>.jsonl`, carrying `isSidechain:
+        // true` and its own `usage` records. Summing only the main transcript
+        // therefore under-reports heavily: measured on a real session, 66% of
+        // input and 44% of output tokens lived in those files.
+        //
+        // The layout is derivable, not guessed: the main transcript is
+        // `<dir>/<session-id>.jsonl`, so the subagents live in
+        // `<dir>/<session-id>/subagents/`. Each record also carries the parent
+        // `sessionId`, so the path can be cross-checked if that ever changes.
+        //
+        // Cost is small and bounded: entries are read incrementally with their
+        // own offsets, exactly like the main file, and the per-poll directory
+        // scan is a few ms even for the largest session observed here (732
+        // files → ~3 ms). A read that fails is simply retried next interval.
+        //
+        // NOTE this is a Claude-specific layout — see the class doc for why the
+        // other agents need nothing here (Codex keeps subagent turns in the same
+        // rollout and reports one combined total).
+        await this.addClaudeSubagentUsage(path, st)
+
         return { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok, model: st.model }
+    }
+
+    /** Read `path` from `offset` to `size`, summing usage over the COMPLETE
+     *  lines only — a trailing partial line is left for the next read, so a
+     *  transcript being appended to mid-read is never double-counted or
+     *  half-parsed. Returns the delta and the new offset, or null on any read
+     *  error (caller keeps its prior sums and retries). */
+    private async readUsageDelta (
+        filePath: string,
+        offset: number,
+        size: number,
+    ): Promise<{ delta: ReturnType<typeof sumClaudeAssistantUsage>; offset: number } | null> {
+        try {
+            const fh = await fs.open(filePath, 'r')
+            try {
+                const len = size - offset
+                const buf = Buffer.allocUnsafe(len)
+                await fh.read(buf, 0, len, offset)
+                const text = buf.toString('utf8')
+                const lastNl = text.lastIndexOf('\n')
+                if (lastNl < 0) {
+                    return null
+                }
+                return {
+                    delta: sumClaudeAssistantUsage(text.slice(0, lastNl)),
+                    offset: offset + Buffer.byteLength(text.slice(0, lastNl + 1), 'utf8'),
+                }
+            } finally {
+                await fh.close()
+            }
+        } catch {
+            return null
+        }
+    }
+
+    /** Fold this session's subagent transcripts into `st`. Deliberately does
+     *  NOT touch `st.model`: a subagent can run a different model than the main
+     *  agent, and the sidebar's model chip describes the tab's agent. */
+    private async addClaudeSubagentUsage (transcriptPath: string, st: ClaudeUsageState): Promise<void> {
+        const dir = transcriptPath.replace(/\.jsonl$/, '') + '/subagents'
+        let entries: string[] = []
+        try {
+            entries = (await fs.readdir(dir)).filter(n => n.startsWith('agent-') && n.endsWith('.jsonl'))
+        } catch {
+            return   // no subagents for this session (the common case)
+        }
+        for (const name of entries) {
+            const p = `${dir}/${name}`
+            const prev = st.subOffsets.get(p) ?? 0
+            let size = -1
+            try {
+                size = (await fs.stat(p)).size
+            } catch {
+                continue
+            }
+            // Truncated/replaced → re-read from the top. Its prior contribution
+            // cannot be subtracted (the sums are cumulative), so reset the whole
+            // session's totals and let the next poll rebuild them.
+            if (size < prev) {
+                st.offset = 0; st.inTok = 0; st.cacheReadTok = 0; st.outTok = 0
+                st.subOffsets.clear()
+                return
+            }
+            if (size === prev) {
+                continue
+            }
+            const r = await this.readUsageDelta(p, prev, size)
+            if (!r) {
+                continue
+            }
+            st.inTok += r.delta.inTok
+            st.cacheReadTok += r.delta.cacheReadTok
+            st.outTok += r.delta.outTok
+            st.subOffsets.set(p, r.offset)
+        }
     }
 
     private async computeCodex (
