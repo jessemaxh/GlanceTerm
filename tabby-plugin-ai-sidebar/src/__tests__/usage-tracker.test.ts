@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
+import { READ_CHUNK_BYTES } from '../chunked-reader'
 import {
     UsageTrackerService,
     latestCodexTokenUsage,
@@ -385,5 +386,137 @@ describe('UsageTrackerService.compute (opencode hook log)', () => {
         fs.appendFileSync(log, opencodeRecord(300, 75) + '\n')
         vi.advanceTimersByTime(7_000)   // > USAGE_READ_INTERVAL_MS (6 s)
         expect(await svc.compute(key, 'opencode', { tabId })).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 75 })
+    })
+})
+
+/**
+ * Coverage for the PRODUCTION chunking path.
+ *
+ * The boundary tests in chunked-reader.test.ts all inject a tiny chunk size, so
+ * none of them exercises `READ_CHUNK_BYTES` itself, and every other fixture in
+ * this file is a few hundred bytes — far under one slice. These use fixtures
+ * that genuinely span several production-sized chunks, so the cross-slice
+ * accumulator, the model carry-over and the Codex "last slice wins" rule are
+ * actually executed rather than merely described in a comment.
+ */
+describe('usage across production-sized chunks', () => {
+    let tmp = ''
+    beforeEach(() => {
+        vi.useFakeTimers()
+        tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-usage-big-'))
+    })
+    afterEach(() => {
+        vi.useRealTimers()
+        try { fs.rmSync(tmp, { recursive: true, force: true }) } catch { /* */ }
+    })
+
+    /** Filler that parses but carries no usage, sized to push past one chunk. */
+    const filler = (bytes: number): string => {
+        const one = JSON.stringify({ type: 'user', message: { role: 'user', content: 'x'.repeat(512) } }) + '\n'
+        return one.repeat(Math.ceil(bytes / one.length))
+    }
+    const MULTI_CHUNK = READ_CHUNK_BYTES * 2 + 1024
+
+    it('sums Claude records that land in different chunks', async () => {
+        const tx = path.join(tmp, 'big.jsonl')
+        // One record at each end, so a per-slice result that overwrites instead
+        // of accumulating loses one of them.
+        fs.writeFileSync(tx, asst(100, 50) + '\n' + filler(MULTI_CHUNK) + asst(200, 75) + '\n')
+        const u = await new UsageTrackerService().compute({}, 'claude', tx)
+        expect(u).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 125, model: 'claude-opus-4-8' })
+    })
+
+    it('carries the Claude model across chunks that contain no assistant record', async () => {
+        const tx = path.join(tmp, 'model.jsonl')
+        // Model appears only in the FIRST slice; later slices must not blank it.
+        fs.writeFileSync(tx, asst(10, 5) + '\n' + filler(MULTI_CHUNK))
+        const u = await new UsageTrackerService().compute({}, 'claude', tx)
+        expect(u?.model).toBe('claude-opus-4-8')
+        expect(u?.inTok).toBe(10)
+    })
+
+    it('keeps the newest Codex total when it is not in the last chunk', async () => {
+        const rollout = path.join(tmp, 'rollout.jsonl')
+        // "Last slice wins" must not mean "last slice with no record wins null".
+        fs.writeFileSync(rollout, codexTokenCount(100, 50) + '\n' + filler(MULTI_CHUNK))
+        const u = await new UsageTrackerService().compute({}, 'codex', rollout)
+        // Same transformation the single-read tests assert: input less the
+        // cached portion, output plus reasoning.
+        expect(u).toEqual({ inTok: 60, cacheReadTok: 40, outTok: 57 })
+    })
+})
+
+/**
+ * Subagent fold-in. Claude writes each subagent's turns to its own file under
+ * `<session>/subagents/`, and those totals are a majority of a real session's
+ * usage — yet nothing in the repo exercised this path, so deleting the whole
+ * loop, or never advancing its per-file offsets (double-counting every poll),
+ * both passed the suite.
+ */
+describe('compute (Claude) — subagent transcripts', () => {
+    let tmp = ''
+    let tx = ''
+    let subDir = ''
+    beforeEach(() => {
+        vi.useFakeTimers()
+        tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-usage-sub-'))
+        tx = path.join(tmp, 'session.jsonl')
+        subDir = path.join(tmp, 'session', 'subagents')
+        fs.mkdirSync(subDir, { recursive: true })
+    })
+    afterEach(() => {
+        vi.useRealTimers()
+        try { fs.rmSync(tmp, { recursive: true, force: true }) } catch { /* */ }
+    })
+
+    it('folds subagent usage into the session total', async () => {
+        fs.writeFileSync(tx, asst(100, 50) + '\n')
+        fs.writeFileSync(path.join(subDir, 'agent-1.jsonl'), asst(30, 10) + '\n')
+        const u = await new UsageTrackerService().compute({}, 'claude', tx)
+        expect(u?.inTok).toBe(130)
+        expect(u?.outTok).toBe(60)
+    })
+
+    it('does not re-count a subagent file that has not grown', async () => {
+        const svc = new UsageTrackerService()
+        const key = {}
+        fs.writeFileSync(tx, asst(100, 50) + '\n')
+        fs.writeFileSync(path.join(subDir, 'agent-1.jsonl'), asst(30, 10) + '\n')
+        expect((await svc.compute(key, 'claude', tx))?.inTok).toBe(130)
+
+        vi.advanceTimersByTime(7_000)
+        expect((await svc.compute(key, 'claude', tx))?.inTok).toBe(130)
+
+        // A genuine append is counted once, not from the top.
+        fs.appendFileSync(path.join(subDir, 'agent-1.jsonl'), asst(5, 1) + '\n')
+        vi.advanceTimersByTime(7_000)
+        expect((await svc.compute(key, 'claude', tx))?.inTok).toBe(135)
+    })
+
+    it('ignores files in the subagents dir that are not agent transcripts', async () => {
+        fs.writeFileSync(tx, asst(100, 50) + '\n')
+        fs.writeFileSync(path.join(subDir, 'notes.txt'), asst(999, 999) + '\n')
+        const u = await new UsageTrackerService().compute({}, 'claude', tx)
+        expect(u?.inTok).toBe(100)
+    })
+})
+
+describe('latestOpencodeTokenUsage — carry across slices', () => {
+    const rec = (o: Record<string, unknown>) => JSON.stringify({ agent: 'opencode', ...o })
+
+    it('fills a field omitted by a later record from an earlier SLICE', () => {
+        // opencode emits `tokens_cache` only when non-zero, and the missing
+        // field is filled from the previous record. Split across slices that
+        // carry-over used to reset, so a chunked read reported cache 0 where a
+        // single read reported the real figure.
+        const first = latestOpencodeTokenUsage(rec({ tokens_in: 10, tokens_out: 2, tokens_cache: 900 }))
+        expect(first?.cacheReadTok).toBe(900)
+        const second = latestOpencodeTokenUsage(rec({ tokens_in: 20, tokens_out: 4 }), first)
+        expect(second).toEqual({ inTok: 20, cacheReadTok: 900, outTok: 4 })
+    })
+
+    it('reports nothing for a slice with no records, even when seeded', () => {
+        const seed = { inTok: 1, cacheReadTok: 2, outTok: 3 }
+        expect(latestOpencodeTokenUsage('{"agent":"claude"}\nnot json\n', seed)).toBeNull()
     })
 })

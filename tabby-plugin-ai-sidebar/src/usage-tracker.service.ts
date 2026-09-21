@@ -3,6 +3,7 @@ import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
 
+import { makeReadBudget, MAX_WHOLE_FILE_BYTES, scanFileLines, type ReadBudget } from './chunked-reader'
 import type { AiTool } from './tab-monitor'
 
 /**
@@ -159,6 +160,7 @@ export interface UsageSource {
  *  re-statting (and, for Gemini, re-parsing) the transcript every poll. */
 const USAGE_READ_INTERVAL_MS = 6_000
 
+
 @Injectable({ providedIn: 'root' })
 export class UsageTrackerService {
     private claude = new WeakMap<object, ClaudeUsageState>()
@@ -236,8 +238,13 @@ export class UsageTrackerService {
             st.offset = 0; st.inTok = 0; st.cacheReadTok = 0; st.outTok = 0; st.model = null
             st.subOffsets.clear()
         }
+        // One allowance for this tab's whole poll — main transcript AND every
+        // subagent file. Per-file it was meaningless: a 906-file session burned
+        // 969 MB and 3.2 s of renderer time in a single tick.
+        const budget = makeReadBudget()
+
         if (size > st.offset) {
-            const r = await this.readUsageDelta(path, st.offset, size)
+            const r = await this.readUsageDelta(path, st.offset, size, budget)
             if (r) {
                 st.inTok += r.delta.inTok
                 st.cacheReadTok += r.delta.cacheReadTok
@@ -270,48 +277,39 @@ export class UsageTrackerService {
         // NOTE this is a Claude-specific layout — see the class doc for why the
         // other agents need nothing here (Codex keeps subagent turns in the same
         // rollout and reports one combined total).
-        await this.addClaudeSubagentUsage(path, st)
+        await this.addClaudeSubagentUsage(path, st, budget)
 
         return { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok, model: st.model }
     }
 
-    /** Read `path` from `offset` to `size`, summing usage over the COMPLETE
-     *  lines only — a trailing partial line is left for the next read, so a
-     *  transcript being appended to mid-read is never double-counted or
-     *  half-parsed. Returns the delta and the new offset, or null on any read
-     *  error (caller keeps its prior sums and retries). */
+    /** Sum usage over the complete lines in `[offset, size)`. Chunked via
+     *  {@link scanLines}, so a transcript past V8's string cap still reads.
+     *  Returns null only when nothing new was consumed. */
     private async readUsageDelta (
         filePath: string,
         offset: number,
         size: number,
+        budget: ReadBudget,
     ): Promise<{ delta: ReturnType<typeof sumClaudeAssistantUsage>; offset: number } | null> {
-        try {
-            const fh = await fs.open(filePath, 'r')
-            try {
-                const len = size - offset
-                const buf = Buffer.allocUnsafe(len)
-                await fh.read(buf, 0, len, offset)
-                const text = buf.toString('utf8')
-                const lastNl = text.lastIndexOf('\n')
-                if (lastNl < 0) {
-                    return null
-                }
-                return {
-                    delta: sumClaudeAssistantUsage(text.slice(0, lastNl)),
-                    offset: offset + Buffer.byteLength(text.slice(0, lastNl + 1), 'utf8'),
-                }
-            } finally {
-                await fh.close()
+        const delta = { inTok: 0, cacheReadTok: 0, outTok: 0, model: null as string | null }
+        const next = await scanFileLines(filePath, offset, size, text => {
+            const d = sumClaudeAssistantUsage(text)
+            delta.inTok += d.inTok
+            delta.cacheReadTok += d.cacheReadTok
+            delta.outTok += d.outTok
+            // Slices arrive in file order, so last non-empty model wins —
+            // the same rule sumClaudeAssistantUsage applies within one slice.
+            if (d.model) {
+                delta.model = d.model
             }
-        } catch {
-            return null
-        }
+        }, budget)
+        return next > offset ? { delta, offset: next } : null
     }
 
     /** Fold this session's subagent transcripts into `st`. Deliberately does
      *  NOT touch `st.model`: a subagent can run a different model than the main
      *  agent, and the sidebar's model chip describes the tab's agent. */
-    private async addClaudeSubagentUsage (transcriptPath: string, st: ClaudeUsageState): Promise<void> {
+    private async addClaudeSubagentUsage (transcriptPath: string, st: ClaudeUsageState, budget: ReadBudget): Promise<void> {
         const dir = transcriptPath.replace(/\.jsonl$/, '') + '/subagents'
         let entries: string[] = []
         try {
@@ -339,7 +337,13 @@ export class UsageTrackerService {
             if (size === prev) {
                 continue
             }
-            const r = await this.readUsageDelta(p, prev, size)
+            if (budget.left <= 0) {
+                // Out of allowance for this poll. Stop cleanly: every file's
+                // own offset is already persisted, so the next tick resumes
+                // exactly where this one stopped.
+                return
+            }
+            const r = await this.readUsageDelta(p, prev, size, budget)
             if (!r) {
                 continue
             }
@@ -389,33 +393,28 @@ export class UsageTrackerService {
             st.offset = 0; st.inTok = 0; st.cacheReadTok = 0; st.outTok = 0; st.seen = false
         }
         if (size > st.offset) {
-            try {
-                const fh = await fs.open(path, 'r')
-                try {
-                    const len = size - st.offset
-                    const buf = Buffer.allocUnsafe(len)
-                    await fh.read(buf, 0, len, st.offset)
-                    const text = buf.toString('utf8')
-                    // Only advance past COMPLETE lines; a trailing partial line
-                    // is left for the next read (offset stops at the last \n).
-                    const lastNl = text.lastIndexOf('\n')
-                    if (lastNl >= 0) {
-                        const complete = text.slice(0, lastNl)
-                        const latest = latestCodexTokenUsage(complete)
-                        if (latest) {
-                            st.inTok = latest.inTok
-                            st.cacheReadTok = latest.cacheReadTok
-                            st.outTok = latest.outTok
-                            st.seen = true
-                        }
-                        st.offset += Buffer.byteLength(text.slice(0, lastNl + 1), 'utf8')
-                    }
-                } finally {
-                    await fh.close()
-                }
-            } catch {
-                /* transient read error — keep prior totals, retry next interval */
+            // Chunked (see scanLines): a rollout past V8's ~512 MB string cap
+            // would otherwise throw into the catch below and drop this tab's
+            // figures for good.
+            // Held on an object, not a bare `let`: TS's flow analysis does not
+            // see writes made inside the callback and would narrow a local to
+            // `never` at the check below.
+            const acc: { latest: ReturnType<typeof latestCodexTokenUsage> } = { latest: null }
+            const next = await scanFileLines(path, st.offset, size, text => {
+                // Slices arrive in file order, so the last one carrying a total
+                // is the newest — the same "latest wins" rule as a single read.
+                acc.latest = latestCodexTokenUsage(text) ?? acc.latest
+            }, makeReadBudget())
+            if (acc.latest) {
+                st.inTok = acc.latest.inTok
+                st.cacheReadTok = acc.latest.cacheReadTok
+                st.outTok = acc.latest.outTok
+                st.seen = true
             }
+            // scanLines never throws and returns the offset it actually
+            // reached, so a partial read keeps its progress instead of being
+            // retried from the top.
+            st.offset = next
         }
         return st.seen ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok } : null
     }
@@ -451,6 +450,13 @@ export class UsageTrackerService {
             return (st.seen || st.model) ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok, model: st.model } : null
         }
 
+        // Gemini chats are ONE JSON document, so the chunked line reader used
+        // for the JSONL agents does not apply — a partial parse is meaningless.
+        // Refuse anything past V8's string cap rather than let readFile throw
+        // into the catch below, where it would look like a missing file.
+        if (stat.size > MAX_WHOLE_FILE_BYTES) {
+            return st.seen || st.model ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok, model: st.model } : null
+        }
         try {
             const raw = await fs.readFile(st.path, 'utf8')
             // One JSON.parse / one message loop yields both tokens and model.
@@ -502,31 +508,22 @@ export class UsageTrackerService {
             st.offset = 0; st.inTok = 0; st.cacheReadTok = 0; st.outTok = 0; st.seen = false
         }
         if (size > st.offset) {
-            try {
-                const fh = await fs.open(logPath, 'r')
-                try {
-                    const len = size - st.offset
-                    const buf = Buffer.allocUnsafe(len)
-                    await fh.read(buf, 0, len, st.offset)
-                    const text = buf.toString('utf8')
-                    const lastNl = text.lastIndexOf('\n')
-                    if (lastNl >= 0) {
-                        const complete = text.slice(0, lastNl)
-                        const latest = latestOpencodeTokenUsage(complete)
-                        if (latest) {
-                            st.inTok = latest.inTok
-                            st.cacheReadTok = latest.cacheReadTok
-                            st.outTok = latest.outTok
-                            st.seen = true
-                        }
-                        st.offset += Buffer.byteLength(text.slice(0, lastNl + 1), 'utf8')
-                    }
-                } finally {
-                    await fh.close()
-                }
-            } catch {
-                /* transient read error — keep prior totals, retry next interval */
+            // Chunked (see scanLines) so a long-lived log past V8's ~512 MB
+            // string cap keeps reporting instead of silently going blank.
+            // Held on an object because TS's flow analysis cannot see writes
+            // made inside the callback.
+            const acc: { latest: ReturnType<typeof latestOpencodeTokenUsage> } = { latest: null }
+            const next = await scanFileLines(logPath, st.offset, size, text => {
+                // File order → the last slice carrying a total is the newest.
+                acc.latest = latestOpencodeTokenUsage(text, acc.latest) ?? acc.latest
+            }, makeReadBudget())
+            if (acc.latest) {
+                st.inTok = acc.latest.inTok
+                st.cacheReadTok = acc.latest.cacheReadTok
+                st.outTok = acc.latest.outTok
+                st.seen = true
             }
+            st.offset = next
         }
 
         return st.seen ? { inTok: st.inTok, cacheReadTok: st.cacheReadTok, outTok: st.outTok } : null
@@ -647,8 +644,17 @@ export function sumGeminiMessageUsage (text: string): { inTok: number; cacheRead
  * hook log. The plugin writes running totals, so the latest complete record is
  * authoritative.
  */
-export function latestOpencodeTokenUsage (text: string): { inTok: number; cacheReadTok: number; outTok: number } | null {
-    let latest: { inTok: number; cacheReadTok: number; outTok: number } | null = null
+export function latestOpencodeTokenUsage (
+    text: string,
+    /** Totals carried in from an earlier slice of the SAME log. A record may
+     *  omit a field (`opencode.ts` emits `tokens_cache` only when non-zero) and
+     *  is then filled from the previous record — a carry that used to reset at
+     *  every chunk boundary, so a log read in slices reported cacheReadTok 0
+     *  where a single read reported the real figure. */
+    seed: { inTok: number; cacheReadTok: number; outTok: number } | null = null,
+): { inTok: number; cacheReadTok: number; outTok: number } | null {
+    let latest: { inTok: number; cacheReadTok: number; outTok: number } | null = seed
+    let found = false
     for (const line of text.split('\n')) {
         if (!line) continue
         if (!line.includes('"tokens_in"') && !line.includes('"tokens_out"')) continue
@@ -665,8 +671,11 @@ export function latestOpencodeTokenUsage (text: string): { inTok: number; cacheR
             cacheReadTok: cacheTok !== null ? cacheTok : (prev ? prev.cacheReadTok : 0),
             outTok: outTok !== null ? outTok : (prev ? prev.outTok : 0),
         }
+        found = true
     }
-    return latest
+    // A seeded slice with no records of its own must still read as "nothing
+    // here", so the caller can tell it apart from one that carried totals.
+    return found ? latest : null
 }
 
 function normalizeUsageSource (source: string | null | UsageSource): UsageSource {
@@ -697,6 +706,15 @@ async function findGeminiChatPath (sessionId: string): Promise<string | null> {
             if (short && !entry.includes(short)) continue
             const candidate = path.join(chatsDir, entry)
             try {
+                // Guard BEFORE the read, not after: an oversized chat threw
+                // here, the catch skipped the candidate, the session resolved
+                // to null and `computeGemini` returned before arming its
+                // throttle — so this directory walk plus a doomed full-size
+                // allocation repeated on every 2.5 s tick, inside the mutex
+                // that serialises every tab's status update.
+                if ((await fs.stat(candidate)).size > MAX_WHOLE_FILE_BYTES) {
+                    continue
+                }
                 const raw = await fs.readFile(candidate, 'utf8')
                 const parsed = JSON.parse(raw)
                 if (parsed?.sessionId === sessionId) return candidate
