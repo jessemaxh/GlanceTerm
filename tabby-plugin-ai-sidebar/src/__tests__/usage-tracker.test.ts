@@ -387,3 +387,92 @@ describe('UsageTrackerService.compute (opencode hook log)', () => {
         expect(await svc.compute(key, 'opencode', { tabId })).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 75 })
     })
 })
+
+/**
+ * Chunked reading.
+ *
+ * A transcript is read into a JS string to be parsed, and V8 caps a string at
+ * ~512 MB. Reading a whole file at once therefore THREW on a real 830 MB Claude
+ * transcript (`Cannot create a string longer than 0x1fffffe8 characters`), the
+ * throw was swallowed by the reader's catch, and that tab's token figures
+ * silently vanished for good — a restart re-read from offset 0 and failed on
+ * the same line again. These cover the slicing that replaced it.
+ *
+ * `scanLines` takes an injectable chunk size so the boundary cases can be
+ * exercised with byte-sized fixtures instead of a 32 MB one.
+ */
+describe('UsageTrackerService.scanLines', () => {
+    let tmp = ''
+    beforeEach(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-usage-chunk-')) })
+    afterEach(() => { try { fs.rmSync(tmp, { recursive: true, force: true }) } catch { /* */ } })
+
+    const write = (name: string, body: string): string => {
+        const p = path.join(tmp, name)
+        fs.writeFileSync(p, body)
+        return p
+    }
+    /** Collect every complete line the scanner emits, across all slices. */
+    const run = async (file: string, chunk: number, offset = 0) => {
+        const svc = new UsageTrackerService()
+        const seen: string[] = []
+        const size = fs.statSync(file).size
+        const next = await svc.scanLines(file, offset, size, t => seen.push(t), chunk)
+        return { next, lines: seen.join('\n').split('\n').filter(Boolean) }
+    }
+
+    it('reads every line when the file spans many chunks', async () => {
+        const lines = Array.from({ length: 200 }, (_, i) => `line-${i}`)
+        const f = write('many.jsonl', lines.join('\n') + '\n')
+        // 24 bytes forces a boundary mid-line over and over.
+        const { next, lines: got } = await run(f, 24)
+        expect(got).toEqual(lines)
+        expect(next).toBe(fs.statSync(f).size)
+    })
+
+    it('never splits a line across two slices', async () => {
+        const f = write('split.jsonl', 'aaaa\nbbbb\ncccc\n')
+        // 7 bytes lands inside "bbbb" on the second read.
+        const { lines } = await run(f, 7)
+        expect(lines).toEqual(['aaaa', 'bbbb', 'cccc'])
+    })
+
+    it('leaves a trailing partial line for the next read', async () => {
+        const f = write('partial.jsonl', 'aaaa\nbbbb\ncc')
+        const { next, lines } = await run(f, 1024)
+        expect(lines).toEqual(['aaaa', 'bbbb'])
+        // Offset stops after the last newline, not at EOF, so the unfinished
+        // record is re-read once it is complete.
+        expect(next).toBe('aaaa\nbbbb\n'.length)
+    })
+
+    it('resumes from a given offset without re-emitting earlier lines', async () => {
+        const f = write('resume.jsonl', 'aaaa\nbbbb\ncccc\n')
+        const { lines } = await run(f, 8, 'aaaa\n'.length)
+        expect(lines).toEqual(['bbbb', 'cccc'])
+    })
+
+    it('does not stall on a line longer than one chunk', async () => {
+        // The huge line cannot be assembled, but the scan must still finish and
+        // the following records must survive.
+        const f = write('huge.jsonl', 'a'.repeat(300) + '\nkeep-me\n')
+        const { next, lines } = await run(f, 32)
+        expect(next).toBe(fs.statSync(f).size)
+        expect(lines).toContain('keep-me')
+    })
+
+    it('returns the starting offset for a file it cannot open', async () => {
+        const svc = new UsageTrackerService()
+        expect(await svc.scanLines(path.join(tmp, 'nope.jsonl'), 0, 10, () => { /* */ })).toBe(0)
+    })
+
+    it('sums a Claude transcript identically whether chunked or not', async () => {
+        const body = Array.from({ length: 40 }, () => asst(10, 3, 5, 2)).join('\n') + '\n'
+        const f = write('claude.jsonl', body)
+        const whole = sumClaudeAssistantUsage(body)
+        // Bigger than one record, far smaller than the file → real boundaries.
+        const { lines } = await run(f, 300)
+        const chunked = sumClaudeAssistantUsage(lines.join('\n'))
+        expect(chunked).toEqual(whole)
+        expect(chunked.inTok).toBe(40 * 12)
+    })
+})
