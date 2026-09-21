@@ -3,6 +3,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 
+import { READ_CHUNK_BYTES } from '../chunked-reader'
 import {
     UsageTrackerService,
     latestCodexTokenUsage,
@@ -389,90 +390,133 @@ describe('UsageTrackerService.compute (opencode hook log)', () => {
 })
 
 /**
- * Chunked reading.
+ * Coverage for the PRODUCTION chunking path.
  *
- * A transcript is read into a JS string to be parsed, and V8 caps a string at
- * ~512 MB. Reading a whole file at once therefore THREW on a real 830 MB Claude
- * transcript (`Cannot create a string longer than 0x1fffffe8 characters`), the
- * throw was swallowed by the reader's catch, and that tab's token figures
- * silently vanished for good — a restart re-read from offset 0 and failed on
- * the same line again. These cover the slicing that replaced it.
- *
- * `scanLines` takes an injectable chunk size so the boundary cases can be
- * exercised with byte-sized fixtures instead of a 32 MB one.
+ * The boundary tests in chunked-reader.test.ts all inject a tiny chunk size, so
+ * none of them exercises `READ_CHUNK_BYTES` itself, and every other fixture in
+ * this file is a few hundred bytes — far under one slice. These use fixtures
+ * that genuinely span several production-sized chunks, so the cross-slice
+ * accumulator, the model carry-over and the Codex "last slice wins" rule are
+ * actually executed rather than merely described in a comment.
  */
-describe('UsageTrackerService.scanLines', () => {
+describe('usage across production-sized chunks', () => {
     let tmp = ''
-    beforeEach(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-usage-chunk-')) })
-    afterEach(() => { try { fs.rmSync(tmp, { recursive: true, force: true }) } catch { /* */ } })
+    beforeEach(() => {
+        vi.useFakeTimers()
+        tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-usage-big-'))
+    })
+    afterEach(() => {
+        vi.useRealTimers()
+        try { fs.rmSync(tmp, { recursive: true, force: true }) } catch { /* */ }
+    })
 
-    const write = (name: string, body: string): string => {
-        const p = path.join(tmp, name)
-        fs.writeFileSync(p, body)
-        return p
+    /** Filler that parses but carries no usage, sized to push past one chunk. */
+    const filler = (bytes: number): string => {
+        const one = JSON.stringify({ type: 'user', message: { role: 'user', content: 'x'.repeat(512) } }) + '\n'
+        return one.repeat(Math.ceil(bytes / one.length))
     }
-    /** Collect every complete line the scanner emits, across all slices. */
-    const run = async (file: string, chunk: number, offset = 0) => {
+    const MULTI_CHUNK = READ_CHUNK_BYTES * 2 + 1024
+
+    it('sums Claude records that land in different chunks', async () => {
+        const tx = path.join(tmp, 'big.jsonl')
+        // One record at each end, so a per-slice result that overwrites instead
+        // of accumulating loses one of them.
+        fs.writeFileSync(tx, asst(100, 50) + '\n' + filler(MULTI_CHUNK) + asst(200, 75) + '\n')
+        const u = await new UsageTrackerService().compute({}, 'claude', tx)
+        expect(u).toEqual({ inTok: 300, cacheReadTok: 0, outTok: 125, model: 'claude-opus-4-8' })
+    })
+
+    it('carries the Claude model across chunks that contain no assistant record', async () => {
+        const tx = path.join(tmp, 'model.jsonl')
+        // Model appears only in the FIRST slice; later slices must not blank it.
+        fs.writeFileSync(tx, asst(10, 5) + '\n' + filler(MULTI_CHUNK))
+        const u = await new UsageTrackerService().compute({}, 'claude', tx)
+        expect(u?.model).toBe('claude-opus-4-8')
+        expect(u?.inTok).toBe(10)
+    })
+
+    it('keeps the newest Codex total when it is not in the last chunk', async () => {
+        const rollout = path.join(tmp, 'rollout.jsonl')
+        // "Last slice wins" must not mean "last slice with no record wins null".
+        fs.writeFileSync(rollout, codexTokenCount(100, 50) + '\n' + filler(MULTI_CHUNK))
+        const u = await new UsageTrackerService().compute({}, 'codex', rollout)
+        // Same transformation the single-read tests assert: input less the
+        // cached portion, output plus reasoning.
+        expect(u).toEqual({ inTok: 60, cacheReadTok: 40, outTok: 57 })
+    })
+})
+
+/**
+ * Subagent fold-in. Claude writes each subagent's turns to its own file under
+ * `<session>/subagents/`, and those totals are a majority of a real session's
+ * usage — yet nothing in the repo exercised this path, so deleting the whole
+ * loop, or never advancing its per-file offsets (double-counting every poll),
+ * both passed the suite.
+ */
+describe('compute (Claude) — subagent transcripts', () => {
+    let tmp = ''
+    let tx = ''
+    let subDir = ''
+    beforeEach(() => {
+        vi.useFakeTimers()
+        tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'gt-usage-sub-'))
+        tx = path.join(tmp, 'session.jsonl')
+        subDir = path.join(tmp, 'session', 'subagents')
+        fs.mkdirSync(subDir, { recursive: true })
+    })
+    afterEach(() => {
+        vi.useRealTimers()
+        try { fs.rmSync(tmp, { recursive: true, force: true }) } catch { /* */ }
+    })
+
+    it('folds subagent usage into the session total', async () => {
+        fs.writeFileSync(tx, asst(100, 50) + '\n')
+        fs.writeFileSync(path.join(subDir, 'agent-1.jsonl'), asst(30, 10) + '\n')
+        const u = await new UsageTrackerService().compute({}, 'claude', tx)
+        expect(u?.inTok).toBe(130)
+        expect(u?.outTok).toBe(60)
+    })
+
+    it('does not re-count a subagent file that has not grown', async () => {
         const svc = new UsageTrackerService()
-        const seen: string[] = []
-        const size = fs.statSync(file).size
-        const next = await svc.scanLines(file, offset, size, t => seen.push(t), chunk)
-        return { next, lines: seen.join('\n').split('\n').filter(Boolean) }
-    }
+        const key = {}
+        fs.writeFileSync(tx, asst(100, 50) + '\n')
+        fs.writeFileSync(path.join(subDir, 'agent-1.jsonl'), asst(30, 10) + '\n')
+        expect((await svc.compute(key, 'claude', tx))?.inTok).toBe(130)
 
-    it('reads every line when the file spans many chunks', async () => {
-        const lines = Array.from({ length: 200 }, (_, i) => `line-${i}`)
-        const f = write('many.jsonl', lines.join('\n') + '\n')
-        // 24 bytes forces a boundary mid-line over and over.
-        const { next, lines: got } = await run(f, 24)
-        expect(got).toEqual(lines)
-        expect(next).toBe(fs.statSync(f).size)
+        vi.advanceTimersByTime(7_000)
+        expect((await svc.compute(key, 'claude', tx))?.inTok).toBe(130)
+
+        // A genuine append is counted once, not from the top.
+        fs.appendFileSync(path.join(subDir, 'agent-1.jsonl'), asst(5, 1) + '\n')
+        vi.advanceTimersByTime(7_000)
+        expect((await svc.compute(key, 'claude', tx))?.inTok).toBe(135)
     })
 
-    it('never splits a line across two slices', async () => {
-        const f = write('split.jsonl', 'aaaa\nbbbb\ncccc\n')
-        // 7 bytes lands inside "bbbb" on the second read.
-        const { lines } = await run(f, 7)
-        expect(lines).toEqual(['aaaa', 'bbbb', 'cccc'])
+    it('ignores files in the subagents dir that are not agent transcripts', async () => {
+        fs.writeFileSync(tx, asst(100, 50) + '\n')
+        fs.writeFileSync(path.join(subDir, 'notes.txt'), asst(999, 999) + '\n')
+        const u = await new UsageTrackerService().compute({}, 'claude', tx)
+        expect(u?.inTok).toBe(100)
+    })
+})
+
+describe('latestOpencodeTokenUsage — carry across slices', () => {
+    const rec = (o: Record<string, unknown>) => JSON.stringify({ agent: 'opencode', ...o })
+
+    it('fills a field omitted by a later record from an earlier SLICE', () => {
+        // opencode emits `tokens_cache` only when non-zero, and the missing
+        // field is filled from the previous record. Split across slices that
+        // carry-over used to reset, so a chunked read reported cache 0 where a
+        // single read reported the real figure.
+        const first = latestOpencodeTokenUsage(rec({ tokens_in: 10, tokens_out: 2, tokens_cache: 900 }))
+        expect(first?.cacheReadTok).toBe(900)
+        const second = latestOpencodeTokenUsage(rec({ tokens_in: 20, tokens_out: 4 }), first)
+        expect(second).toEqual({ inTok: 20, cacheReadTok: 900, outTok: 4 })
     })
 
-    it('leaves a trailing partial line for the next read', async () => {
-        const f = write('partial.jsonl', 'aaaa\nbbbb\ncc')
-        const { next, lines } = await run(f, 1024)
-        expect(lines).toEqual(['aaaa', 'bbbb'])
-        // Offset stops after the last newline, not at EOF, so the unfinished
-        // record is re-read once it is complete.
-        expect(next).toBe('aaaa\nbbbb\n'.length)
-    })
-
-    it('resumes from a given offset without re-emitting earlier lines', async () => {
-        const f = write('resume.jsonl', 'aaaa\nbbbb\ncccc\n')
-        const { lines } = await run(f, 8, 'aaaa\n'.length)
-        expect(lines).toEqual(['bbbb', 'cccc'])
-    })
-
-    it('does not stall on a line longer than one chunk', async () => {
-        // The huge line cannot be assembled, but the scan must still finish and
-        // the following records must survive.
-        const f = write('huge.jsonl', 'a'.repeat(300) + '\nkeep-me\n')
-        const { next, lines } = await run(f, 32)
-        expect(next).toBe(fs.statSync(f).size)
-        expect(lines).toContain('keep-me')
-    })
-
-    it('returns the starting offset for a file it cannot open', async () => {
-        const svc = new UsageTrackerService()
-        expect(await svc.scanLines(path.join(tmp, 'nope.jsonl'), 0, 10, () => { /* */ })).toBe(0)
-    })
-
-    it('sums a Claude transcript identically whether chunked or not', async () => {
-        const body = Array.from({ length: 40 }, () => asst(10, 3, 5, 2)).join('\n') + '\n'
-        const f = write('claude.jsonl', body)
-        const whole = sumClaudeAssistantUsage(body)
-        // Bigger than one record, far smaller than the file → real boundaries.
-        const { lines } = await run(f, 300)
-        const chunked = sumClaudeAssistantUsage(lines.join('\n'))
-        expect(chunked).toEqual(whole)
-        expect(chunked.inTok).toBe(40 * 12)
+    it('reports nothing for a slice with no records, even when seeded', () => {
+        const seed = { inTok: 1, cacheReadTok: 2, outTok: 3 }
+        expect(latestOpencodeTokenUsage('{"agent":"claude"}\nnot json\n', seed)).toBeNull()
     })
 })

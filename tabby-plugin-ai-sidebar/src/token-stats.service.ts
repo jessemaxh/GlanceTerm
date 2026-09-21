@@ -3,6 +3,7 @@ import * as fs from 'fs/promises'
 import * as os from 'os'
 import * as path from 'path'
 
+import { makeReadBudget, MAX_WHOLE_FILE_BYTES, scanFileLines } from './chunked-reader'
 import type { AiTool } from './tab-monitor'
 
 /**
@@ -187,7 +188,13 @@ export class TokenStatsService {
         if (prev && prev.mtimeMs === stat.mtimeMs && prev.size === stat.size) return false
 
         if (agent === 'gemini') {
-            // Whole-file JSON; re-parse on any change.
+            // Whole-file JSON; re-parse on any change. It cannot be sliced the
+            // way the JSONL agents are, so refuse anything past V8's string cap
+            // explicitly rather than let readFile throw into the caller's
+            // catch-all, where it is indistinguishable from a missing file.
+            if (stat.size > MAX_WHOLE_FILE_BYTES) {
+                return false
+            }
             const text = await fs.readFile(p, 'utf8')
             const r = parseGeminiFull(text)
             this.cache.set(p, {
@@ -210,32 +217,28 @@ export class TokenStatsService {
             entry = { ...entry, offset: 0, perDay: {}, turns: 0, lastActive: 0, cumul: entry.cumul ? { inTok: 0, cacheTok: 0, outTok: 0 } : null }
         }
         if (stat.size > entry.offset) {
-            const fh = await fs.open(p, 'r')
-            try {
-                const len = stat.size - entry.offset
-                const buf = Buffer.allocUnsafe(len)
-                await fh.read(buf, 0, len, entry.offset)
-                const text = buf.toString('utf8')
-                const lastNl = text.lastIndexOf('\n')
-                if (lastNl >= 0) {
-                    const complete = text.slice(0, lastNl)
-                    // Claude is per-turn; Codex/opencode report running totals (carry
-                    // a `cumul` for the next incremental read). Split the branches so
-                    // the cumul-bearing union stays well-typed.
-                    if (agent === 'claude') {
-                        applyChunk(entry, parseClaudeChunk(complete))
-                    } else {
-                        const r = agent === 'codex'
-                            ? parseCodexChunk(complete, entry.cumul!)
-                            : parseOpencodeChunk(complete, entry.cumul!)
-                        applyChunk(entry, r)
-                        entry.cumul = r.cumul
-                    }
-                    entry.offset += Buffer.byteLength(text.slice(0, lastNl + 1), 'utf8')
+            // Chunked, and sharing the sidebar reader's implementation rather
+            // than repeating it: this read used the same whole-range
+            // `toString()` and failed identically on a transcript past V8's
+            // ~512 MB string cap. The throw was swallowed as "unreadable file"
+            // and `entry` was never cached, so the row re-failed on every open
+            // of this page and that session was permanently absent from the
+            // report — while allocating its full size in the renderer each time.
+            const budget = makeReadBudget()
+            entry.offset = await scanFileLines(p, entry.offset, stat.size, complete => {
+                // Claude is per-turn; Codex/opencode report running totals (carry
+                // a `cumul` for the next slice AND the next incremental read).
+                // Split the branches so the cumul-bearing union stays well-typed.
+                if (agent === 'claude') {
+                    applyChunk(entry, parseClaudeChunk(complete))
+                } else {
+                    const r = agent === 'codex'
+                        ? parseCodexChunk(complete, entry.cumul!)
+                        : parseOpencodeChunk(complete, entry.cumul!)
+                    applyChunk(entry, r)
+                    entry.cumul = r.cumul
                 }
-            } finally {
-                await fh.close()
-            }
+            }, budget)
         }
         entry.mtimeMs = stat.mtimeMs
         entry.size = stat.size
