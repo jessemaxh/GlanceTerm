@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.10](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.9...v0.3.10) (2026-09-21)
+
+
+### Bug Fixes
+
+* **usage:** count Claude subagent tokens, which were silently missing ([#118](https://github.com/jessemaxh/GlanceTerm/issues/118)) ([9b9ef61](https://github.com/jessemaxh/GlanceTerm/commit/9b9ef6159810c71bd0986a7fc717b27e482e53aa))
+* **usage:** read transcripts in chunks so big sessions keep reporting tokens ([#120](https://github.com/jessemaxh/GlanceTerm/issues/120)) ([94c1e0c](https://github.com/jessemaxh/GlanceTerm/commit/94c1e0c89ab76a73502fdf4fcb0df7ca8dcdf933))
+
 ## [0.3.9](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.8...v0.3.9) (2026-08-02)
 
 
