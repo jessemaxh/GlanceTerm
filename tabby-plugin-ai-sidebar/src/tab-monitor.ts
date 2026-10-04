@@ -231,6 +231,51 @@ const AI_PATTERNS: Array<{ tool: AiTool; regexes: RegExp[] }> = [
  *     run in waves and the count is legitimately 0 in the troughs between them
  *     (observed up to 78 s).
  */
+/**
+ * Pick the model slug to show, from the hook snapshot and the transcript.
+ *
+ * The TRANSCRIPT WINS whenever it has one, because for the only two agents that
+ * supply it, it is never staler than the hook value and is sometimes the only
+ * fresh one:
+ *
+ *   - Claude emits `model` on its one-shot SessionStart and nothing after, and
+ *     HookWatcher deliberately makes that value sticky so the chip survives a
+ *     resume (whose SessionStart carries an empty model). The sticky value is
+ *     therefore frozen at whatever was active when the session began, while the
+ *     transcript stamps `message.model` on EVERY assistant turn. With the hook
+ *     winning, a mid-session `/model` switch never showed up — verified on a
+ *     real session: the transcript moved opus-4-8 to opus-5 while every hook
+ *     event carried `model: ''` and the chip kept the old slug.
+ *   - Gemini's hooks never carry a model at all, so the transcript was already
+ *     its only source; this changes nothing for it.
+ *
+ * Codex and opencode never produce a transcript model (see computeCodex), so
+ * `usageModel` is undefined for them and the hook value still wins — which is
+ * correct, since Codex stamps the model on every event.
+ *
+ * The hook value remains the fallback, and it matters: before a session's first
+ * assistant turn the transcript has no model yet.
+ *
+ * Empty strings count as absent on both sides — Claude's resume SessionStart
+ * sends `model: ''`.
+ */
+export function resolveModel (
+    snapModel: string | null | undefined,
+    usageModel: string | null | undefined,
+): string | null {
+    // Written out rather than with `??`, which would be wrong here: `??` only
+    // falls through on null/undefined, and an EMPTY STRING must count as
+    // absent too — Claude's resume SessionStart sends `model: ''`, and
+    // returning that would blank the chip.
+    if (usageModel) {
+        return usageModel
+    }
+    if (snapModel) {
+        return snapModel
+    }
+    return null
+}
+
 export function resolveRawStatus (
     snapStatus: TabStatus,
     subagentCount: number,
@@ -454,19 +499,21 @@ export interface TabState {
      * `gpt-5.5`). Sidebar renders it next to the agent tag. Null when unknown
      * (no event yet / source unavailable).
      *
-     * Two sources, in priority order (see makeState): the hook snapshot
-     * (`snap.model`) first, then UsageTracker's transcript-derived model as a
-     * fallback when the hook value is empty. Freshness is per-agent:
+     * Two sources (see `resolveModel`): UsageTracker's transcript-derived model
+     * first, with the hook snapshot (`snap.model`) as the fallback — it covers
+     * the window before a session's first assistant turn, and is the only
+     * source for the agents that write no model to their transcript.
+     * Freshness is per-agent:
      *   - Codex stamps `.model` on every hook event (including SessionStart) →
      *     snap.model is always present and tracks a mid-session switch; no
      *     transcript fallback (it would be dead code — see computeCodex).
      *   - Claude emits the slug only at `SessionStart` and sends an EMPTY model
-     *     on a `resume` SessionStart — so the transcript fallback (UsageTracker
-     *     reading `message.model`) is what keeps the chip alive across resume.
-     *     Because the hook value wins when present, a mid-session `/model` on a
-     *     still-running tab is NOT reflected until a resume.
-     *   - Gemini's hooks never carry the model, so the transcript fallback is the
-     *     ONLY source and it DOES track a `/model` switch.
+     *     on a `resume` SessionStart, and HookWatcher makes it sticky so the chip
+     *     survives that. Sticky means frozen, so the transcript (which stamps
+     *     `message.model` every assistant turn) is the fresher source and wins —
+     *     that is what makes a mid-session `/model` show up.
+     *   - Gemini's hooks never carry the model, so the transcript is the ONLY
+     *     source and it tracks a `/model` switch.
      * Null when neither source has it yet. See HookWatcher's sticky-model rule
      * and UsageTrackerService's per-agent `model` extraction.
      */
@@ -1139,14 +1186,11 @@ export class TabMonitor implements OnDestroy {
                 })
                 if (usage) {
                     tokensIn = usage.inTok; tokensOut = usage.outTok; tokensCacheRead = usage.cacheReadTok ?? null
-                    // Model fallback (hook snapshot wins; transcript fills the
-                    // gap). A resumed Claude tab gets an empty hook model (resume
-                    // SessionStart carries none), so `model` is null here and we
-                    // take UsageTracker's transcript-derived value. Codex stamps
-                    // the model on every hook event so snap.model is already set
-                    // (no-op); Gemini's hooks never carry it so this is its ONLY
-                    // source. `!model` treats '' and null alike as "absent".
-                    if (!model && usage.model) model = usage.model
+                    // Transcript wins when it has a model; the hook snapshot
+                    // is the fallback. See resolveModel for why that order —
+                    // the hook value is sticky and goes stale across a
+                    // mid-session /model switch.
+                    model = resolveModel(model, usage.model)
                 }
                 // Subagent in-flight → working. A main-agent Stop routinely fires
                 // WHILE a launched subagent keeps working — real logs show `Stop`
