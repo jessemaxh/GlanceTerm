@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.11](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.10...v0.3.11) (2026-10-04)
+
+
+### Bug Fixes
+
+* **sidebar:** show the model a mid-session /model switch selected ([#125](https://github.com/jessemaxh/GlanceTerm/issues/125)) ([e48f65a](https://github.com/jessemaxh/GlanceTerm/commit/e48f65af9fbc2d4aac14fe6e2075e02627a8f11c))
+
 ## [0.3.10](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.9...v0.3.10) (2026-09-22)
 
 
