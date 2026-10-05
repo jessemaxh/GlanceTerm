@@ -10,6 +10,7 @@ import { HookAdapter } from './hook-adapters/adapter'
 import { HookAdapterRegistry } from './hook-adapters/registry'
 import { HookRuntimeService } from './hook-runtime.service'
 import { debugLog } from './debug-log.service'
+import { DriftDetector } from './drift-detector'
 
 /**
  * One on-disk status file written by the handler script, after JSON decode.
@@ -129,6 +130,11 @@ interface HookStatusFile {
      *  map it to idle — otherwise the row reads "ready" while the agent is still
      *  working. Empty on non-SessionStart events and non-Claude agents. */
     source?: string
+    /** How the handler classified a SendMessage result: resumed | queued |
+     *  error | unknown. Empty on every other event. `unknown` means the result
+     *  matched no known shape — fed to DriftDetector as an early warning that
+     *  Claude changed the format. */
+    sm_result?: string
 }
 
 /** Per-tab snapshot the rest of the plugin consumes. */
@@ -521,6 +527,10 @@ export class HookWatcherService implements OnDestroy {
      * recoverable by the next agent event. Entries are dropped only on session
      * boundaries, `clearSideChannel`, and tab teardown.
      */
+    /** Logs `[drift]` lines when Claude's hook output stops matching what this
+     *  service relies on. See drift-detector.ts. */
+    private readonly drift = new DriftDetector()
+
     private readonly workflowAgents = new Map<string, Map<string, number>>()
 
     /** Per-tab timestamp (ms) of the `PostToolUse(Workflow)` that armed the tab.
@@ -1516,6 +1526,25 @@ export class HookWatcherService implements OnDestroy {
                     else this.liveAgentIds.set(parsed.tab_id, next as Set<string>)
                     changed = true
                 }
+            }
+            // Early warning for hook-format changes. Runs after the live set has
+            // absorbed this event, so `tracked` reflects any spawn/resume on the
+            // same line. Live events only — this whole branch is gated on
+            // startupTs, so the cold load at launch never replays old drift.
+            for (const f of this.drift.observe({
+                tabId: parsed.tab_id,
+                event: parsed.event,
+                toolName: parsed.tool_name ?? '',
+                agentId: parsed.agent_id ?? '',
+                agentType: parsed.agent_type ?? '',
+                smResult: parsed.sm_result ?? '',
+                source: parsed.source ?? '',
+                at: eventAt,
+            }, {
+                tracked: !!parsed.agent_id && !!this.liveAgentIds.get(parsed.tab_id)?.has(parsed.agent_id),
+                workflowRunning: this.isWorkflowRunning(parsed.tab_id),
+            })) {
+                debugLog.log('warn', 'drift', `${f.kind}: ${f.message}`)
             }
             if (parsed.event === 'SessionStart' || parsed.event === 'SessionEnd') {
                 // Same boundary reset for the bg-arrival queue — a stale
