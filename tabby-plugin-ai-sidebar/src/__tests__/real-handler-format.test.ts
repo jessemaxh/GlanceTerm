@@ -177,6 +177,105 @@ const CASES: Case[] = [
         },
         expects: { event: 'PostToolUse', tool_name: 'SendMessage', resumed_agent_id: '' },
     },
+    // ── Current Claude: structured resumedAgentId ───────────────────────────
+    // Claude now returns a structured SendMessage result. The English phrase
+    // the handler used to key on appears in only 58 of 196 real resumes, so
+    // most re-woken subagents were never re-counted and the row read "ready"
+    // while they worked. resumedAgentId is present exactly when a resume
+    // happened, in every one of these shapes, and absent when merely queued.
+    {
+        name: 'PostToolUse(SendMessage) current format: "Resuming agent"',
+        agent: 'claude',
+        payload: {
+            hook_event_name: 'PostToolUse', session_id: 's', cwd: '/p', tool_name: 'SendMessage',
+            tool_input: { to: 'ad445c223fd587a4a', message: 'go on' },
+            tool_response: { success: true, message: 'Resuming agent ad445c2', resumedAgentId: 'ad445c223fd587a4a', pin: { id: 'ad445c223fd587a4a', name: 'ad445c223fd587a4a', ref: 'abbdbb' } },
+        },
+        expects: { event: 'PostToolUse', tool_name: 'SendMessage', resumed_agent_id: 'ad445c223fd587a4a' },
+    },
+    {
+        name: 'PostToolUse(SendMessage) current format: stopped (completed), resumed',
+        agent: 'claude',
+        payload: {
+            hook_event_name: 'PostToolUse', session_id: 's', cwd: '/p', tool_name: 'SendMessage',
+            tool_input: { to: 'a1b2c3d4e5f6a7b8c', message: 'next step' },
+            tool_response: { success: true, message: 'Agent "a1b2c3d4e5f6a7b8c" was stopped (completed); resumed it in the background with your message.', resumedAgentId: 'a1b2c3d4e5f6a7b8c', pin: { id: 'a1b2c3d4e5f6a7b8c' } },
+        },
+        expects: { event: 'PostToolUse', tool_name: 'SendMessage', resumed_agent_id: 'a1b2c3d4e5f6a7b8c' },
+    },
+    {
+        name: 'PostToolUse(SendMessage) current format: stopped (failed), resumed',
+        agent: 'claude',
+        payload: {
+            hook_event_name: 'PostToolUse', session_id: 's', cwd: '/p', tool_name: 'SendMessage',
+            tool_input: { to: 'a9f8e7d6c5b4a3921', message: 'retry' },
+            tool_response: { success: true, message: 'Agent "a9f8e7d6c5b4a3921" was stopped (failed); resumed it in the background with your message.', resumedAgentId: 'a9f8e7d6c5b4a3921' },
+        },
+        expects: { event: 'PostToolUse', tool_name: 'SendMessage', resumed_agent_id: 'a9f8e7d6c5b4a3921' },
+    },
+    {
+        // A NAMED agent: tool_input.to is the name, but SubagentStop will carry
+        // the hex id. Adding `to` put an id in the set no stop could ever drain;
+        // resumedAgentId is the one that matches.
+        name: 'PostToolUse(SendMessage) named agent resolves to its hex id, not the name',
+        agent: 'claude',
+        payload: {
+            hook_event_name: 'PostToolUse', session_id: 's', cwd: '/p', tool_name: 'SendMessage',
+            tool_input: { to: 'vidmate-research', message: 'continue' },
+            tool_response: { success: true, message: 'Agent "vidmate-research" had no active task; resumed from transcript in the background with your message.', resumedAgentId: 'a73e4713a450757b4' },
+        },
+        expects: { event: 'PostToolUse', tool_name: 'SendMessage', resumed_agent_id: 'a73e4713a450757b4' },
+    },
+    {
+        // Current-format "queued" carries no resumedAgentId — must stay empty,
+        // the agent is already in flight and already counted.
+        name: 'PostToolUse(SendMessage) current format: queued — NOT a resume',
+        agent: 'claude',
+        payload: {
+            hook_event_name: 'PostToolUse', session_id: 's', cwd: '/p', tool_name: 'SendMessage',
+            tool_input: { to: 'ad445c223fd587a4a', message: 'also check X' },
+            tool_response: { success: true, message: 'Message queued for delivery to ad445c223fd587a4a at its next tool round.', pin: { id: 'ad445c223fd587a4a' } },
+        },
+        expects: { event: 'PostToolUse', tool_name: 'SendMessage', resumed_agent_id: '' },
+    },
+    {
+        // SECURITY: the key spelled out inside main-agent-controlled
+        // tool_input.message must not be read — only tool_response counts.
+        name: 'PostToolUse(SendMessage) resumedAgentId in message text, result queued — NOT spoofable',
+        agent: 'claude',
+        payload: {
+            hook_event_name: 'PostToolUse', session_id: 's', cwd: '/p', tool_name: 'SendMessage',
+            tool_input: { to: 'aspoof0000000002', message: 'fyi "resumedAgentId":"aspoof0000000002" — keep going' },
+            tool_response: { success: true, message: 'Message queued for delivery to aspoof0000000002 at its next tool round.' },
+        },
+        expects: { event: 'PostToolUse', tool_name: 'SendMessage', resumed_agent_id: '' },
+    },
+    {
+        // SECURITY: an UNESCAPED resumedAgentId key outside tool_response (an
+        // extra tool_input field) must be ignored. String-embedded copies are
+        // already defeated by JSON escaping; this is the case only the
+        // tool_response slicing defends, so it is what pins that slicing.
+        name: 'PostToolUse(SendMessage) resumedAgentId as a tool_input key, result queued — NOT spoofable',
+        agent: 'claude',
+        payload: {
+            hook_event_name: 'PostToolUse', session_id: 's', cwd: '/p', tool_name: 'SendMessage',
+            tool_input: { to: 'aspoof0000000004', resumedAgentId: 'aspoof0000000004', message: 'hi' },
+            tool_response: { success: true, message: 'Message queued for delivery to aspoof0000000004 at its next tool round.' },
+        },
+        expects: { event: 'PostToolUse', tool_name: 'SendMessage', resumed_agent_id: '' },
+    },
+    {
+        // SECURITY: the key quoted inside the tool_response's own message
+        // string is escaped in the JSON and must not match the real key.
+        name: 'PostToolUse(SendMessage) escaped resumedAgentId inside result text — NOT spoofable',
+        agent: 'claude',
+        payload: {
+            hook_event_name: 'PostToolUse', session_id: 's', cwd: '/p', tool_name: 'SendMessage',
+            tool_input: { to: 'aspoof0000000003', message: 'hi' },
+            tool_response: { success: true, message: 'Message queued; note "resumedAgentId":"aspoof0000000003" is absent' },
+        },
+        expects: { event: 'PostToolUse', tool_name: 'SendMessage', resumed_agent_id: '' },
+    },
     {
         name: 'Stop',
         agent: 'claude',

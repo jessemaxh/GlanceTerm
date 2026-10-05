@@ -217,10 +217,36 @@ fi
 # safe to pass to \`extract\` (see the regex-interpolation caveat there); the
 # real tool_input.to is the FIRST "to":"…" in the payload (message-embedded
 # occurrences are backslash-escaped and don't match), which \`head -1\` takes.
+#
+# CURRENT Claude returns a structured result instead, and the phrase above
+# appears in only a minority of resumes. Surveyed across every SendMessage
+# result on a real machine:
+#   117  "Resuming agent <id>"                                      resumedAgentId
+#    58  "had no active task; resumed from transcript in the bg…"   resumedAgentId
+#    15  "was stopped (completed); resumed it in the background…"   resumedAgentId
+#     6  "was stopped (failed); resumed it in the background…"      resumedAgentId
+#    41  "Message queued for delivery to <id> at its next round."   (absent)
+# So \`resumedAgentId\` is present exactly when a resume happened and absent on
+# the queued case — the same discriminator the phrase was standing in for, but
+# structured rather than English prose. The phrase matched 58 of 196 resumes;
+# the rest left the row reading "ready" while the subagent worked.
+#
+# It is also the RIGHT id. tool_input.to can be a NAME ("vidmate-research"),
+# while the matching SubagentStop carries the hex agent_id — so adding \`to\` put
+# an id in the set that no stop could ever drain. resumedAgentId is the hex id.
+#
+# Same security scoping as above: read ONLY inside the tool_response slice. An
+# escaped occurrence inside a string (\\"resumedAgentId\\") cannot match
+# the unescaped key pattern. Falls back to the phrase for older Claude.
 RESUMED_AGENT_ID=""
 if [ "\$EVENT" = "PostToolUse" ] && [ "\$TOOL_NAME" = "SendMessage" ]; then
     RESP=$(printf '%s' "\$PAYLOAD" | tr '\\n' ' ' | grep -o '"tool_response".*')
-    if printf '%s' "\$RESP" | grep -q 'resumed from transcript in the background'; then
+    RESUMED_AGENT_ID=$(printf '%s' "\$RESP" \\
+        | grep -o '"resumedAgentId"[[:space:]]*:[[:space:]]*"[^"]*"' \\
+        | head -1 \\
+        | sed -n 's/.*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' \\
+        | eval "\$SAN")
+    if [ -z "\$RESUMED_AGENT_ID" ] && printf '%s' "\$RESP" | grep -q 'resumed from transcript in the background'; then
         RESUMED_AGENT_ID=$(extract to)
     fi
 fi
@@ -532,9 +558,15 @@ if ([string]$json.hook_event_name -eq "PostToolUse" -and $toolName -eq "Agent") 
 # text that could otherwise spoof a resume → an undrainable orphan id; see
 # HANDLER_SH). Native JSON parsing scopes this precisely.
 # VERSION-FRAGILE English phrase; safe-fail to the pre-fix under-count.
+# Current Claude: structured tool_response.resumedAgentId, present exactly when
+# the agent was resumed (absent on "Message queued") — see HANDLER_SH for the
+# survey. It is also the hex id SubagentStop carries, whereas tool_input.to can
+# be a name. The phrase remains as a fallback for older Claude.
 $resumedAgentId = ""
 if ([string]$json.hook_event_name -eq "PostToolUse" -and $toolName -eq "SendMessage") {
-    if ($json.tool_response -and $json.tool_response.message -and ([string]$json.tool_response.message).Contains("resumed from transcript in the background") -and $json.tool_input -and $json.tool_input.to) {
+    if ($json.tool_response -and $json.tool_response.resumedAgentId -and ($json.tool_response.resumedAgentId -is [string])) {
+        $resumedAgentId = [string]$json.tool_response.resumedAgentId
+    } elseif ($json.tool_response -and $json.tool_response.message -and ([string]$json.tool_response.message).Contains("resumed from transcript in the background") -and $json.tool_input -and $json.tool_input.to) {
         $resumedAgentId = [string]$json.tool_input.to
     }
 }
