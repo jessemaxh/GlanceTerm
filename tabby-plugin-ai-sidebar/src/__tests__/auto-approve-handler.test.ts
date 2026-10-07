@@ -307,6 +307,33 @@ d('hook handler (POSIX) — auto-approve exclusion + tab-id recovery', () => {
         expect(files.some(f => f.includes('$') || f.includes('GLANCETERM_TAB_ID'))).toBe(false)
     })
 
+    // The handler must consume its whole stdin even when it has nothing to do
+    // with it. An early `exit` that leaves the payload unread closes the pipe
+    // under the writer — the agent in production, Node in these tests — which
+    // then fails with EPIPE. With a small payload that fits in the pipe buffer
+    // it only fails when the handler happens to exit before the write lands,
+    // which is why it showed up as an intermittent CI failure; a payload far
+    // larger than the buffer makes it deterministic.
+    it('drains stdin when it exits early for an unattributable session', () => {
+        const big = JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Read', session_id: 's', cwd: '/tmp/g', tool_response: 'x'.repeat(4 * 1024 * 1024) })
+        expect(() => execFileSync('/bin/sh', [handlerPath, 'claude'], {
+            input: big,
+            encoding: 'utf8',
+            env: { HOME: tmpHome, PATH: process.env.PATH },   // no GLANCETERM_TAB_ID
+            timeout: 10_000,
+        })).not.toThrow()
+    })
+
+    it('drains stdin past the 1 MiB read cap', () => {
+        const big = JSON.stringify({ hook_event_name: 'PostToolUse', tool_name: 'Read', session_id: 's', cwd: '/tmp/g', tool_response: 'x'.repeat(4 * 1024 * 1024) })
+        expect(() => execFileSync('/bin/sh', [handlerPath, 'claude'], {
+            input: big,
+            encoding: 'utf8',
+            env: { HOME: tmpHome, PATH: process.env.PATH, GLANCETERM_TAB_ID: 'drain-tab' },
+            timeout: 10_000,
+        })).not.toThrow()
+    })
+
     it('env var still wins over argv[2] (Claude/Codex unaffected by the Gemini path)', () => {
         // When the env var is present (claude/codex), it takes precedence and
         // any stray 2nd arg is ignored.

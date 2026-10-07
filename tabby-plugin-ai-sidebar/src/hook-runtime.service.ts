@@ -74,15 +74,25 @@ if [ -z "$TAB_ID" ]; then
     esac
 fi
 
+# Read and discard whatever is left on stdin. EVERY exit path must consume
+# the whole payload: the agent writes it into a pipe, and if we exit with it
+# unread the pipe closes under the writer, which fails with EPIPE. A small
+# payload usually fits in the pipe buffer so this only bites when we exit
+# before the write lands (it surfaced as an intermittent CI failure); a large
+# one — a big tool_response, or anything past our 1 MiB cap — fails every time.
+drain_stdin () { cat >/dev/null 2>&1; }
+
 # No env var / arg = pre-injection session (started before GlanceTerm) or a tab
 # we can't attribute. Emit nothing rather than poisoning a shared "unknown.json".
-if [ -z "$TAB_ID" ] || [ "$TAB_ID" = "unknown" ]; then exit 0; fi
+if [ -z "$TAB_ID" ] || [ "$TAB_ID" = "unknown" ]; then drain_stdin; exit 0; fi
 
 STATE_DIR="\${HOME}/.glanceterm/hooks"
-mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
+mkdir -p "$STATE_DIR" 2>/dev/null || { drain_stdin; exit 0; }
 
-# Cap stdin at 1 MiB so a runaway agent can't blow up our memory.
+# Cap stdin at 1 MiB so a runaway agent can't blow up our memory, then drain
+# the rest so the writer isn't left holding a closed pipe.
 PAYLOAD=$(head -c 1048576)
+drain_stdin
 # Empty-stdin default \`{}\` — without this, an agent that fires the hook
 # with no payload would let the wrapper-JSON writer in the relay branch
 # emit \`{"tab_id":"X","payload":}\` which is invalid JSON, the JS-side
@@ -514,7 +524,9 @@ if (-not $tabId) {
 # No env var / arg = pre-injection session; can't attribute, so silently exit
 # rather than writing to a shared "unknown.json" the watcher would have to
 # disambiguate later.
-if (-not $tabId -or $tabId -eq "unknown") { exit 0 }
+# Consume stdin before exiting, or the agent's write fails with a broken pipe
+# — see drain_stdin in HANDLER_SH.
+if (-not $tabId -or $tabId -eq "unknown") { [Console]::In.ReadToEnd() | Out-Null; exit 0 }
 
 $stateDir = Join-Path $env:USERPROFILE ".glanceterm\\hooks"
 New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
