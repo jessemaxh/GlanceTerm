@@ -77,6 +77,12 @@ export type DriftKind = 'untracked' | 'new-tool' | 'sendmessage'
 export interface DriftFinding {
     kind: DriftKind
     message: string
+    /** True when this points at a CHANGE in Claude's output rather than a
+     *  known, long-standing miscount. Only these are surfaced in the UI —
+     *  `active-after-stop` and `never-spawned` occur a few times a day from
+     *  issues that predate this detector, and showing them would keep the
+     *  notice lit permanently until nobody looked at it. They stay in the log. */
+    notable: boolean
 }
 
 export class DriftDetector {
@@ -140,12 +146,13 @@ export class DriftDetector {
             }
             const id8 = ev.agentId.slice(0, 8)
             this.report(out, `untracked:${ev.tabId}:${ev.agentId}:${stop ?? 'none'}`, 'untracked',
-                `untracked subagent ${id8}${ev.agentType ? ` (${ev.agentType})` : ''} on tab ${tab8} — ${cause}`)
+                `untracked subagent ${id8}${ev.agentType ? ` (${ev.agentType})` : ''} on tab ${tab8} — ${cause}`,
+                cause.startsWith('resumed-uncounted'))
         }
         return out
     }
 
-    private report (out: DriftFinding[], key: string, kind: DriftKind, message: string): void {
+    private report (out: DriftFinding[], key: string, kind: DriftKind, message: string, notable = true): void {
         if (this.reported.has(key)) {
             return
         }
@@ -153,6 +160,6 @@ export class DriftDetector {
             this.reported.clear()
         }
         this.reported.add(key)
-        out.push({ kind, message })
+        out.push({ kind, message, notable })
     }
 }
