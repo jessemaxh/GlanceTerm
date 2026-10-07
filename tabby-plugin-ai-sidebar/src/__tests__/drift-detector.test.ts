@@ -150,3 +150,55 @@ describe('HookWatcher writes [drift] lines', () => {
         expect(run('ad445c223fd587a4a')).toEqual([])
     })
 })
+
+/**
+ * What reaches the UI. Only findings that point at a CHANGE in Claude's output
+ * are surfaced; the known long-standing miscounts stay log-only, otherwise the
+ * notice would be lit every day and stop meaning anything.
+ */
+describe('DriftDetector — which findings are notable', () => {
+    const notable = (d: DriftDetector, e: DriftEvent) => d.observe(e, live).map(f => f.notable)
+
+    it('surfaces resumed-uncounted, the signature of a resume-format change', () => {
+        const d = new DriftDetector()
+        d.observe(ev({ event: 'SubagentStop', agentId: 'n1', toolName: '', at: 1000 * S }), live)
+        d.observe(ev({ event: 'PostToolUse', toolName: 'SendMessage', at: 1600 * S, smResult: 'resumed' }), live)
+        expect(notable(d, ev({ agentId: 'n1', at: 1620 * S }))).toEqual([true])
+    })
+
+    it('keeps the known, long-standing miscounts out of the UI', () => {
+        const d = new DriftDetector()
+        expect(notable(d, ev({ agentId: 'n2', at: 1 * S }))).toEqual([false])           // never-spawned
+        d.observe(ev({ event: 'SubagentStop', agentId: 'n3', toolName: '', at: 10 * S }), live)
+        expect(notable(d, ev({ agentId: 'n3', at: 300 * S }))).toEqual([false])         // active-after-stop
+    })
+
+    it('surfaces new tools and unrecognised SendMessage results', () => {
+        const d = new DriftDetector()
+        expect(notable(d, ev({ toolName: 'BrandNewTool', at: 1 }))).toEqual([true])
+        expect(notable(d, ev({ event: 'PostToolUse', toolName: 'SendMessage', smResult: 'unknown', at: 2 }))).toEqual([true])
+    })
+})
+
+describe('HookWatcher drift notices for the sidebar', () => {
+    const tev = (e: Partial<TraceEvent>): TraceEvent => ({ tab_id: TAB, agent: 'claude', event: 'PostToolUse', ts: 0, ...e } as TraceEvent)
+
+    it('collects a notable finding and clears it on dismiss', () => {
+        const h = new ReplayHarness()
+        const id = 'ad445c223fd587a4a'
+        h.process(tev({ event: 'PostToolUse', tool_name: 'Agent', spawn_agent_id: id, ts: 1000 }))
+        h.process(tev({ event: 'SubagentStop', agent_id: id, ts: 1100 }))
+        h.process(tev({ event: 'PostToolUse', tool_name: 'SendMessage', sm_result: 'unknown', ts: 1600 } as Partial<TraceEvent>))
+        h.process(tev({ event: 'PreToolUse', tool_name: 'Bash', agent_id: id, ts: 1620 }))
+        const notes = h.watcher.getDriftNotices()
+        expect(notes.map(n => n.kind).sort()).toEqual(['sendmessage', 'untracked'])
+        h.watcher.dismissDriftNotices()
+        expect(h.watcher.getDriftNotices()).toEqual([])
+    })
+
+    it('shows nothing for a known miscount alone', () => {
+        const h = new ReplayHarness()
+        h.process(tev({ event: 'PreToolUse', tool_name: 'Bash', agent_id: 'neverspawned00001', ts: 1000 }))
+        expect(h.watcher.getDriftNotices()).toEqual([])
+    })
+})

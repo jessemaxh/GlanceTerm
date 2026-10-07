@@ -531,6 +531,10 @@ export class HookWatcherService implements OnDestroy {
      *  service relies on. See drift-detector.ts. */
     private readonly drift = new DriftDetector()
 
+    /** Notable drift findings since the user last dismissed them, newest last.
+     *  Read by the sidebar to show a notice; bounded so it can't grow. */
+    private driftNotices: { at: number, kind: string, message: string }[] = []
+
     private readonly workflowAgents = new Map<string, Map<string, number>>()
 
     /** Per-tab timestamp (ms) of the `PostToolUse(Workflow)` that armed the tab.
@@ -853,6 +857,17 @@ export class HookWatcherService implements OnDestroy {
      *  never torn down from a read — see WORKFLOW_QUIET_MS. 0 both between waves
      *  and when nothing is running; pair it with {@link getWorkflowStartedAt} to
      *  tell those apart. */
+    /** Notable `[drift]` findings the user has not dismissed yet — evidence
+     *  that Claude's hook output changed and agent status may be inaccurate.
+     *  Same array reference until it changes, so it is cheap to bind. */
+    getDriftNotices (): readonly { at: number, kind: string, message: string }[] {
+        return this.driftNotices
+    }
+
+    dismissDriftNotices (): void {
+        this.driftNotices = []
+    }
+
     getWorkflowInFlight (tabId: string): number {
         const agents = this.workflowAgents.get(tabId)
         if (!agents) {
@@ -1545,6 +1560,10 @@ export class HookWatcherService implements OnDestroy {
                 workflowRunning: this.isWorkflowRunning(parsed.tab_id),
             })) {
                 debugLog.log('warn', 'drift', `${f.kind}: ${f.message}`)
+                if (f.notable) {
+                    this.driftNotices = [...this.driftNotices, { at: eventAt, kind: f.kind, message: f.message }].slice(-20)
+                    changed = true
+                }
             }
             if (parsed.event === 'SessionStart' || parsed.event === 'SessionEnd') {
                 // Same boundary reset for the bg-arrival queue — a stale

@@ -6,6 +6,7 @@ import * as os from 'os'
 import { AppService, BaseTabComponent, ConfigService, MenuItemOptions, NotificationsService, PlatformService } from 'tabby-core'
 
 import { TabMonitor, TabState, TabStatus } from './tab-monitor'
+import { HookWatcherService } from './hook-watcher.service'
 import { UnreadService } from './unread.service'
 import { ScreenshotService } from './screenshot/screenshot.service'
 import { ScreenshotPasteService } from './screenshot/paste.service'
@@ -201,6 +202,11 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
                 <span *ngIf="countDone > 0" class="stat done-stat"><i></i>{{ countDone }} done</span>
                 <span class="stat work"><i></i>{{ countWorking }} working</span>
                 <span class="stat idle muted"><i></i>{{ countIdle }} idle</span>
+                <button *ngIf="driftNotices.length > 0" type="button" class="stat drift-stat"
+                        (click)="showDriftNotices()"
+                        title="Claude's hook output looks different from what GlanceTerm expects — agent status may be inaccurate. Click for details.">
+                    ⚠ status may be off
+                </button>
             </div>
 
             <!-- "AI toolbar" — always rendered. Per-tab AI actions on the left
@@ -1106,6 +1112,18 @@ type FilterId = typeof FilterId[keyof typeof FilterId]
         .sb-footer .stat.attn-stat i   { background: var(--gt-needsyou); }
         .sb-footer .stat.done-stat     { color: var(--gt-done); }
         .sb-footer .stat.done-stat i   { background: var(--gt-done); }
+        /* Hook-format drift notice — pushed to the right, warm colour, and a
+           real button so it is reachable from the keyboard. */
+        .sb-footer .stat.drift-stat {
+            margin-left: auto;
+            border: 0;
+            padding: 0;
+            background: none;
+            font: inherit;
+            color: var(--gt-needsyou);
+            cursor: pointer;
+        }
+        .sb-footer .stat.drift-stat:hover { text-decoration: underline; }
 
         /* ---- bottom action row (screenshot etc.) ----
            Sits below the aggregate-stats footer. Always visible — the button
@@ -1578,6 +1596,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
         private autoApprove: AutoApproveService,
         private ngbModal: NgbModal,
         public sidebarSettingsRegistry: SidebarSettingsRegistry,
+        private hookWatcher: HookWatcherService,
     ) {}
 
     /**
@@ -1658,6 +1677,35 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     /** Whether to show Tabby's "X is still running. Close?" prompt on quit.
      *  Default false (read as `=== true`) — see AiSidebarConfigProvider and the
      *  vendored TerminalTabComponent.canClose() that honours it. */
+    /** Notable findings from the hook-format drift detector. */
+    get driftNotices (): readonly { at: number, kind: string, message: string }[] {
+        return this.hookWatcher.getDriftNotices()
+    }
+
+    /** Explain the drift notice and let the user dismiss it. The full trail is
+     *  always in debug.log under `[drift]`; this is only the nudge to look. */
+    async showDriftNotices (): Promise<void> {
+        const items = this.driftNotices
+        if (!items.length) {
+            return
+        }
+        const lines = items.slice(-6).map(n => `• ${n.message}`).join('\n\n')
+        const more = items.length > 6 ? `\n\n…and ${items.length - 6} more.` : ''
+        const r = await this.platform.showMessageBox({
+            type: 'warning',
+            message: 'Claude\'s hook output has changed',
+            detail: 'GlanceTerm saw something it does not recognise, so agent and shell status may be inaccurate until it is updated.\n\n'
+                + lines + more
+                + '\n\nFull details: ~/.glanceterm/debug.log (lines tagged [drift]).',
+            buttons: ['Dismiss', 'Keep showing'],
+            defaultId: 0,
+            cancelId: 1,
+        })
+        if (r.response === 0) {
+            this.hookWatcher.dismissDriftNotices()
+        }
+    }
+
     get warnOnCloseRunning (): boolean {
         return this.config.store?.ai?.warnOnCloseRunning === true
     }
