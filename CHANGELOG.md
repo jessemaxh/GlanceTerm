@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.12](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.11...v0.3.12) (2026-10-07)
+
+
+### Bug Fixes
+
+* **hooks:** count re-woken subagents again, and log [drift] on hook format changes ([#127](https://github.com/jessemaxh/GlanceTerm/issues/127)) ([9729990](https://github.com/jessemaxh/GlanceTerm/commit/972999077d7849a5906fcbd19e638880038dcc32))
+
 ## [0.3.11](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.10...v0.3.11) (2026-10-04)
 
 
