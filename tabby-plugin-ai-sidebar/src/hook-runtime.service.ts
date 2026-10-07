@@ -217,11 +217,50 @@ fi
 # safe to pass to \`extract\` (see the regex-interpolation caveat there); the
 # real tool_input.to is the FIRST "to":"…" in the payload (message-embedded
 # occurrences are backslash-escaped and don't match), which \`head -1\` takes.
+#
+# CURRENT Claude returns a structured result instead, and the phrase above
+# appears in only a minority of resumes. Surveyed across every SendMessage
+# result on a real machine:
+#   117  "Resuming agent <id>"                                      resumedAgentId
+#    58  "had no active task; resumed from transcript in the bg…"   resumedAgentId
+#    15  "was stopped (completed); resumed it in the background…"   resumedAgentId
+#     6  "was stopped (failed); resumed it in the background…"      resumedAgentId
+#    41  "Message queued for delivery to <id> at its next round."   (absent)
+# So \`resumedAgentId\` is present exactly when a resume happened and absent on
+# the queued case — the same discriminator the phrase was standing in for, but
+# structured rather than English prose. The phrase matched 58 of 196 resumes;
+# the rest left the row reading "ready" while the subagent worked.
+#
+# It is also the RIGHT id. tool_input.to can be a NAME ("vidmate-research"),
+# while the matching SubagentStop carries the hex agent_id — so adding \`to\` put
+# an id in the set that no stop could ever drain. resumedAgentId is the hex id.
+#
+# Same security scoping as above: read ONLY inside the tool_response slice. An
+# escaped occurrence inside a string (\\"resumedAgentId\\") cannot match
+# the unescaped key pattern. Falls back to the phrase for older Claude.
 RESUMED_AGENT_ID=""
+SM_RESULT=""
 if [ "\$EVENT" = "PostToolUse" ] && [ "\$TOOL_NAME" = "SendMessage" ]; then
     RESP=$(printf '%s' "\$PAYLOAD" | tr '\\n' ' ' | grep -o '"tool_response".*')
-    if printf '%s' "\$RESP" | grep -q 'resumed from transcript in the background'; then
+    RESUMED_AGENT_ID=$(printf '%s' "\$RESP" \\
+        | grep -o '"resumedAgentId"[[:space:]]*:[[:space:]]*"[^"]*"' \\
+        | head -1 \\
+        | sed -n 's/.*:[[:space:]]*"\\([^"]*\\)".*/\\1/p' \\
+        | eval "\$SAN")
+    if [ -z "\$RESUMED_AGENT_ID" ] && printf '%s' "\$RESP" | grep -q 'resumed from transcript in the background'; then
         RESUMED_AGENT_ID=$(extract to)
+    fi
+    # Drift signal. Classify every SendMessage result so a FUTURE format change
+    # shows up as "unknown" in the log the day it ships, instead of surfacing
+    # weeks later as rows that silently read "ready". HookWatcher logs it.
+    if [ -n "\$RESUMED_AGENT_ID" ]; then
+        SM_RESULT=resumed
+    elif printf '%s' "\$RESP" | grep -q 'Message queued'; then
+        SM_RESULT=queued
+    elif printf '%s' "\$RESP" | grep -qE '"success"[[:space:]]*:[[:space:]]*false'; then
+        SM_RESULT=error
+    elif [ -n "\$RESP" ]; then
+        SM_RESULT=unknown
     fi
 fi
 
@@ -346,8 +385,8 @@ OUT="\$STATE_DIR/\$TAB_ID.log"
 # other concurrent appenders. Our records are ~250 bytes — well under the
 # limit — so two handler processes firing simultaneously cannot interleave
 # bytes mid-record.
-printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s","ts":%s,"bg":%s,"interrupted":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s","resumed_agent_id":"%s","monitor_task_id":"%s","monitor_timeout_ms":%s,"stop_task_id":"%s","model":"%s","auto_approved":%s,"source":"%s"}\\n' \\
-    "\$TAB_ID" "\$AGENT" "\$EVENT" "\$MATCHER" "\$TOOL_NAME" "\$SESSION_ID" "\$CWD" "\$TRANSCRIPT_PATH" "\$TS" "\$BG" "\$INTERRUPTED" "\$AGENT_ID" "\$AGENT_TYPE" "\$SPAWN_AGENT_ID" "\$RESUMED_AGENT_ID" "\$MONITOR_TASK_ID" "\$MONITOR_TIMEOUT_MS" "\$STOP_TASK_ID" "\$MODEL" "\$AUTO_APPROVED" "\$SOURCE" \\
+printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s","ts":%s,"bg":%s,"interrupted":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s","resumed_agent_id":"%s","monitor_task_id":"%s","monitor_timeout_ms":%s,"stop_task_id":"%s","model":"%s","auto_approved":%s,"source":"%s","sm_result":"%s"}\\n' \\
+    "\$TAB_ID" "\$AGENT" "\$EVENT" "\$MATCHER" "\$TOOL_NAME" "\$SESSION_ID" "\$CWD" "\$TRANSCRIPT_PATH" "\$TS" "\$BG" "\$INTERRUPTED" "\$AGENT_ID" "\$AGENT_TYPE" "\$SPAWN_AGENT_ID" "\$RESUMED_AGENT_ID" "\$MONITOR_TASK_ID" "\$MONITOR_TIMEOUT_MS" "\$STOP_TASK_ID" "\$MODEL" "\$AUTO_APPROVED" "\$SOURCE" "\$SM_RESULT" \\
     >> "\$OUT" 2>/dev/null
 
 # Auto-approve permission prompts (Claude + Codex). When the user has
@@ -532,11 +571,23 @@ if ([string]$json.hook_event_name -eq "PostToolUse" -and $toolName -eq "Agent") 
 # text that could otherwise spoof a resume → an undrainable orphan id; see
 # HANDLER_SH). Native JSON parsing scopes this precisely.
 # VERSION-FRAGILE English phrase; safe-fail to the pre-fix under-count.
+# Current Claude: structured tool_response.resumedAgentId, present exactly when
+# the agent was resumed (absent on "Message queued") — see HANDLER_SH for the
+# survey. It is also the hex id SubagentStop carries, whereas tool_input.to can
+# be a name. The phrase remains as a fallback for older Claude.
 $resumedAgentId = ""
+$smResult = ""
 if ([string]$json.hook_event_name -eq "PostToolUse" -and $toolName -eq "SendMessage") {
-    if ($json.tool_response -and $json.tool_response.message -and ([string]$json.tool_response.message).Contains("resumed from transcript in the background") -and $json.tool_input -and $json.tool_input.to) {
+    if ($json.tool_response -and $json.tool_response.resumedAgentId -and ($json.tool_response.resumedAgentId -is [string])) {
+        $resumedAgentId = [string]$json.tool_response.resumedAgentId
+    } elseif ($json.tool_response -and $json.tool_response.message -and ([string]$json.tool_response.message).Contains("resumed from transcript in the background") -and $json.tool_input -and $json.tool_input.to) {
         $resumedAgentId = [string]$json.tool_input.to
     }
+    # Drift signal — see HANDLER_SH.
+    if ($resumedAgentId) { $smResult = "resumed" }
+    elseif ($json.tool_response -and $json.tool_response.message -and ([string]$json.tool_response.message).Contains("Message queued")) { $smResult = "queued" }
+    elseif ($json.tool_response -and $json.tool_response.success -eq $false) { $smResult = "error" }
+    elseif ($json.tool_response) { $smResult = "unknown" }
 }
 
 # Monitor task lifecycle — mirror of the HANDLER_SH block. PowerShell can
@@ -633,6 +684,7 @@ $out = [ordered]@{
     # SessionStart source (\`compact\` etc.) — lets HookWatcher keep a
     # post-compaction SessionStart from flipping the row to idle. See above.
     source          = [string]$source
+    sm_result       = [string]$smResult
 }
 
 # IMPORTANT — write the per-tab .log line HERE (before any PermissionRequest
