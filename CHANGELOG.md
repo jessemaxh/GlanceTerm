@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.13](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.12...v0.3.13) (2026-10-07)
+
+
+### Features
+
+* **sidebar:** show a footer notice when Claude's hook output changes ([#129](https://github.com/jessemaxh/GlanceTerm/issues/129)) ([15699f7](https://github.com/jessemaxh/GlanceTerm/commit/15699f772eb724f53fdc2d1ad0f17d05bd23152c))
+
 ## [0.3.12](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.11...v0.3.12) (2026-10-07)
 
 
