@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import * as os from 'os'
 import * as path from 'path'
 import * as fs from 'fs'
-import { execFileSync } from 'child_process'
+import { execFileSync, spawn } from 'child_process'
 
 import { HookRuntimeService } from '../hook-runtime.service'
 
@@ -314,24 +314,32 @@ d('hook handler (POSIX) — auto-approve exclusion + tab-id recovery', () => {
     // it only fails when the handler happens to exit before the write lands,
     // which is why it showed up as an intermittent CI failure; a payload far
     // larger than the buffer makes it deterministic.
-    it('drains stdin when it exits early for an unattributable session', () => {
-        const big = JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Read', session_id: 's', cwd: '/tmp/g', tool_response: 'x'.repeat(4 * 1024 * 1024) })
-        expect(() => execFileSync('/bin/sh', [handlerPath, 'claude'], {
-            input: big,
-            encoding: 'utf8',
-            env: { HOME: tmpHome, PATH: process.env.PATH },   // no GLANCETERM_TAB_ID
-            timeout: 10_000,
-        })).not.toThrow()
+    //
+    // These two use async spawn, not execFileSync: on macOS, execFileSync with
+    // a multi-MiB `input` now and then never closes the child's stdin after
+    // writing it all, so the handler's drain waits forever for an EOF that
+    // never comes (seen ~1 run in 20, with the drain holding every byte).
+    // Agents spawn hooks asynchronously and close stdin, as done here.
+    const feed = (input: string, env: NodeJS.ProcessEnv) => new Promise<{ code: number | null, stdinError: Error | null }>((resolve, reject) => {
+        const child = spawn('/bin/sh', [handlerPath, 'claude'], { env })
+        let stdinError: Error | null = null
+        child.stdin.on('error', e => { stdinError = e })
+        child.stdout.resume()
+        child.stderr.resume()
+        const timer = setTimeout(() => { child.kill(); reject(new Error('handler did not exit')) }, 10_000)
+        child.on('close', code => { clearTimeout(timer); resolve({ code, stdinError }) })
+        child.stdin.end(input)
     })
 
-    it('drains stdin past the 1 MiB read cap', () => {
+    it('drains stdin when it exits early for an unattributable session', async () => {
+        const big = JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'Read', session_id: 's', cwd: '/tmp/g', tool_response: 'x'.repeat(4 * 1024 * 1024) })
+        // no GLANCETERM_TAB_ID
+        expect(await feed(big, { HOME: tmpHome, PATH: process.env.PATH })).toEqual({ code: 0, stdinError: null })
+    })
+
+    it('drains stdin past the 1 MiB read cap', async () => {
         const big = JSON.stringify({ hook_event_name: 'PostToolUse', tool_name: 'Read', session_id: 's', cwd: '/tmp/g', tool_response: 'x'.repeat(4 * 1024 * 1024) })
-        expect(() => execFileSync('/bin/sh', [handlerPath, 'claude'], {
-            input: big,
-            encoding: 'utf8',
-            env: { HOME: tmpHome, PATH: process.env.PATH, GLANCETERM_TAB_ID: 'drain-tab' },
-            timeout: 10_000,
-        })).not.toThrow()
+        expect(await feed(big, { HOME: tmpHome, PATH: process.env.PATH, GLANCETERM_TAB_ID: 'drain-tab' })).toEqual({ code: 0, stdinError: null })
     })
 
     it('env var still wins over argv[2] (Claude/Codex unaffected by the Gemini path)', () => {

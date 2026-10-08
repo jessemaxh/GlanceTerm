@@ -135,6 +135,10 @@ interface HookStatusFile {
      *  matched no known shape — fed to DriftDetector as an early warning that
      *  Claude changed the format. */
     sm_result?: string
+    /** Pid of the claude process that fired this event (`$CLAUDE_PID`, which
+     *  Claude exports to every hook). Empty for older Claude and other agents.
+     *  Used to recognise events from a NESTED claude — see isNestedClaudeEvent. */
+    claude_pid?: string
 }
 
 /** Per-tab snapshot the rest of the plugin consumes. */
@@ -336,6 +340,62 @@ export type SubagentEvent =
  * event doesn't change state, so callers can cheaply detect "no change"
  * via reference equality.
  */
+/**
+ * Did this event come from a claude OTHER than the one that owns the tab?
+ *
+ * Every tab's shell exports GLANCETERM_TAB_ID, and anything started from that
+ * shell inherits it — including a claude that the tab's own agent launches,
+ * e.g. a subagent running `claude -p "review this diff"` from its Bash tool.
+ * That nested claude's hooks then write into THIS tab's log. Observed on a real
+ * tab five times in two days: its `SessionStart(startup)` reset the tab's live
+ * subagent count (dropping an agent that was still working), its `SessionEnd`
+ * turned the row into "shell" while the tab's claude was alive, and its
+ * session id, transcript and model replaced the tab's own — so the token chip
+ * showed the reviewer's tokens, and auto-resume would have reopened the
+ * finished reviewer instead of the real conversation.
+ *
+ * The owner is the claude TabMonitor finds running in the tab's shell. Keyed on
+ * pid rather than session id because a pid survives /clear, compaction and
+ * resume, all of which legitimately change the session id. Not decided by
+ * walking the process tree inside the hook: hooks run detached and async, so by
+ * the time a nested `claude -p`'s SessionEnd hook runs, that claude has often
+ * exited and the tree no longer leads anywhere.
+ *
+ * Conservative by design — anything uncertain counts as NOT nested, which is
+ * exactly today's behaviour: no pid on the event (older Claude), no owner known
+ * yet (first poll hasn't run), or an owner that has exited (a new claude was
+ * started in the tab and TabMonitor hasn't caught up).
+ */
+export function isNestedClaudeEvent (
+    eventPid: number | null,
+    ownerPid: number | undefined,
+    isAlive: (pid: number) => boolean,
+): boolean {
+    if (!eventPid || !ownerPid || eventPid === ownerPid) {
+        return false
+    }
+    return isAlive(ownerPid)
+}
+
+/** Parse the handler's `claude_pid` field: a positive integer, else null. */
+export function parseClaudePid (raw: unknown): number | null {
+    if (typeof raw !== 'string' || !/^[0-9]+$/.test(raw)) {
+        return null
+    }
+    const n = Number(raw)
+    return n > 0 ? n : null
+}
+
+/** `kill(pid, 0)` probes without signalling. EPERM still means it exists. */
+export function pidIsAlive (pid: number): boolean {
+    try {
+        process.kill(pid, 0)
+        return true
+    } catch (e: any) {
+        return e?.code === 'EPERM'
+    }
+}
+
 export function reduceSubagentSet (
     set: ReadonlySet<string>,
     ev: SubagentEvent,
@@ -530,6 +590,15 @@ export class HookWatcherService implements OnDestroy {
     /** Logs `[drift]` lines when Claude's hook output stops matching what this
      *  service relies on. See drift-detector.ts. */
     private readonly drift = new DriftDetector()
+
+    /** Per-tab pid of the claude that owns the tab, as found by TabMonitor's
+     *  process scan. Events from any other claude are ignored — see
+     *  isNestedClaudeEvent. */
+    private readonly tabOwnerPid = new Map<string, number>()
+    /** (tab, pid) pairs already reported as nested, so the log says it once. */
+    private readonly nestedReported = new Set<string>()
+    /** Liveness probe; a field so tests can substitute it. */
+    isPidAlive: (pid: number) => boolean = pidIsAlive
 
     /** Notable drift findings since the user last dismissed them, newest last.
      *  Read by the sidebar to show a notice; bounded so it can't grow. */
@@ -857,6 +926,16 @@ export class HookWatcherService implements OnDestroy {
      *  never torn down from a read — see WORKFLOW_QUIET_MS. 0 both between waves
      *  and when nothing is running; pair it with {@link getWorkflowStartedAt} to
      *  tell those apart. */
+    /** Record which claude owns a tab (null when the tab has no claude). Called
+     *  by TabMonitor on every poll with the pid its process scan found. */
+    setTabOwnerPid (tabId: string, pid: number | null): void {
+        if (pid && pid > 0) {
+            this.tabOwnerPid.set(tabId, pid)
+        } else {
+            this.tabOwnerPid.delete(tabId)
+        }
+    }
+
     /** Notable `[drift]` findings the user has not dismissed yet — evidence
      *  that Claude's hook output changed and agent status may be inaccurate.
      *  Same array reference until it changes, so it is cheap to bind. */
@@ -1236,6 +1315,8 @@ export class HookWatcherService implements OnDestroy {
         // unbounded in count. Mirror the same delete shape the other
         // per-tab side-trackers above use.
         const tombDropped = this.subagentTombstones.delete(tabId)
+        // Not part of the "changed" result: ownership is bookkeeping, not UI.
+        this.tabOwnerPid.delete(tabId)
         const wfDropped = this.workflowAgents.delete(tabId)
         const wfStartDropped = this.workflowStartedAt.delete(tabId)
         this.workflowLastAgentAt.delete(tabId)
@@ -1341,6 +1422,26 @@ export class HookWatcherService implements OnDestroy {
     private processEvent (parsed: HookStatusFile, adapter: HookAdapter): boolean {
         const eventAt = (parsed.ts || 0) * 1000
         let changed = false
+
+        // An event from a nested claude (one this tab's own agent launched) must
+        // not touch this tab at all — not its status, subagent count, session id,
+        // transcript or model. Its tool activity needs no help to show: the
+        // parent's own Bash call that launched it already holds the row at
+        // working. Permission prompts are unaffected — auto-approve is decided
+        // in the handler, before this point.
+        const claudePid = parseClaudePid(parsed.claude_pid)
+        const ownerPid = this.tabOwnerPid.get(parsed.tab_id)
+        if (adapter.id === 'claude' && isNestedClaudeEvent(claudePid, ownerPid, this.isPidAlive)) {
+            const key = `${parsed.tab_id}:${claudePid}`
+            if (!this.nestedReported.has(key)) {
+                if (this.nestedReported.size > 1000) {
+                    this.nestedReported.clear()
+                }
+                this.nestedReported.add(key)
+                debugLog.log('debug', 'nested', `${parsed.tab_id.slice(0, 8)} ignoring events from nested claude pid ${claudePid} (tab owner ${ownerPid}, session ${(parsed.session_id ?? '').slice(0, 8)})`)
+            }
+            return false
+        }
 
         // The subagent / monitor / bg-arrival side-channel below keys off fields
         // that ONLY Claude's documented hook payload defines (`agent_id`,

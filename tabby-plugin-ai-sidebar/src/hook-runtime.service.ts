@@ -395,8 +395,20 @@ OUT="\$STATE_DIR/\$TAB_ID.log"
 # other concurrent appenders. Our records are ~250 bytes — well under the
 # limit — so two handler processes firing simultaneously cannot interleave
 # bytes mid-record.
-printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s","ts":%s,"bg":%s,"interrupted":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s","resumed_agent_id":"%s","monitor_task_id":"%s","monitor_timeout_ms":%s,"stop_task_id":"%s","model":"%s","auto_approved":%s,"source":"%s","sm_result":"%s"}\\n' \\
-    "\$TAB_ID" "\$AGENT" "\$EVENT" "\$MATCHER" "\$TOOL_NAME" "\$SESSION_ID" "\$CWD" "\$TRANSCRIPT_PATH" "\$TS" "\$BG" "\$INTERRUPTED" "\$AGENT_ID" "\$AGENT_TYPE" "\$SPAWN_AGENT_ID" "\$RESUMED_AGENT_ID" "\$MONITOR_TASK_ID" "\$MONITOR_TIMEOUT_MS" "\$STOP_TASK_ID" "\$MODEL" "\$AUTO_APPROVED" "\$SOURCE" "\$SM_RESULT" \\
+# Pid of the claude process that fired this event. Claude exports CLAUDE_PID
+# into every hook's environment (the same env it gives its Bash tool). A NESTED
+# claude — one the tab's own agent launched, e.g. \`claude -p\` from a Bash
+# tool — inherits this tab's GLANCETERM_TAB_ID, so its events land in this
+# tab's log; its pid is how HookWatcher tells them apart from the tab owner's.
+# Digits only, else empty (older Claude, other agents) → today's behaviour.
+CLAUDE_PID_FIELD=""
+case "\${CLAUDE_PID:-}" in
+    ''|*[!0-9]*) : ;;
+    *) CLAUDE_PID_FIELD="\${CLAUDE_PID}" ;;
+esac
+
+printf '{"tab_id":"%s","agent":"%s","event":"%s","matcher":"%s","tool_name":"%s","session_id":"%s","cwd":"%s","transcript_path":"%s","ts":%s,"bg":%s,"interrupted":%s,"agent_id":"%s","agent_type":"%s","spawn_agent_id":"%s","resumed_agent_id":"%s","monitor_task_id":"%s","monitor_timeout_ms":%s,"stop_task_id":"%s","model":"%s","auto_approved":%s,"source":"%s","sm_result":"%s","claude_pid":"%s"}\\n' \\
+    "\$TAB_ID" "\$AGENT" "\$EVENT" "\$MATCHER" "\$TOOL_NAME" "\$SESSION_ID" "\$CWD" "\$TRANSCRIPT_PATH" "\$TS" "\$BG" "\$INTERRUPTED" "\$AGENT_ID" "\$AGENT_TYPE" "\$SPAWN_AGENT_ID" "\$RESUMED_AGENT_ID" "\$MONITOR_TASK_ID" "\$MONITOR_TIMEOUT_MS" "\$STOP_TASK_ID" "\$MODEL" "\$AUTO_APPROVED" "\$SOURCE" "\$SM_RESULT" "\$CLAUDE_PID_FIELD" \\
     >> "\$OUT" 2>/dev/null
 
 # Auto-approve permission prompts (Claude + Codex). When the user has
@@ -697,6 +709,8 @@ $out = [ordered]@{
     # post-compaction SessionStart from flipping the row to idle. See above.
     source          = [string]$source
     sm_result       = [string]$smResult
+    # Pid of the claude that fired this event — see HANDLER_SH. Digits only.
+    claude_pid      = $(if ($env:CLAUDE_PID -match '^[0-9]+$') { [string]$env:CLAUDE_PID } else { "" })
 }
 
 # IMPORTANT — write the per-tab .log line HERE (before any PermissionRequest
