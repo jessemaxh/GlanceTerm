@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.14](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.13...v0.3.14) (2026-10-08)
+
+
+### Bug Fixes
+
+* **hooks:** always drain stdin so the agent's write never hits a closed pipe ([#131](https://github.com/jessemaxh/GlanceTerm/issues/131)) ([a15de8a](https://github.com/jessemaxh/GlanceTerm/commit/a15de8a1a54cce25da2458a54b0684a14e3150d5))
+* **sidebar:** ignore hook events from a nested claude ([#133](https://github.com/jessemaxh/GlanceTerm/issues/133)) ([b9cb7f6](https://github.com/jessemaxh/GlanceTerm/commit/b9cb7f6ea8a62da6ca05bdf607c9bbae99cfbd8b))
+
 ## [0.3.13](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.12...v0.3.13) (2026-10-07)
 
 
