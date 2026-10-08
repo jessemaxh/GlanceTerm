@@ -45,7 +45,7 @@ const EXPECTED_KEYS = [
     'tab_id', 'agent', 'event', 'matcher', 'tool_name', 'session_id', 'cwd',
     'transcript_path', 'ts', 'bg', 'interrupted', 'agent_id', 'agent_type',
     'spawn_agent_id', 'resumed_agent_id', 'monitor_task_id', 'monitor_timeout_ms',
-    'stop_task_id', 'model', 'auto_approved', 'source', 'sm_result',
+    'stop_task_id', 'model', 'auto_approved', 'source', 'sm_result', 'claude_pid',
 ].sort()
 
 const TAB_ID = '33333333-3333-4333-8333-333333333333'
@@ -53,10 +53,14 @@ let oldHome: string | undefined
 let oldUserProfile: string | undefined
 let tempHome: string
 
-async function runHandler (runtime: HookRuntimeService, agent: string, payload: unknown): Promise<void> {
+async function runHandler (runtime: HookRuntimeService, agent: string, payload: unknown, extraEnv: Record<string, string> = {}): Promise<void> {
+    // Drop an inherited CLAUDE_PID: when the suite itself runs inside Claude
+    // Code (a developer's terminal) it is set, in CI it is not, and the
+    // handler copies it into every record. Tests that care pass it explicitly.
+    const { CLAUDE_PID: _inherited, ...baseEnv } = process.env
     await new Promise<void>((resolve, reject) => {
         const child = spawn(runtime.shHandlerPath, [agent], {
-            env: { ...process.env, HOME: tempHome, GLANCETERM_TAB_ID: TAB_ID },
+            env: { ...baseEnv, HOME: tempHome, GLANCETERM_TAB_ID: TAB_ID, ...extraEnv },
             stdio: ['pipe', 'pipe', 'pipe'],
         })
         let stderr = ''
@@ -331,7 +335,7 @@ const CASES: Case[] = [
 ]
 
 describe('real sh handler — emitted NDJSON field set matches the documented contract', () => {
-    it.each(CASES)('$name emits EXACTLY the documented 21-key record', async ({ agent, payload, expects }) => {
+    it.each(CASES)('$name emits EXACTLY the documented record shape', async ({ agent, payload, expects }) => {
         const runtime = new HookRuntimeService()
         await runtime.ensureReady()
         await runHandler(runtime, agent, payload)
@@ -374,5 +378,35 @@ describe('real sh handler — emitted NDJSON field set matches the documented co
         expect(a).toEqual(EXPECTED_KEYS)
         expect(b).toEqual(EXPECTED_KEYS)
         expect(a).toEqual(b)
+    })
+})
+
+/**
+ * claude_pid — the pid of the claude that fired the event, taken from the
+ * CLAUDE_PID Claude exports to every hook. HookWatcher compares it with the
+ * tab's owner to ignore events from a nested claude (one the tab's own agent
+ * launched). Anything that is not a plain positive integer must come out empty,
+ * which HookWatcher treats as "unknown → old behaviour".
+ */
+describe('real sh handler — claude_pid', () => {
+    const payload = { hook_event_name: 'SessionStart', source: 'startup', session_id: 's', cwd: '/p' }
+    const emit = async (env: Record<string, string>) => {
+        const runtime = new HookRuntimeService()
+        await runtime.ensureReady()
+        await runHandler(runtime, 'claude', payload, env)
+        return (await lastEmitted(runtime)).claude_pid
+    }
+
+    it('copies CLAUDE_PID into the record', async () => {
+        expect(await emit({ CLAUDE_PID: '12443' })).toBe('12443')
+    })
+
+    it('is empty when Claude does not provide it', async () => {
+        expect(await emit({})).toBe('')
+    })
+
+    it('is empty for anything that is not a plain number', async () => {
+        expect(await emit({ CLAUDE_PID: '12a' })).toBe('')
+        expect(await emit({ CLAUDE_PID: '1" ,"x":"y' })).toBe('')
     })
 })

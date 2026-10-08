@@ -1138,6 +1138,13 @@ export class TabMonitor implements OnDestroy {
             if (truePid) for (const a of ancestorsOf(truePid, snapshot, 6)) push(a)
             const envId = await this.readEnvTabId(t.inner, envCandidates)
             tabId = envId ?? sess.glancetermTabId
+            // Tell HookWatcher which claude owns this tab, so events from a
+            // NESTED claude — one this tab's agent launched, e.g. `claude -p`
+            // from a Bash tool — can't rewrite the tab's status, subagent
+            // count or session. See isNestedClaudeEvent.
+            if (tabId) {
+                this.hooks.setTabOwnerPid(tabId, aiTool === 'claude' ? aiPid : null)
+            }
             const snap = tabId ? this.hooks.getStatus(tabId) : null
             if (snap) {
                 model = snap.model
