@@ -60,6 +60,8 @@ export interface DriftEvent {
     agentId: string
     agentType: string
     smResult: string
+    /** The agent a SendMessage resumed, when the handler could tell. */
+    resumedAgentId: string
     source: string
     /** ms since epoch */
     at: number
@@ -89,8 +91,12 @@ export class DriftDetector {
     private readonly reported = new Set<string>()
     /** tab -> agent id -> last SubagentStop time */
     private readonly stoppedAt = new Map<string, Map<string, number>>()
-    /** tab -> time of the main agent's last SendMessage */
-    private readonly lastSendMessageAt = new Map<string, number>()
+    /** tab -> time of the main agent's last SendMessage that may have resumed
+     *  an agent without saying which: an unrecognised result, or a resume the
+     *  handler matched by phrase but found no id for. */
+    private readonly lastUnattributedResumeAt = new Map<string, number>()
+    /** tab -> agent id -> time a SendMessage last resumed it by id */
+    private readonly resumedAt = new Map<string, Map<string, number>>()
 
     /** Feed one live event. Returns the findings it produced, already deduped,
      *  so the caller only has to log them. */
@@ -100,7 +106,8 @@ export class DriftDetector {
 
         if (ev.event === 'SessionEnd' || (ev.event === 'SessionStart' && ev.source !== 'compact')) {
             this.stoppedAt.delete(ev.tabId)
-            this.lastSendMessageAt.delete(ev.tabId)
+            this.lastUnattributedResumeAt.delete(ev.tabId)
+            this.resumedAt.delete(ev.tabId)
         }
 
         if (ev.toolName && !ev.toolName.startsWith('mcp__') && !KNOWN_CLAUDE_TOOLS.has(ev.toolName)) {
@@ -109,7 +116,21 @@ export class DriftDetector {
         }
 
         if (ev.toolName === 'SendMessage' && ev.event === 'PostToolUse' && !ev.agentId) {
-            this.lastSendMessageAt.set(ev.tabId, ev.at)
+            // Only a SendMessage that could have woken THIS agent unnoticed
+            // counts as evidence of a format change. A queued message or an
+            // error wakes nobody, and a resume that names its agent is already
+            // counted for that agent — blaming it for another agent's wake-up
+            // was a false "hook output changed" (2026-10-29, 2026-11-05).
+            if (ev.smResult === 'resumed' && ev.resumedAgentId) {
+                let m = this.resumedAt.get(ev.tabId)
+                if (!m) {
+                    m = new Map()
+                    this.resumedAt.set(ev.tabId, m)
+                }
+                m.set(ev.resumedAgentId, ev.at)
+            } else if (ev.smResult === 'resumed' || ev.smResult === 'unknown') {
+                this.lastUnattributedResumeAt.set(ev.tabId, ev.at)
+            }
             if (ev.smResult === 'unknown') {
                 this.report(out, 'sm:unknown', 'sendmessage',
                     `SendMessage result was neither a resume nor a queued message (tab ${tab8}) — the result format may have changed; check the handler's resume detection`)
@@ -137,11 +158,11 @@ export class DriftDetector {
             if (stop !== undefined && ev.at - stop <= TRAILING_EVENT_MS) {
                 return out
             }
-            const sm = this.lastSendMessageAt.get(ev.tabId)
+            const resumedSince = (at: number | undefined) => at !== undefined && stop !== undefined && at >= stop && ev.at - at <= RESUME_WINDOW_MS
             let cause = 'active-after-stop: working again after its SubagentStop with no resume'
             if (stop === undefined) {
                 cause = 'never-spawned: no spawn or resume signal was seen for it'
-            } else if (sm !== undefined && sm >= stop && ev.at - sm <= RESUME_WINDOW_MS) {
+            } else if (resumedSince(this.lastUnattributedResumeAt.get(ev.tabId)) || resumedSince(this.resumedAt.get(ev.tabId)?.get(ev.agentId))) {
                 cause = 'resumed-uncounted: re-woken by SendMessage but not re-counted — the resume signal may have changed'
             }
             const id8 = ev.agentId.slice(0, 8)
