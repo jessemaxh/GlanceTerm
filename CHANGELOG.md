@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.15](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.14...v0.3.15) (2026-11-05)
+
+
+### Bug Fixes
+
+* **sidebar:** stop the false "hook output changed" notice, and let notices expire ([#134](https://github.com/jessemaxh/GlanceTerm/issues/134)) ([0123e1c](https://github.com/jessemaxh/GlanceTerm/commit/0123e1cb71e1d213d5aa74ebe30806c0b935c42a))
+
 ## [0.3.14](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.13...v0.3.14) (2026-10-08)
 
 
