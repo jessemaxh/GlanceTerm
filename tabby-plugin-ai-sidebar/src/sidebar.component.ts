@@ -2589,7 +2589,7 @@ export class AiSidebarComponent implements OnInit, OnDestroy {
     subagentTitle (s: TabState): string {
         const n = s.subagentCount
         const noun = n === 1 ? 'subagent' : 'subagents'
-        return `${n} ${noun} in flight (spawned via the Agent/Task tool, not yet retired by a matching SubagentStop).`
+        return `${n} ${noun} in flight (spawned via the Agent/Task tool and not yet stopped, or back at work after stopping).`
     }
 
     bgJobTitle (s: TabState): string {

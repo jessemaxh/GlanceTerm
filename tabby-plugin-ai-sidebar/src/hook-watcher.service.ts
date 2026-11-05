@@ -224,6 +224,15 @@ const SUBAGENT_TOMBSTONE_TTL_MS = 60_000
  */
 const WORKFLOW_AGENT_STALE_MS = 900_000
 
+/** A self-woken subagent (see `wokenAgents`) with no event for this long stops
+ *  being counted. The backstop for one that wakes, works and never stops again:
+ *  without it the tab would read "working" for good. Its next event, if any,
+ *  counts it again. Same horizon as workflow agents. */
+const WOKEN_AGENT_STALE_MS = 900_000
+
+/** Cap on remembered stopped subagents per tab. */
+const MAX_STOPPED_AGENTS = 1_000
+
 /**
  * How long a running workflow may see NO event from any of its agents before we
  * call the run finished. Only consulted when nothing is currently in flight —
@@ -609,6 +618,33 @@ export class HookWatcherService implements OnDestroy {
 
     private readonly workflowAgents = new Map<string, Map<string, number>>()
 
+    /**
+     * Per-tab subagents that came back to work after their SubagentStop with no
+     * resume signal: agent id -> last event time (ms).
+     *
+     * Claude re-wakes a subagent when a background task it started finishes —
+     * a Monitor firing, a background Bash completing — and fires no hook for
+     * the wake. The agent just starts emitting tool events again. The exact
+     * count in `liveAgentIds` cannot see that, so the row read "ready" while the
+     * agent worked; on one tab it happened more than ten times in a morning.
+     *
+     * Kept apart from `liveAgentIds` so the authoritative count stays exact,
+     * and contained the same way as workflow agents:
+     *   1. Only agents this tab spawned or resumed and then saw stop — an
+     *      unknown agent_id is never counted (the orphan-id leak).
+     *   2. Only after the 60 s tombstone, so the trailing event many agents
+     *      emit right after their stop does not revive them.
+     *   3. Never on a tab with a workflow running; those agents are tracked
+     *      separately.
+     * Removed by the agent's next stop, a spawn or resume of the same id, a
+     * session boundary or a reset, and stops counting after
+     * WOKEN_AGENT_STALE_MS of silence.
+     */
+    private readonly wokenAgents = new Map<string, Map<string, number>>()
+    /** Per-tab subagents that left the count via a stop: agent id -> stop time.
+     *  Only these can count as self-woken. */
+    private readonly stoppedAgents = new Map<string, Map<string, number>>()
+
     /** Per-tab timestamp (ms) of the `PostToolUse(Workflow)` that armed the tab.
      *  Not restamped by a later launch while one is already running, so the
      *  elapsed timer cannot jump backwards. */
@@ -806,7 +842,98 @@ export class HookWatcherService implements OnDestroy {
      *  SubagentStop for them yet. TabMonitor uses this to keep the row
      *  green even after the main agent fires Stop. */
     getSubagentInFlight (tabId: string): number {
-        return this.liveAgentIds.get(tabId)?.size ?? 0
+        return (this.liveAgentIds.get(tabId)?.size ?? 0) + this.getWokenInFlight(tabId)
+    }
+
+    /** Self-woken subagents still counted — see `wokenAgents`. */
+    private getWokenInFlight (tabId: string): number {
+        const agents = this.wokenAgents.get(tabId)
+        if (!agents) {
+            return 0
+        }
+        const now = this.now()
+        for (const [id, seen] of agents) {
+            if (now - seen > WOKEN_AGENT_STALE_MS) {
+                agents.delete(id)
+            }
+        }
+        if (agents.size === 0) {
+            this.wokenAgents.delete(tabId)
+        }
+        return agents.size
+    }
+
+    /**
+     * Fold one live event into `wokenAgents`. Called after the live set has
+     * absorbed the event; `wasLive` says whether the event's agent was in the
+     * live set BEFORE it, which a stop has just undone. Returns true if the
+     * count changed.
+     */
+    private trackWokenAgent (parsed: HookStatusFile, eventAt: number, wasLive: boolean): boolean {
+        const tabId = parsed.tab_id
+        const short = tabId.slice(0, 8)
+        if (parsed.event === 'SessionStart' || parsed.event === 'SessionEnd') {
+            this.stoppedAgents.delete(tabId)
+            return this.wokenAgents.delete(tabId)
+        }
+        const woken = this.wokenAgents.get(tabId)
+        let changed = false
+        // A spawn or resume puts the id in the live set; drop it here so it is
+        // not counted twice.
+        for (const id of [parsed.spawn_agent_id, parsed.resumed_agent_id]) {
+            if (id) {
+                this.stoppedAgents.get(tabId)?.delete(id)
+                if (woken?.delete(id)) {
+                    changed = true
+                }
+            }
+        }
+        const agentId = parsed.agent_id
+        if (!agentId) {
+            return changed
+        }
+        if (parsed.event === 'SubagentStop' || parsed.event === 'StopFailure') {
+            const wasWoken = !!woken?.delete(agentId)
+            if (wasWoken) {
+                debugLog.log('debug', 'subagent', `${short} -stop woken ${agentId.slice(0, 8)}`)
+                changed = true
+            }
+            if (wasLive || wasWoken) {
+                let stopped = this.stoppedAgents.get(tabId)
+                if (!stopped) {
+                    stopped = new Map()
+                    this.stoppedAgents.set(tabId, stopped)
+                }
+                stopped.delete(agentId)
+                stopped.set(agentId, eventAt)
+                if (stopped.size > MAX_STOPPED_AGENTS) {
+                    stopped.delete(stopped.keys().next().value)
+                }
+            }
+            return changed
+        }
+        if (parsed.event !== 'PreToolUse' && parsed.event !== 'PostToolUse') {
+            return changed
+        }
+        if (woken?.has(agentId)) {
+            woken.set(agentId, eventAt)
+            return changed
+        }
+        const stopTs = this.stoppedAgents.get(tabId)?.get(agentId)
+        if (
+            stopTs === undefined
+            || eventAt - stopTs <= SUBAGENT_TOMBSTONE_TTL_MS
+            || !!this.liveAgentIds.get(tabId)?.has(agentId)
+            || this.isWorkflowRunning(tabId)
+            || parsed.agent_type === 'workflow-subagent'
+        ) {
+            return changed
+        }
+        const agents = woken ?? new Map<string, number>()
+        agents.set(agentId, eventAt)
+        this.wokenAgents.set(tabId, agents)
+        debugLog.log('debug', 'subagent', `${short} +wake ${agentId.slice(0, 8)} (${Math.round((eventAt - stopTs) / 1000)}s after its stop)`)
+        return true
     }
 
     /**
@@ -1328,8 +1455,10 @@ export class HookWatcherService implements OnDestroy {
         const wfDropped = this.workflowAgents.delete(tabId)
         const wfStartDropped = this.workflowStartedAt.delete(tabId)
         this.workflowLastAgentAt.delete(tabId)
+        const wokenDropped = this.wokenAgents.delete(tabId)
+        this.stoppedAgents.delete(tabId)
         return snapshotDropped || liveDropped || offsetDropped || bgDropped || monDropped || tombDropped
-            || wfDropped || wfStartDropped
+            || wfDropped || wfStartDropped || wokenDropped
     }
 
     /**
@@ -1408,6 +1537,8 @@ export class HookWatcherService implements OnDestroy {
             && !this.pendingBgArrivals.has(tabId)
             && !this.subagentTombstones.has(tabId)
             && !this.hasClearableWorkflowState(tabId)
+            && !this.wokenAgents.has(tabId)
+            && !this.stoppedAgents.has(tabId)
         ) return false
         this.liveAgentIds.delete(tabId)
         this.liveMonitorTaskIds.delete(tabId)
@@ -1416,6 +1547,8 @@ export class HookWatcherService implements OnDestroy {
         this.workflowAgents.delete(tabId)
         this.workflowStartedAt.delete(tabId)
         this.workflowLastAgentAt.delete(tabId)
+        this.wokenAgents.delete(tabId)
+        this.stoppedAgents.delete(tabId)
         return true
     }
 
@@ -1558,6 +1691,7 @@ export class HookWatcherService implements OnDestroy {
             if (parsed.event === 'SessionStart' || parsed.event === 'SessionEnd') {
                 events.push({ kind: 'reset' })
             }
+            const wasLive = !!parsed.agent_id && !!this.liveAgentIds.get(parsed.tab_id)?.has(parsed.agent_id)
             if (events.length > 0) {
                 const prev = this.liveAgentIds.get(parsed.tab_id) ?? new Set<string>()
                 let next: ReadonlySet<string> = prev
@@ -1651,6 +1785,9 @@ export class HookWatcherService implements OnDestroy {
                     changed = true
                 }
             }
+            if (this.trackWokenAgent(parsed, eventAt, wasLive)) {
+                changed = true
+            }
             // Early warning for hook-format changes. Runs after the live set has
             // absorbed this event, so `tracked` reflects any spawn/resume on the
             // same line. Live events only — this whole branch is gated on
@@ -1666,6 +1803,9 @@ export class HookWatcherService implements OnDestroy {
                 source: parsed.source ?? '',
                 at: eventAt,
             }, {
+                // Judged against the exact count only. Counting a self-woken
+                // agent would otherwise also cover for a broken resume signal
+                // and silence the warning that the format changed.
                 tracked: !!parsed.agent_id && !!this.liveAgentIds.get(parsed.tab_id)?.has(parsed.agent_id),
                 workflowRunning: this.isWorkflowRunning(parsed.tab_id),
             })) {
