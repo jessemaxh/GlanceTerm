@@ -175,6 +175,9 @@ const TAB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
  *  not to spin disk. */
 const RESCAN_MS = 30_000
 
+/** How long a drift notice stays in the sidebar footer if nobody dismisses it. */
+const DRIFT_NOTICE_TTL_MS = 24 * 60 * 60_000
+
 /** How long a pending bg-shell arrival (PreToolUse(Bash,
  *  run_in_background:true) without a matching new child PID yet) is
  *  allowed to sit in the queue before being discarded. Generous because
@@ -938,8 +941,13 @@ export class HookWatcherService implements OnDestroy {
 
     /** Notable `[drift]` findings the user has not dismissed yet — evidence
      *  that Claude's hook output changed and agent status may be inaccurate.
-     *  Same array reference until it changes, so it is cheap to bind. */
-    getDriftNotices (): readonly { at: number, kind: string, message: string }[] {
+     *  Same array reference until it changes, so it is cheap to bind.
+     *  A notice expires a day after its event: left undismissed it would
+     *  otherwise stay lit for the whole app run. */
+    getDriftNotices (now = Date.now()): readonly { at: number, kind: string, message: string }[] {
+        if (this.driftNotices.length && this.driftNotices[0].at < now - DRIFT_NOTICE_TTL_MS) {
+            this.driftNotices = this.driftNotices.filter(n => n.at >= now - DRIFT_NOTICE_TTL_MS)
+        }
         return this.driftNotices
     }
 
@@ -1654,6 +1662,7 @@ export class HookWatcherService implements OnDestroy {
                 agentId: parsed.agent_id ?? '',
                 agentType: parsed.agent_type ?? '',
                 smResult: parsed.sm_result ?? '',
+                resumedAgentId: parsed.resumed_agent_id ?? '',
                 source: parsed.source ?? '',
                 at: eventAt,
             }, {

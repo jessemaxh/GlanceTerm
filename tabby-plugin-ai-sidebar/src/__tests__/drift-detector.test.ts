@@ -9,7 +9,7 @@ const S = 1000
 
 const ev = (e: Partial<DriftEvent>): DriftEvent => ({
     tabId: TAB, event: 'PreToolUse', toolName: 'Bash', agentId: '', agentType: '',
-    smResult: '', source: '', at: 0, ...e,
+    smResult: '', resumedAgentId: '', source: '', at: 0, ...e,
 })
 const live = { tracked: false, workflowRunning: false }
 const kinds = (d: DriftDetector, e: DriftEvent, ctx = live) => d.observe(e, ctx).map(f => f.kind)
@@ -66,6 +66,32 @@ describe('DriftDetector — untracked subagent activity', () => {
         d.observe(ev({ event: 'PostToolUse', toolName: 'SendMessage', at: 990 * S, smResult: 'queued' }), live)
         d.observe(ev({ event: 'SubagentStop', agentId: 'a6', toolName: '', at: 1000 * S }), live)
         expect(text(d, ev({ agentId: 'a6', at: 1061 * S }))).toContain('active-after-stop')
+    })
+
+    // The two false "hook output changed" notices of 2026-10-29 and 2026-11-05:
+    // the agent woke on its own, and a SendMessage in the window was for
+    // someone else or woke nobody. Neither points at a format change.
+    it('does not blame a resume that named a different agent', () => {
+        const d = new DriftDetector()
+        d.observe(ev({ event: 'SubagentStop', agentId: 'ab5f4898', toolName: '', at: 1000 * S }), live)
+        d.observe(ev({ event: 'PostToolUse', toolName: 'SendMessage', smResult: 'resumed', resumedAgentId: 'a8bd5bca', at: 1500 * S }), live)
+        const f = d.observe(ev({ agentId: 'ab5f4898', at: 1520 * S }), live)
+        expect(f.map(x => x.message).join()).toContain('active-after-stop')
+        expect(f.map(x => x.notable)).toEqual([false])
+    })
+
+    it('does not blame a queued message', () => {
+        const d = new DriftDetector()
+        d.observe(ev({ event: 'SubagentStop', agentId: 'ae85e729', toolName: '', at: 1000 * S }), live)
+        d.observe(ev({ event: 'PostToolUse', toolName: 'SendMessage', smResult: 'queued', at: 1070 * S }), live)
+        expect(text(d, ev({ agentId: 'ae85e729', at: 1098 * S }))).toContain('active-after-stop')
+    })
+
+    it('still reports a resume that named this agent but was not counted', () => {
+        const d = new DriftDetector()
+        d.observe(ev({ event: 'SubagentStop', agentId: 'a9', toolName: '', at: 1000 * S }), live)
+        d.observe(ev({ event: 'PostToolUse', toolName: 'SendMessage', smResult: 'resumed', resumedAgentId: 'a9', at: 1500 * S }), live)
+        expect(text(d, ev({ agentId: 'a9', at: 1520 * S }))).toContain('resumed-uncounted')
     })
 
     it('forgets stops at a fresh session but not at compaction', () => {
@@ -190,10 +216,30 @@ describe('HookWatcher drift notices for the sidebar', () => {
         h.process(tev({ event: 'SubagentStop', agent_id: id, ts: 1100 }))
         h.process(tev({ event: 'PostToolUse', tool_name: 'SendMessage', sm_result: 'unknown', ts: 1600 } as Partial<TraceEvent>))
         h.process(tev({ event: 'PreToolUse', tool_name: 'Bash', agent_id: id, ts: 1620 }))
-        const notes = h.watcher.getDriftNotices()
+        const now = 1700_000
+        const notes = h.watcher.getDriftNotices(now)
         expect(notes.map(n => n.kind).sort()).toEqual(['sendmessage', 'untracked'])
         h.watcher.dismissDriftNotices()
+        expect(h.watcher.getDriftNotices(now)).toEqual([])
+    })
+
+    it('shows nothing when the SendMessage resumed a different agent', () => {
+        const h = new ReplayHarness()
+        const id = 'ab5f4898aaaaaaaaa'
+        h.process(tev({ event: 'PostToolUse', tool_name: 'Agent', spawn_agent_id: id, ts: 1000 }))
+        h.process(tev({ event: 'SubagentStop', agent_id: id, ts: 1100 }))
+        h.process(tev({ event: 'PostToolUse', tool_name: 'SendMessage', sm_result: 'resumed', resumed_agent_id: 'a8bd5bcaaaaaaaaaa', ts: 1600 } as Partial<TraceEvent>))
+        h.process(tev({ event: 'PreToolUse', tool_name: 'Bash', agent_id: id, ts: 1620 }))
         expect(h.watcher.getDriftNotices()).toEqual([])
+    })
+
+    it('expires a notice a day after its event', () => {
+        const h = new ReplayHarness()
+        h.process(tev({ event: 'PostToolUse', tool_name: 'SendMessage', sm_result: 'unknown', ts: 1600 } as Partial<TraceEvent>))
+        const notes = h.watcher.getDriftNotices(1600_000 + 60_000)
+        expect(notes).toHaveLength(1)
+        expect(h.watcher.getDriftNotices(1600_000 + 60_000)).toBe(notes)
+        expect(h.watcher.getDriftNotices(1600_000 + 25 * 3600_000)).toEqual([])
     })
 
     it('shows nothing for a known miscount alone', () => {
