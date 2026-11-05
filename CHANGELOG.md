@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.16](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.15...v0.3.16) (2026-11-05)
+
+
+### Bug Fixes
+
+* **sidebar:** count a subagent that its own background task woke after it stopped ([#136](https://github.com/jessemaxh/GlanceTerm/issues/136)) ([eb9b93f](https://github.com/jessemaxh/GlanceTerm/commit/eb9b93fb2ee9ec7dd88d4516c2e7196248376019))
+
 ## [0.3.15](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.14...v0.3.15) (2026-11-05)
 
 
