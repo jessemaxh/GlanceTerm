@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.17](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.16...v0.3.17) (2026-11-07)
+
+
+### Bug Fixes
+
+* show the update-ready prompt at most once a day ([#138](https://github.com/jessemaxh/GlanceTerm/issues/138)) ([37d9bd1](https://github.com/jessemaxh/GlanceTerm/commit/37d9bd17652c507e7ae553cef9157e84393e3af5))
+
 ## [0.3.16](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.15...v0.3.16) (2026-11-05)
 
 
