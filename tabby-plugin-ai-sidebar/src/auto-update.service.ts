@@ -7,6 +7,19 @@ const FIRST_CHECK_DELAY_MS = 8_000
 /** Re-check cadence for a long-running window. Releases land on the order of
  *  days, so 6h keeps an always-open window current without being noisy. */
 const INTERVAL_HOURS = 6
+/** The "update is ready" prompt shows at most once per this window, across
+ *  relaunches. electron-updater re-emits `update-downloaded` on every check
+ *  while a build is staged, and releases can land several times a day — the
+ *  update installs on quit anyway, so one reminder a day is plenty. */
+export const PROMPT_INTERVAL_MS = 24 * 3_600_000
+/** localStorage key holding when the prompt last showed (epoch ms). */
+const LAST_PROMPT_KEY = 'glanceterm.autoUpdate.lastPromptAt'
+
+/** Whether to show the restart prompt now, given when it last showed. A
+ *  timestamp in the future (clock moved back) counts as stale, not as "wait". */
+export function shouldPrompt (lastPromptAt: number | null, now: number): boolean {
+    return lastPromptAt === null || lastPromptAt > now || now - lastPromptAt >= PROMPT_INTERVAL_MS
+}
 
 /**
  * In-app auto-update driver (renderer side).
@@ -21,8 +34,8 @@ const INTERVAL_HOURS = 6
  * interval. GitHub releases are the single source of truth — there is no config
  * to maintain (cf. the dormant JSON-config {@link UpdateCheckService}).
  *
- * On `updater:update-downloaded` it offers an immediate restart; declining is
- * fine because the update installs on quit regardless. Any updater error
+ * On `updater:update-downloaded` it offers an immediate restart, at most once
+ * a day; declining is fine because the update installs on quit regardless. Any updater error
  * (unreachable feed, unpacked dev app, signature mismatch …) is swallowed —
  * a broken update path must never disrupt normal terminal use (fail-open).
  */
@@ -88,10 +101,11 @@ export class AutoUpdateService implements OnDestroy {
     }
 
     private async onDownloaded (): Promise<void> {
-        if (this.prompting) {
+        if (this.prompting || !shouldPrompt(this.getLastPromptAt(), Date.now())) {
             return
         }
         this.prompting = true
+        this.setLastPromptAt(Date.now())
         try {
             const r = await this.platform.showMessageBox({
                 // Tabby's MessageBoxOptions only allows 'warning' | 'error';
@@ -108,6 +122,23 @@ export class AutoUpdateService implements OnDestroy {
             }
         } finally {
             this.prompting = false
+        }
+    }
+
+    private getLastPromptAt (): number | null {
+        try {
+            const v = Number(localStorage.getItem(LAST_PROMPT_KEY))
+            return Number.isFinite(v) && v > 0 ? v : null
+        } catch {
+            return null
+        }
+    }
+
+    private setLastPromptAt (at: number): void {
+        try {
+            localStorage.setItem(LAST_PROMPT_KEY, String(at))
+        } catch {
+            /* private mode / quota — non-fatal, we just may prompt again */
         }
     }
 
