@@ -930,9 +930,33 @@ export class TabMonitor implements OnDestroy {
         //    `ppid === truePID`) only returns claude's OWN children (zsh,
         //    caffeinate). If we only inspect children we never see claude.
         let children: ChildProcessInfo[] = []
-        try {
-            children = await withTimeout(Promise.resolve(sess.getChildProcesses()), PTY_IPC_TIMEOUT_MS, []) ?? []
-        } catch { /* swallow */ }
+        // tabby-electron resolves truePID ONCE per pty proxy, 2 s after it is
+        // created. A window reload re-creates the proxy for a pty whose shell
+        // is already running an agent, so truePID latches onto that agent; once
+        // the user quits it and starts another, truePID is a dead pid for good
+        // and the new agent is never a candidate. When it has died, fall back
+        // to the shell leader and its live children from the snapshot.
+        let shellPid: number | null = null
+        if (truePid !== null && snapshot.pidParent.size > 0 && !snapshot.pidParent.has(truePid)) {
+            try {
+                const pid = sess.pty?.getPID ? await withTimeout(Promise.resolve(sess.pty.getPID()), PTY_IPC_TIMEOUT_MS, null) : null
+                if (typeof pid === 'number' && pid > 0) {
+                    shellPid = pid
+                }
+            } catch { /* swallow */ }
+        }
+        const fg = resolveForeground(truePid, shellPid, snapshot)
+        if (fg.childPids) {
+            truePid = fg.pid
+            if (truePid !== null) {
+                this.shellPidCache.set(t.inner, truePid)
+            }
+            children = fg.childPids.map(pid => ({ pid, ppid: truePid ?? -1, command: '' }))
+        } else {
+            try {
+                children = await withTimeout(Promise.resolve(sess.getChildProcesses()), PTY_IPC_TIMEOUT_MS, []) ?? []
+            } catch { /* swallow */ }
+        }
 
         // Candidates: truePID + its ANCESTORS + its DIRECT CHILDREN.
         //
@@ -1748,7 +1772,7 @@ async function realCommandsForWindows (pids: number[]): Promise<Map<number, stri
  * `parentPidOfFromSnapshot`. Wmic is deprecated; a batched PowerShell
  * query would help, but Windows isn't where the perf reports come from.
  */
-interface ProcessTreeSnapshot {
+export interface ProcessTreeSnapshot {
     pidParent: Map<number, number>
 }
 
@@ -1813,6 +1837,30 @@ async function buildProcessTreeSnapshot (): Promise<ProcessTreeSnapshot> {
  * zsh. We want to inspect claude even though it isn't the foreground
  * leader at this moment.
  */
+/**
+ * Pick the pid to scan from. Normally the pty's truePID. When truePID has died
+ * but the shell leader is alive (see makeState), use the shell and return its
+ * live children from the snapshot, since tabby's getChildProcesses() keys off
+ * the dead truePID. `childPids` is null when no fallback applies.
+ */
+export function resolveForeground (
+    truePid: number | null,
+    shellPid: number | null,
+    snapshot: ProcessTreeSnapshot,
+): { pid: number | null, childPids: number[] | null } {
+    if (truePid === null || shellPid === null || snapshot.pidParent.size === 0 ||
+        snapshot.pidParent.has(truePid) || !snapshot.pidParent.has(shellPid)) {
+        return { pid: truePid, childPids: null }
+    }
+    const childPids: number[] = []
+    for (const [pid, ppid] of snapshot.pidParent) {
+        if (ppid === shellPid) {
+            childPids.push(pid)
+        }
+    }
+    return { pid: shellPid, childPids }
+}
+
 function ancestorsOf (pid: number, snapshot: ProcessTreeSnapshot, maxDepth: number): number[] {
     const out: number[] = []
     let cur = pid
