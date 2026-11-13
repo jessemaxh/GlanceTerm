@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.18](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.17...v0.3.18) (2026-11-13)
+
+
+### Bug Fixes
+
+* detect an agent restarted in a tab after a window reload ([#140](https://github.com/jessemaxh/GlanceTerm/issues/140)) ([61b7cd8](https://github.com/jessemaxh/GlanceTerm/commit/61b7cd8f82fbe9bac49edbf1369f658d9b449256))
+
 ## [0.3.17](https://github.com/jessemaxh/GlanceTerm/compare/v0.3.16...v0.3.17) (2026-11-07)
 
 
